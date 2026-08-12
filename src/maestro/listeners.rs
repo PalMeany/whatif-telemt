@@ -3,35 +3,37 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::sync::{RwLock, Semaphore, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{ProxyConfig, RstOnCloseMode};
-use crate::crypto::SecureRandom;
-use crate::ip_tracker::UserIpTracker;
 use crate::proxy::ClientHandler;
-use crate::proxy::route_mode::RouteRuntimeController;
-use crate::proxy::shared_state::ProxySharedState;
 use crate::startup::{COMPONENT_LISTENERS_BIND, StartupTracker};
-use crate::stats::beobachten::BeobachtenStore;
-use crate::stats::{ReplayChecker, Stats};
-use crate::stream::BufferPool;
-use crate::tls_front::TlsFrontCache;
-use crate::transport::middle_proxy::MePool;
 use crate::transport::socket::set_linger_zero;
-use crate::transport::{ListenOptions, UpstreamManager, create_listener, find_listener_processes};
+use crate::transport::{ListenOptions, create_listener, find_listener_processes};
 
+use super::generation::RuntimeGeneration;
 use super::helpers::{
     expected_handshake_close_description, is_expected_handshake_eof, peer_close_description,
     print_proxy_links,
 };
 
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+/// Runs the Unix socket accept loop against the active runtime generation.
+pub(crate) use unix::spawn_unix_accept_loop;
+
+/// Owns the sockets bound during process startup.
 pub(crate) struct BoundListeners {
+    /// TCP listeners and their immutable bind-time settings.
     pub(crate) listeners: Vec<BoundTcpListener>,
-    pub(crate) has_unix_listener: bool,
+    #[cfg(unix)]
+    /// The optional Unix listener transferred to its accept loop after startup.
+    pub(crate) unix_listener: Option<UnixListener>,
 }
 
 /// A TCP listener and the connection settings fixed when it was bound.
@@ -71,6 +73,7 @@ fn tcp_mss_runtime_profile(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Binds configured TCP and Unix listeners without starting accept loops.
 pub(crate) async fn bind_listeners(
     config: &Arc<ProxyConfig>,
     decision_ipv4_dc: bool,
@@ -78,21 +81,6 @@ pub(crate) async fn bind_listeners(
     detected_ip_v4: Option<IpAddr>,
     detected_ip_v6: Option<IpAddr>,
     startup_tracker: &Arc<StartupTracker>,
-    config_rx: watch::Receiver<Arc<ProxyConfig>>,
-    admission_rx: watch::Receiver<bool>,
-    stats: Arc<Stats>,
-    upstream_manager: Arc<UpstreamManager>,
-    replay_checker: Arc<ReplayChecker>,
-    buffer_pool: Arc<BufferPool>,
-    rng: Arc<SecureRandom>,
-    me_pool: Option<Arc<MePool>>,
-    me_pool_runtime: Arc<RwLock<Option<Arc<MePool>>>>,
-    route_runtime: Arc<RouteRuntimeController>,
-    tls_cache: Option<Arc<TlsFrontCache>>,
-    ip_tracker: Arc<UserIpTracker>,
-    beobachten: Arc<BeobachtenStore>,
-    shared: Arc<ProxySharedState>,
-    max_connections: Arc<Semaphore>,
 ) -> Result<BoundListeners, Box<dyn Error>> {
     startup_tracker
         .start_component(
@@ -265,7 +253,8 @@ pub(crate) async fn bind_listeners(
         print_proxy_links(&host, port, config);
     }
 
-    let mut has_unix_listener = false;
+    #[cfg(unix)]
+    let mut unix_listener_out = None;
     #[cfg(unix)]
     if let Some(ref unix_path) = config.server.listen_unix_sock {
         let _ = tokio::fs::remove_file(unix_path).await;
@@ -298,122 +287,13 @@ pub(crate) async fn bind_listeners(
             info!("Listening on unix:{}", unix_path);
         }
 
-        has_unix_listener = true;
-
-        let mut config_rx_unix: watch::Receiver<Arc<ProxyConfig>> = config_rx.clone();
-        let admission_rx_unix = admission_rx.clone();
-        let stats = stats.clone();
-        let upstream_manager = upstream_manager.clone();
-        let replay_checker = replay_checker.clone();
-        let buffer_pool = buffer_pool.clone();
-        let rng = rng.clone();
-        let me_pool = me_pool.clone();
-        let me_pool_runtime = me_pool_runtime.clone();
-        let route_runtime = route_runtime.clone();
-        let tls_cache = tls_cache.clone();
-        let ip_tracker = ip_tracker.clone();
-        let beobachten = beobachten.clone();
-        let shared = shared.clone();
-        let max_connections_unix = max_connections.clone();
-
-        tokio::spawn(async move {
-            let unix_conn_counter = Arc::new(std::sync::atomic::AtomicU64::new(1));
-
-            loop {
-                match unix_listener.accept().await {
-                    Ok((stream, _)) => {
-                        if !*admission_rx_unix.borrow() {
-                            drop(stream);
-                            continue;
-                        }
-                        let accept_permit_timeout_ms =
-                            config_rx_unix.borrow().server.accept_permit_timeout_ms;
-                        let permit = if accept_permit_timeout_ms == 0 {
-                            match max_connections_unix.clone().acquire_owned().await {
-                                Ok(permit) => permit,
-                                Err(_) => {
-                                    error!("Connection limiter is closed");
-                                    break;
-                                }
-                            }
-                        } else {
-                            match tokio::time::timeout(
-                                Duration::from_millis(accept_permit_timeout_ms),
-                                max_connections_unix.clone().acquire_owned(),
-                            )
-                            .await
-                            {
-                                Ok(Ok(permit)) => permit,
-                                Ok(Err(_)) => {
-                                    error!("Connection limiter is closed");
-                                    break;
-                                }
-                                Err(_) => {
-                                    stats.increment_accept_permit_timeout_total();
-                                    debug!(
-                                        timeout_ms = accept_permit_timeout_ms,
-                                        "Dropping accepted unix connection: permit wait timeout"
-                                    );
-                                    drop(stream);
-                                    continue;
-                                }
-                            }
-                        };
-                        let conn_id =
-                            unix_conn_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let fake_peer =
-                            SocketAddr::from(([127, 0, 0, 1], (conn_id % 65535) as u16));
-
-                        let config = config_rx_unix.borrow_and_update().clone();
-                        let stats = stats.clone();
-                        let upstream_manager = upstream_manager.clone();
-                        let replay_checker = replay_checker.clone();
-                        let buffer_pool = buffer_pool.clone();
-                        let rng = rng.clone();
-                        let me_pool = me_pool.clone();
-                        let me_pool_runtime = me_pool_runtime.clone();
-                        let route_runtime = route_runtime.clone();
-                        let tls_cache = tls_cache.clone();
-                        let ip_tracker = ip_tracker.clone();
-                        let beobachten = beobachten.clone();
-                        let shared = shared.clone();
-                        let proxy_protocol_enabled = config.server.proxy_protocol;
-
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            if let Err(e) =
-                                crate::proxy::client::handle_client_stream_with_shared_and_pool_runtime(
-                                stream,
-                                fake_peer,
-                                config,
-                                stats,
-                                upstream_manager,
-                                replay_checker,
-                                buffer_pool,
-                                rng,
-                                me_pool,
-                                Some(me_pool_runtime),
-                                route_runtime,
-                                tls_cache,
-                                ip_tracker,
-                                beobachten,
-                                shared,
-                                proxy_protocol_enabled,
-                            )
-                            .await
-                            {
-                                debug!(error = %e, "Unix socket connection error");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!("Unix socket accept error: {}", e);
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                }
-            }
-        });
+        unix_listener_out = Some(unix_listener);
     }
+
+    #[cfg(unix)]
+    let has_unix_listener = unix_listener_out.is_some();
+    #[cfg(not(unix))]
+    let has_unix_listener = false;
 
     startup_tracker
         .complete_component(
@@ -428,54 +308,29 @@ pub(crate) async fn bind_listeners(
 
     Ok(BoundListeners {
         listeners,
-        has_unix_listener,
+        #[cfg(unix)]
+        unix_listener: unix_listener_out,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Starts one TCP accept loop per bound listener.
 pub(crate) fn spawn_tcp_accept_loops(
     listeners: Vec<BoundTcpListener>,
-    config_rx: watch::Receiver<Arc<ProxyConfig>>,
-    admission_rx: watch::Receiver<bool>,
-    stats: Arc<Stats>,
-    upstream_manager: Arc<UpstreamManager>,
-    replay_checker: Arc<ReplayChecker>,
-    buffer_pool: Arc<BufferPool>,
-    rng: Arc<SecureRandom>,
-    me_pool: Option<Arc<MePool>>,
-    me_pool_runtime: Arc<RwLock<Option<Arc<MePool>>>>,
-    route_runtime: Arc<RouteRuntimeController>,
-    tls_cache: Option<Arc<TlsFrontCache>>,
-    ip_tracker: Arc<UserIpTracker>,
-    beobachten: Arc<BeobachtenStore>,
-    shared: Arc<ProxySharedState>,
-    max_connections: Arc<Semaphore>,
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
 ) {
     for bound_listener in listeners {
         let listener = bound_listener.listener;
         let listener_proxy_protocol = bound_listener.proxy_protocol;
         let tls_response_fragment_size = bound_listener.tls_response_fragment_size;
-        let mut config_rx: watch::Receiver<Arc<ProxyConfig>> = config_rx.clone();
-        let admission_rx_tcp = admission_rx.clone();
-        let stats = stats.clone();
-        let upstream_manager = upstream_manager.clone();
-        let replay_checker = replay_checker.clone();
-        let buffer_pool = buffer_pool.clone();
-        let rng = rng.clone();
-        let me_pool = me_pool.clone();
-        let me_pool_runtime = me_pool_runtime.clone();
-        let route_runtime = route_runtime.clone();
-        let tls_cache = tls_cache.clone();
-        let ip_tracker = ip_tracker.clone();
-        let beobachten = beobachten.clone();
-        let shared = shared.clone();
-        let max_connections_tcp = max_connections.clone();
+        let active_runtime = active_runtime.clone();
 
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, peer_addr)) => {
-                        let rst_mode = config_rx.borrow().general.rst_on_close;
+                        let runtime = active_runtime.load_full();
+                        let config = runtime.config();
+                        let rst_mode = config.general.rst_on_close;
                         #[cfg(unix)]
                         let raw_fd = {
                             use std::os::unix::io::AsRawFd;
@@ -484,15 +339,14 @@ pub(crate) fn spawn_tcp_accept_loops(
                         if matches!(rst_mode, RstOnCloseMode::Errors | RstOnCloseMode::Always) {
                             let _ = set_linger_zero(&stream);
                         }
-                        if !*admission_rx_tcp.borrow() {
+                        if !*runtime.admission_rx.borrow() {
                             debug!(peer = %peer_addr, "Admission gate closed, dropping connection");
                             drop(stream);
                             continue;
                         }
-                        let accept_permit_timeout_ms =
-                            config_rx.borrow().server.accept_permit_timeout_ms;
+                        let accept_permit_timeout_ms = config.server.accept_permit_timeout_ms;
                         let permit = if accept_permit_timeout_ms == 0 {
-                            match max_connections_tcp.clone().acquire_owned().await {
+                            match runtime.max_connections.clone().acquire_owned().await {
                                 Ok(permit) => permit,
                                 Err(_) => {
                                     error!("Connection limiter is closed");
@@ -502,7 +356,7 @@ pub(crate) fn spawn_tcp_accept_loops(
                         } else {
                             match tokio::time::timeout(
                                 Duration::from_millis(accept_permit_timeout_ms),
-                                max_connections_tcp.clone().acquire_owned(),
+                                runtime.max_connections.clone().acquire_owned(),
                             )
                             .await
                             {
@@ -512,7 +366,7 @@ pub(crate) fn spawn_tcp_accept_loops(
                                     break;
                                 }
                                 Err(_) => {
-                                    stats.increment_accept_permit_timeout_total();
+                                    runtime.stats.increment_accept_permit_timeout_total();
                                     debug!(
                                         peer = %peer_addr,
                                         timeout_ms = accept_permit_timeout_ms,
@@ -523,24 +377,23 @@ pub(crate) fn spawn_tcp_accept_loops(
                                 }
                             }
                         };
-                        let config = config_rx.borrow_and_update().clone();
-                        let stats = stats.clone();
-                        let upstream_manager = upstream_manager.clone();
-                        let replay_checker = replay_checker.clone();
-                        let buffer_pool = buffer_pool.clone();
-                        let rng = rng.clone();
-                        let me_pool = me_pool.clone();
-                        let me_pool_runtime = me_pool_runtime.clone();
-                        let route_runtime = route_runtime.clone();
-                        let tls_cache = tls_cache.clone();
-                        let ip_tracker = ip_tracker.clone();
-                        let beobachten = beobachten.clone();
-                        let shared = shared.clone();
+                        let stats = runtime.stats.clone();
+                        let upstream_manager = runtime.upstream_manager.clone();
+                        let replay_checker = runtime.replay_checker.clone();
+                        let buffer_pool = runtime.buffer_pool.clone();
+                        let rng = runtime.rng.clone();
+                        let me_pool = runtime.me_pool.clone();
+                        let me_pool_runtime = runtime.me_pool_runtime.clone();
+                        let route_runtime = runtime.route_runtime.clone();
+                        let tls_cache = runtime.tls_cache.clone();
+                        let ip_tracker = runtime.ip_tracker.clone();
+                        let beobachten = runtime.beobachten.clone();
+                        let shared = runtime.proxy_shared.clone();
                         let proxy_protocol_enabled = listener_proxy_protocol;
                         let real_peer_report = Arc::new(std::sync::Mutex::new(None));
                         let real_peer_report_for_handler = real_peer_report.clone();
 
-                        tokio::spawn(async move {
+                        let _ = runtime.spawn_session(async move {
                             let _permit = permit;
                             if let Err(e) = ClientHandler::new_with_shared(
                                 stream,
