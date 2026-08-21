@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+#
+# Builds telemt from this working tree, unlike the repository's default
+# Dockerfile, which downloads a published release artifact. Use it to deploy a
+# fork whose binary is not published yet:
+#
+#   docker build -f contrib/web/Dockerfile.source -t telemt-webp:local .
+#
+# The image contains only the binary; mount the configuration and the
+# operator-owned public site at runtime.
+
+FROM rust:1-bookworm AS builder
+
+WORKDIR /src
+
+# Dependency layer: only re-resolved when the manifests change.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release --locked \
+    && rm -rf src
+
+COPY . .
+# Refresh the entry point so the dependency layer's stub is not reused.
+RUN touch src/main.rs && cargo build --release --locked
+
+FROM gcr.io/distroless/cc-debian12 AS runtime
+
+COPY --from=builder /src/target/release/telemt /app/telemt
+
+# The carrier and admin listeners stay on loopback inside the container; the
+# TLS front proxy reaches them through the container network only when the
+# operator publishes them explicitly.
+WORKDIR /run/telemt
+ENTRYPOINT ["/app/telemt"]
+CMD ["/etc/telemt/config.toml"]

@@ -1,0 +1,36 @@
+# Front proxy for the telemt WEB proxy transport.
+#
+# Caddy terminates TLS for the public hostname, obtains and renews the
+# certificate, and forwards every path to the loopback carrier listener.
+# Only Caddy listens on a public interface.
+#
+# Install as /etc/caddy/Caddyfile and substitute the hostname.
+
+proxy.example.com {
+	# Every path goes to the relay: the bridge, the transport endpoints, and
+	# the operator's own site are all served by telemt through one origin.
+	# A separately hosted path would give an active prober something to
+	# compare with the public site.
+	reverse_proxy 127.0.0.1:8080 {
+		# Overwrite rather than append: telemt accepts X-Forwarded-For only
+		# as one canonical address, so Caddy's default append would turn a
+		# client-supplied header into "spoofed, real" and the request would
+		# lose its client address.
+		header_up X-Forwarded-For {remote_host}
+
+		# Long polls park for the configured web.timeouts.long_poll_ms
+		# (25s by default) and WebSocket carriers stay open for the whole
+		# session, so no read timeout may be shorter than that.
+		transport http {
+			read_timeout 0s
+			write_timeout 0s
+		}
+	}
+
+	# The session bearer travels in a request header on the WebSocket
+	# upgrade. Never log request headers on this site.
+	log {
+		output file /var/log/caddy/proxy.example.com.log
+		format json
+	}
+}
