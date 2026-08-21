@@ -29,6 +29,7 @@ This document lists all configuration keys accepted by `config.toml`.
  - [censorship.tls_fetch](#censorshiptls_fetch)
  - [access](#access)
  - [upstreams](#upstreams)
+ - [web](#web)
 
 # Top-level keys
 
@@ -3572,3 +3573,32 @@ If your backend or network is very bandwidth-constrained, reduce cap first. If p
     username = "alice"
     password = "secret"
     ```
+
+# [web]
+
+WEB proxy transport: MTProto carried through an app-owned WebView over a
+same-origin HTTPS or WebSocket carrier. Disabled by default.
+
+| Key | Type | Default | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `enabled` | `bool` | `false` | `✘` |
+| `hostname` | `String` (lowercase ASCII/IDNA) | `""` | `✘` |
+| `listen` | `String` (`ip:port`) | `"127.0.0.1:8080"` | `✘` |
+| `admin_listen` | `String` (`ip:port`, `""` disables) | `"127.0.0.1:8081"` | `✘` |
+| `public_dir` | `String` (path) | — | `✘` |
+| `public_upstream` | `String` (`http://ip:port`) | — | `✘` |
+| `carrier_mode` | `"https" \| "https-lanes" \| "websocket" \| "websocket-lanes"` | `"https"` | `✔` |
+| `derive_user_profiles` | `bool` | `true` | `✔` |
+| `trusted_proxies` | `CIDR[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `limits` | Table | default values | `✘` |
+| `timeouts` | Table | default values | `✘` |
+| `profiles` | Array of tables | `[]` | `✔` |
+
+Exactly one of `public_dir` and `public_upstream` is required when `enabled` is
+`true`. Capability profiles — derived from `[access.users]` and declared in
+`[[web.profiles]]` — are re-derived after a configuration reload; listener,
+hostname, and public-site settings are read once at start-up.
+
+Every key of `[web.limits]`, `[web.timeouts]`, and `[[web.profiles]]`, together
+with deployment instructions and the carrier-mode trade-offs, is documented in
+[WEB proxy transport](../Advanced_settings/WEB_PROXY.en.md).

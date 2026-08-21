@@ -38,6 +38,7 @@ Our ***Middle-End Pool*** is fastest by design in standard scenarios, compared t
   - Fake TLS - with `ee` prefix + SNI fronting;
 - Replay attack protection;
 - Optional traffic masking: forward unrecognized connections to a real web server, e.g. GitHub 🤪;
+- [WEB proxy transport](docs/Advanced_settings/WEB_PROXY.en.md): MTProto over an app-owned WebView carrier that looks like an ordinary HTTPS site (`tproxy-server` protocol v1, with streams terminated in-process instead of over loopback TCP);
 - Configurable keepalives + timeouts + IPv6 and "Fast Mode";
 - Graceful shutdown on Ctrl+C;
 - Extensive logging via `trace` and `debug` with `RUST_LOG` method.

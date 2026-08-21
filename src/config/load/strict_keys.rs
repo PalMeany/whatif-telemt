@@ -19,6 +19,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "beobachten_flush_secs",
     "beobachten_file",
     "include",
+    "web",
 ];
 
 const GENERAL_CONFIG_KEYS: &[&str] = &[
@@ -380,6 +381,71 @@ fn table_at<'a>(value: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Table
     current.as_table()
 }
 
+const WEB_CONFIG_KEYS: &[&str] = &[
+    "enabled",
+    "listen",
+    "admin_listen",
+    "hostname",
+    "public_dir",
+    "public_upstream",
+    "carrier_mode",
+    "derive_user_profiles",
+    "trusted_proxies",
+    "limits",
+    "timeouts",
+    "profiles",
+];
+
+const WEB_LIMITS_CONFIG_KEYS: &[&str] = &[
+    "max_header_bytes",
+    "max_body_bytes",
+    "max_frame_payload",
+    "carrier_batch_bytes",
+    "max_streams_per_session",
+    "max_closed_stream_ids",
+    "max_pending_per_session",
+    "max_pending_global",
+    "max_pending_items_per_session",
+    "max_pending_items_global",
+    "max_sessions_per_ip",
+    "max_sessions_global",
+    "max_streams_global",
+    "max_backend_dials_in_flight",
+    "new_sessions_per_minute",
+    "new_sessions_burst",
+    "new_streams_per_minute",
+    "new_streams_burst",
+    "max_bootstraps_per_ip",
+    "max_bootstraps_global",
+    "new_bootstraps_per_minute",
+    "new_bootstraps_burst",
+    "max_profiles",
+];
+
+const WEB_TIMEOUTS_CONFIG_KEYS: &[&str] = &[
+    "backend_dial_ms",
+    "long_poll_ms",
+    "reconnect_grace_ms",
+    "bootstrap_lifetime_ms",
+    "read_header_ms",
+    "body_read_ms",
+    "idle_ms",
+];
+
+const WEB_PROFILE_CONFIG_KEYS: &[&str] = &["name", "secret", "backend", "carrier_mode", "limits"];
+
+const WEB_PROFILE_LIMITS_CONFIG_KEYS: &[&str] = &[
+    "max_sessions",
+    "max_streams",
+    "max_backend_dials_in_flight",
+    "new_sessions_per_minute",
+    "new_sessions_burst",
+    "new_streams_per_minute",
+    "new_streams_burst",
+    "max_streams_per_session",
+    "max_pending_per_session",
+];
+
 fn is_strict_config(parsed_toml: &toml::Value) -> bool {
     table_at(parsed_toml, &["general"])
         .and_then(|table| table.get("config_strict"))
@@ -407,6 +473,11 @@ fn known_config_keys_for_suggestion() -> Vec<&'static str> {
         TELEMETRY_CONFIG_KEYS,
         LINKS_CONFIG_KEYS,
         LOGGING_CONFIG_KEYS,
+        WEB_CONFIG_KEYS,
+        WEB_LIMITS_CONFIG_KEYS,
+        WEB_TIMEOUTS_CONFIG_KEYS,
+        WEB_PROFILE_CONFIG_KEYS,
+        WEB_PROFILE_LIMITS_CONFIG_KEYS,
     ] {
         keys.extend_from_slice(group);
     }
@@ -610,6 +681,52 @@ fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<UnknownConfigKe
         &["access"],
         ACCESS_CONFIG_KEYS,
     );
+
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["web"],
+        WEB_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["web", "limits"],
+        WEB_LIMITS_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["web", "timeouts"],
+        WEB_TIMEOUTS_CONFIG_KEYS,
+    );
+
+    if let Some(profiles) = table_at(parsed_toml, &["web"])
+        .and_then(|table| table.get("profiles"))
+        .and_then(toml::Value::as_array)
+    {
+        for (idx, profile) in profiles.iter().enumerate() {
+            check_nested_table_value(
+                &mut unknown,
+                &known_for_suggestion,
+                format!("web.profiles[{idx}]"),
+                profile,
+                WEB_PROFILE_CONFIG_KEYS,
+            );
+            if let Some(limits) = profile.get("limits") {
+                check_nested_table_value(
+                    &mut unknown,
+                    &known_for_suggestion,
+                    format!("web.profiles[{idx}].limits"),
+                    limits,
+                    WEB_PROFILE_LIMITS_CONFIG_KEYS,
+                );
+            }
+        }
+    }
 
     if let Some(listeners) = table_at(parsed_toml, &["server"])
         .and_then(|table| table.get("listeners"))

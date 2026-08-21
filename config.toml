@@ -59,3 +59,26 @@ tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 [access.users]
 # format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
+
+# === WEB Proxy Transport ===
+# Carries MTProto through an app-owned WebView over a same-origin HTTPS or
+# WebSocket carrier, so the proxy looks like an ordinary website.
+# Requires a TLS-terminating front proxy (Caddy/nginx) for the public hostname.
+# Full reference: docs/Advanced_settings/WEB_PROXY.en.md
+# [web]
+# enabled = true
+# hostname = "proxy.example.com"    # must match the front proxy certificate
+# listen = "127.0.0.1:8080"         # carrier listener, keep it on loopback
+# admin_listen = "127.0.0.1:8081"   # /healthz, /readyz, /metrics ("" disables)
+# public_dir = "site"               # operator-owned static site (needs index.html)
+# public_upstream = "http://127.0.0.1:3000"  # or a private site application
+# carrier_mode = "https"            # https | https-lanes | websocket | websocket-lanes
+# derive_user_profiles = true       # every [access.users] entry gets WEB access
+# trusted_proxies = ["127.0.0.0/8", "::1/128"]
+
+# Optional: bind one secret to its own backend, carrier mode, and ceilings.
+# [[web.profiles]]
+# name = "media"
+# secret = "000102030405060708090a0b0c0d0e0f"
+# backend = "internal"              # or "127.0.0.1:2398" for a stock MTProxy
+# carrier_mode = "websocket-lanes"

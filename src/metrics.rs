@@ -3856,6 +3856,12 @@ async fn render_metrics(
         unique_ip_suppressed
     );
 
+    // WEB proxy carrier counters, emitted only while a relay is running.
+    let web = crate::web::metrics::render_active_metrics();
+    if !web.is_empty() {
+        out.push_str(&web);
+    }
+
     out
 }
 

@@ -1006,6 +1006,18 @@ async fn run_telemt_core(
     #[cfg(unix)]
     listeners::spawn_unix_accept_loop(unix_listener, active_runtime.clone());
 
+    // The WEB carrier resolves its runtime pieces per stream, so it follows
+    // configuration reloads through the active generation like every listener.
+    crate::web::start(
+        &config,
+        config_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .as_ref(),
+        active_runtime.clone(),
+    )
+    .await;
+
     shutdown::wait_for_shutdown(
         process_started_at,
         active_runtime,

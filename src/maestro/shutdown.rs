@@ -111,6 +111,10 @@ async fn perform_shutdown(
     let uptime_secs = process_started_at.elapsed().as_secs();
     info!("Uptime: {}", format_uptime(uptime_secs));
 
+    // Close WEB carrier sessions before draining proxy sessions, so their
+    // demultiplexed streams end through the normal session drain.
+    crate::web::shutdown();
+
     // Graceful ME pool shutdown
     runtime.stop_sessions().await;
     runtime.stop_background_tasks().await;

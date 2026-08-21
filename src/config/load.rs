@@ -13,6 +13,7 @@ use crate::error::{ProxyError, Result};
 
 use super::defaults::*;
 use super::types::*;
+use super::web::WebConfig;
 
 // Domain names, mask targets, and legacy scalar normalization helpers.
 mod normalize;
@@ -102,6 +103,10 @@ pub struct ProxyConfig {
     ///   "203" = ["149.154.175.100:443", "91.105.192.100:443"]
     #[serde(default, deserialize_with = "deserialize_dc_overrides")]
     pub dc_overrides: HashMap<String, Vec<String>>,
+
+    /// WEB proxy (bridge carrier) configuration.
+    #[serde(default)]
+    pub web: WebConfig,
 
     /// Default DC index (1-5) for unmapped non-standard DCs.
     /// Matches the C implementation's `default <dc_id>` config directive.
@@ -1382,6 +1387,7 @@ impl ProxyConfig {
 
         validate_logging_config(&config.logging)?;
         validate_upstreams(&config)?;
+        config.web.validate()?;
         config.rebuild_runtime_user_auth()?;
 
         Ok(LoadedConfig {
@@ -1408,6 +1414,7 @@ impl ProxyConfig {
         }
 
         validate_logging_config(&self.logging)?;
+        self.web.validate()?;
 
         if !self.general.modes.classic && !self.general.modes.secure && !self.general.modes.tls {
             return Err(ProxyError::Config("No modes enabled".to_string()));
