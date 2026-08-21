@@ -227,17 +227,21 @@ caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
 An existing nginx host can use [`nginx.conf.example`](nginx.conf.example)
-instead. Whichever you use, three things are not optional:
+instead. Whichever you use, three things matter:
 
 - **every path** is forwarded to telemt — there is no separately hosted relay
   path, so an unauthenticated prober only ever sees your site;
-- `X-Forwarded-For` is **overwritten** with the peer address, not appended to
-  (the relay accepts one canonical address, and an appended list costs the
-  request its client address);
-- no read timeout shorter than the long-poll period (25 s by default).
+- no read timeout shorter than the long-poll period (25 s by default);
+- `X-Forwarded-For` must carry the address the front proxy observed. Caddy does
+  this by default and needs no directive; nginx needs `$remote_addr` rather
+  than `$proxy_add_x_forwarded_for`. telemt trusts the header only from
+  `web.trusted_proxies`, and reads the last entry of a list.
 
-Never enable request-header logging on this site: the session bearer travels in
-a header on the WebSocket upgrade.
+Access logs go to the journal by default. Never enable request-header logging
+on this site: the session bearer travels in a header on the WebSocket upgrade.
+If you add a `log { output file … }` block, create the directory first
+(`mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy`) — otherwise
+Caddy exits at start-up with `permission denied`.
 
 ## 8. Host firewall
 
@@ -343,7 +347,9 @@ The same series appear on telemt's own metrics endpoint prefixed
 | Every request returns 404, including `/` | `Host` seen by telemt ≠ `web.hostname` | make the front proxy preserve `Host` |
 | Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and secret |
 | `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `web.listen` |
-| Client connects, then immediately drops | front proxy **appends** to `X-Forwarded-For` | overwrite it with the peer address |
+| Caddy exits with `permission denied` on a log file | `/var/log/caddy` missing or not writable by `caddy` | drop the `log` block, or `mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy` |
+| Caddy warns `Unnecessary header_up X-Forwarded-For` | Caddy already sets the header | remove the directive |
+| Client address logged as the CDN, or requests rejected | a CDN fronts Caddy | do not front this hostname with a CDN: long polls and WebSocket carriers need unbuffered pass-through |
 | Long poll cut after a few seconds | front-proxy read timeout below 25 s | raise it or disable it for this site |
 | `/readyz` returns 503 | loopback backend unreachable, or admission closed | check the profile `backend`, then `journalctl -u telemt` |
 | Unknown config key rejected at start-up | `general.config_strict = true` and a typo | the error names the key and suggests the nearest valid one |

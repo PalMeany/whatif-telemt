@@ -189,7 +189,9 @@ upgrade, never enable header logging on the front proxy or on telemt.
   (`[access.users]` and `[[web.profiles]]`) are re-derived after a reload.
 - Each demultiplexed stream is a normal telemt session: it consumes a slot from
   `server.max_connections` and is drained by the usual shutdown sequence.
-- `X-Forwarded-For` is honoured only from `trusted_proxies`, and only as a
-  single canonical address. A request from an untrusted source is accounted
-  against its own peer address.
+- `X-Forwarded-For` is honoured only from `trusted_proxies`. A request from an
+  untrusted source is accounted against its own peer address and its forwarding
+  header is ignored. When the header carries a list, the last entry is used:
+  every proxy appends its own observation, so that entry is the one a client
+  cannot inject.
 - Do not expose `listen` or `admin_listen` on a public interface.

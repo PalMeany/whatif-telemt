@@ -4,7 +4,9 @@
 # certificate, and forwards every path to the loopback carrier listener.
 # Only Caddy listens on a public interface.
 #
-# Install as /etc/caddy/Caddyfile and substitute the hostname.
+# Install as /etc/caddy/Caddyfile and substitute the hostname:
+#   sed -i 's/proxy\.example\.com/YOUR.HOSTNAME/g' /etc/caddy/Caddyfile
+#   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
 proxy.example.com {
 	# Every path goes to the relay: the bridge, the transport endpoints, and
@@ -12,12 +14,6 @@ proxy.example.com {
 	# A separately hosted path would give an active prober something to
 	# compare with the public site.
 	reverse_proxy 127.0.0.1:8080 {
-		# Overwrite rather than append: telemt accepts X-Forwarded-For only
-		# as one canonical address, so Caddy's default append would turn a
-		# client-supplied header into "spoofed, real" and the request would
-		# lose its client address.
-		header_up X-Forwarded-For {remote_host}
-
 		# Long polls park for the configured web.timeouts.long_poll_ms
 		# (25s by default) and WebSocket carriers stay open for the whole
 		# session, so no read timeout may be shorter than that.
@@ -26,11 +22,33 @@ proxy.example.com {
 			write_timeout 0s
 		}
 	}
-
-	# The session bearer travels in a request header on the WebSocket
-	# upgrade. Never log request headers on this site.
-	log {
-		output file /var/log/caddy/proxy.example.com.log
-		format json
-	}
 }
+
+# Notes
+#
+# X-Forwarded-For needs no configuration here. Caddy discards inbound
+# X-Forwarded-* values and sets the header to the address it observed, which is
+# exactly what telemt's `web.trusted_proxies` expects. Do not add
+# `header_up X-Forwarded-For` — Caddy warns that it is unnecessary.
+#
+# Configuring Caddy's own `trusted_proxies` (only correct when something else
+# already fronts Caddy) makes it forward inbound values and append its own, so
+# the header becomes a list. telemt then accounts the request against the last
+# entry, which is the address Caddy observed — the CDN, not the end user. The
+# WEB transport is not designed to run behind a CDN; long polls and WebSocket
+# carriers depend on unbuffered pass-through.
+#
+# Access logs go to the journal by default: `journalctl -u caddy -f`. Never
+# enable request-header logging on this site — the session bearer travels in a
+# header on the WebSocket upgrade. If you do want a log file, create the
+# directory for Caddy first, otherwise the service fails to start with
+# "permission denied":
+#
+#   mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy
+#
+# and then add inside the site block:
+#
+#   log {
+#       output file /var/log/caddy/proxy.example.com.log
+#       format json
+#   }

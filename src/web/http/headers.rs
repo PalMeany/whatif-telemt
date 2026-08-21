@@ -49,9 +49,15 @@ pub(crate) fn binary_content_type(value: Option<&str>) -> bool {
 
 /// Resolves the effective client address for accounting and limits.
 ///
-/// `X-Forwarded-For` is honoured only from a configured front proxy, and only
-/// as a single canonical address. A request that arrives from an untrusted
-/// source is accounted against its own peer address.
+/// `X-Forwarded-For` is honoured only from a configured front proxy. A request
+/// that arrives from an untrusted source is accounted against its own peer
+/// address, and its forwarding header is ignored entirely.
+///
+/// When the header carries a list, the **last** entry is used: that is the
+/// address the nearest trusted proxy observed, and it is the only element a
+/// client cannot inject, because every proxy appends its own observation. A
+/// list only appears when a proxy chain forwards inbound values — with one
+/// front proxy the header is a single address either way.
 pub(crate) fn client_ip(
     peer: SocketAddr,
     headers: &HeaderMap<HeaderValue>,
@@ -65,10 +71,8 @@ pub(crate) fn client_ip(
     let Some(forwarded) = header(headers, "x-forwarded-for") else {
         return Some(peer_ip);
     };
-    if forwarded.contains(',') || forwarded.trim() != forwarded {
-        return None;
-    }
-    forwarded.parse::<IpAddr>().ok()
+    let observed = forwarded.rsplit(',').next()?.trim();
+    observed.parse::<IpAddr>().ok()
 }
 
 /// True when the `Host` header names the configured public hostname.
@@ -130,10 +134,28 @@ mod tests {
             client_ip(external, &headers, &trusted),
             Some("203.0.113.7".parse().expect("ip"))
         );
+        // A proxy chain appends its own observation, so the last entry is the
+        // address the nearest trusted hop actually saw.
         headers.insert(
             "x-forwarded-for",
             HeaderValue::from_static("1.1.1.1, 2.2.2.2"),
         );
+        assert_eq!(
+            client_ip(loopback, &headers, &trusted),
+            Some("2.2.2.2".parse().expect("ip"))
+        );
+        // A client-injected value never displaces the peer of an untrusted hop.
+        assert_eq!(
+            client_ip(external, &headers, &trusted),
+            Some("203.0.113.7".parse().expect("ip"))
+        );
+        // A malformed final entry fails closed rather than guessing.
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.1.1.1, bogus"),
+        );
+        assert_eq!(client_ip(loopback, &headers, &trusted), None);
+        headers.insert("x-forwarded-for", HeaderValue::from_static(""));
         assert_eq!(client_ip(loopback, &headers, &trusted), None);
     }
 }
