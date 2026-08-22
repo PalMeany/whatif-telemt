@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use tokio::net::UnixListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use super::RuntimeGeneration;
@@ -12,6 +13,7 @@ use super::RuntimeGeneration;
 pub(crate) fn spawn_unix_accept_loop(
     listener: Option<UnixListener>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    shutdown: CancellationToken,
 ) {
     let Some(listener) = listener else {
         return;
@@ -21,7 +23,14 @@ pub(crate) fn spawn_unix_accept_loop(
         let connection_counter = AtomicU64::new(1);
 
         loop {
-            match listener.accept().await {
+            let accepted = tokio::select! {
+                biased;
+                // Drop the socket at shutdown instead of accepting and
+                // immediately resetting for the rest of the window.
+                _ = shutdown.cancelled() => break,
+                accepted = listener.accept() => accepted,
+            };
+            match accepted {
                 Ok((stream, _)) => {
                     let runtime = active_runtime.load_full();
                     if !*runtime.admission_rx.borrow() {
@@ -80,7 +89,7 @@ pub(crate) fn spawn_unix_accept_loop(
                     let shared = runtime.proxy_shared.clone();
                     let proxy_protocol_enabled = config.server.proxy_protocol;
 
-                    let _ = runtime.spawn_session(async move {
+                    let admitted = runtime.spawn_session(async move {
                         let _permit = permit;
                         if let Err(error) =
                             crate::proxy::client::handle_client_stream_with_shared_and_pool_runtime(
@@ -106,6 +115,13 @@ pub(crate) fn spawn_unix_accept_loop(
                             debug!(error = %error, "Unix socket connection error");
                         }
                     });
+                    if !admitted {
+                        runtime.stats.increment_session_admission_closed_total();
+                        debug!(
+                            generation = runtime.id,
+                            "Dropping accepted unix connection: generation stopped admitting"
+                        );
+                    }
                 }
                 Err(error) => {
                     error!(error = %error, "Unix socket accept error");

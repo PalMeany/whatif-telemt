@@ -34,6 +34,12 @@ pub(crate) fn full_cert_sent_cap_drops_for_metrics() -> u64 {
 }
 
 /// Lightweight in-memory + optional on-disk cache for TLS fronting data.
+///
+/// The full-cert budget gauge and its 65_536-IP cap are process-wide statics,
+/// but the shards they count are owned by this per-generation cache. A runtime
+/// reload mints a new cache and drops the old one, so the `Drop` impl below
+/// must hand the retired shards' reservations back — otherwise the gauge ratchets
+/// up until every IP is denied full-cert emulation for the process lifetime.
 #[derive(Debug)]
 pub struct TlsFrontCache {
     memory: RwLock<HashMap<String, Arc<CachedTlsData>>>,
@@ -85,6 +91,21 @@ fn key_share_group_label(group: Option<u16>) -> &'static str {
         Some(0x11ec) => "x25519mlkem768",
         Some(_) => "other",
         None => "none",
+    }
+}
+
+impl Drop for TlsFrontCache {
+    /// Returns this cache's full-cert budget reservations to the process gauge.
+    ///
+    /// Without this, retiring a runtime generation leaks every IP it had
+    /// admitted: `try_reserve_full_cert_sent_entry` eventually returns false for
+    /// every client and the exported metric stays permanently wrong.
+    fn drop(&mut self) {
+        let mut retained = 0usize;
+        for shard in &mut self.full_cert_sent_shards {
+            retained = retained.saturating_add(shard.get_mut().len());
+        }
+        Self::decrement_full_cert_sent_entries(retained);
     }
 }
 
@@ -504,6 +525,88 @@ fn normalize_dns_name(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that assert on the process-wide full-cert gauge.
+    ///
+    /// The gauge and its cap are statics shared by the whole test binary, so a
+    /// concurrently running gauge-mutating test would otherwise make the
+    /// leak-regression assertions flaky.
+    fn gauge_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    #[tokio::test]
+    async fn dropping_a_cache_returns_its_full_cert_reservations_to_the_process_gauge() {
+        // The gauge and the 65_536-IP cap are process statics, but the shards
+        // they count belong to a per-generation cache. Before `Drop`, every
+        // reload leaked its entries: after enough reloads
+        // `try_reserve_full_cert_sent_entry` returned false for every IP forever
+        // and full-cert emulation silently degraded for all clients.
+        let _guard = gauge_lock().lock().await;
+        let baseline = full_cert_sent_ips_for_metrics();
+        let ttl = Duration::from_secs(60);
+
+        const GENERATIONS: u32 = 8;
+        const IPS_PER_GENERATION: u32 = 16;
+
+        for generation in 0..GENERATIONS {
+            let cache =
+                TlsFrontCache::new(&["example.com".to_string()], 1024, "tlsfront-test-cache");
+            for index in 0..IPS_PER_GENERATION {
+                let ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                    10,
+                    generation as u8,
+                    (index >> 8) as u8,
+                    index as u8,
+                ));
+                assert!(cache.take_full_cert_budget_for_ip(ip, ttl).await);
+            }
+            assert_eq!(
+                full_cert_sent_ips_for_metrics(),
+                baseline + u64::from(IPS_PER_GENERATION),
+                "generation {generation} must account for exactly its own IPs"
+            );
+
+            drop(cache);
+
+            assert_eq!(
+                full_cert_sent_ips_for_metrics(),
+                baseline,
+                "retiring generation {generation} must return its reservations"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn swept_entries_are_not_double_counted_when_the_cache_is_dropped() {
+        let _guard = gauge_lock().lock().await;
+        let baseline = full_cert_sent_ips_for_metrics();
+        let cache = TlsFrontCache::new(&["example.com".to_string()], 1024, "tlsfront-test-cache");
+        let ttl = Duration::from_secs(1);
+        let stale_ip: IpAddr = "127.0.0.3".parse().expect("ip");
+        let stale_seen_at = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .unwrap_or_else(Instant::now);
+
+        cache
+            .insert_full_cert_sent_for_tests(stale_ip, stale_seen_at)
+            .await;
+        cache
+            .full_cert_sent_last_sweep_epoch_secs
+            .store(0, Ordering::Relaxed);
+        assert!(
+            cache
+                .take_full_cert_budget_for_ip("127.0.0.4".parse().expect("ip"), ttl)
+                .await
+        );
+        // The sweep already gave the stale entry back; only the live one remains.
+        assert_eq!(full_cert_sent_ips_for_metrics(), baseline + 1);
+
+        drop(cache);
+
+        assert_eq!(full_cert_sent_ips_for_metrics(), baseline);
+    }
+
     fn cached_with_cert_info(
         domain: &str,
         subject_cn: Option<&str>,
@@ -609,6 +712,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_take_full_cert_budget_for_ip_sweeps_expired_entries_when_due() {
+        let _guard = gauge_lock().lock().await;
         let cache = TlsFrontCache::new(&["example.com".to_string()], 1024, "tlsfront-test-cache");
         let stale_ip: IpAddr = "127.0.0.1".parse().expect("ip");
         let new_ip: IpAddr = "127.0.0.2".parse().expect("ip");
@@ -632,6 +736,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_take_full_cert_budget_for_ip_does_not_sweep_every_call() {
+        let _guard = gauge_lock().lock().await;
         let cache = TlsFrontCache::new(&["example.com".to_string()], 1024, "tlsfront-test-cache");
         let stale_ip: IpAddr = "127.0.0.1".parse().expect("ip");
         let new_ip: IpAddr = "127.0.0.2".parse().expect("ip");

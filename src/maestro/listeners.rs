@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{ProxyConfig, RstOnCloseMode};
@@ -261,16 +262,33 @@ pub(crate) async fn bind_listeners(
     })
 }
 
+/// Spawns one accept loop per bound listener.
+///
+/// `shutdown` closes the listening sockets. Closing admission alone is not
+/// enough at SIGTERM: the fds stay bound, so for the rest of the shutdown window
+/// the port keeps completing TCP handshakes and then resetting every one of them
+/// instead of returning `ECONNREFUSED` and letting clients fail over.
 pub(crate) fn spawn_tcp_accept_loops(
     listeners: Vec<(TcpListener, bool)>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    shutdown: CancellationToken,
 ) {
     for (listener, listener_proxy_protocol) in listeners {
         let active_runtime = active_runtime.clone();
+        let shutdown = shutdown.clone();
 
         tokio::spawn(async move {
             loop {
-                match listener.accept().await {
+                let accepted = tokio::select! {
+                    biased;
+                    _ = shutdown.cancelled() => {
+                        // Dropping `listener` unbinds the port immediately.
+                        info!("Listener closed by shutdown");
+                        break;
+                    }
+                    accepted = listener.accept() => accepted,
+                };
+                match accepted {
                     Ok((stream, peer_addr)) => {
                         let runtime = active_runtime.load_full();
                         let config = runtime.config();
@@ -337,7 +355,7 @@ pub(crate) fn spawn_tcp_accept_loops(
                         let real_peer_report = Arc::new(std::sync::Mutex::new(None));
                         let real_peer_report_for_handler = real_peer_report.clone();
 
-                        let _ = runtime.spawn_session(async move {
+                        let admitted = runtime.spawn_session(async move {
                             let _permit = permit;
                             if let Err(e) = ClientHandler::new_with_shared(
                                 stream,
@@ -440,6 +458,17 @@ pub(crate) fn spawn_tcp_accept_loops(
                                 }
                             }
                         });
+                        if !admitted {
+                            // Cutover closed this generation's admission gate
+                            // between accept and registration. Count and log it
+                            // instead of dropping the socket silently.
+                            runtime.stats.increment_session_admission_closed_total();
+                            debug!(
+                                peer = %peer_addr,
+                                generation = runtime.id,
+                                "Dropping accepted connection: generation stopped admitting sessions"
+                            );
+                        }
                     }
                     Err(e) => {
                         error!("Accept error: {}", e);

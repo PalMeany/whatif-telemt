@@ -1370,8 +1370,12 @@ fn reload_config(
         return Some(next_manifest);
     }
 
+    // Overrides are generation-scoped: validate here, then let the generation's
+    // own config watchers install the new snapshot into the upstream manager and
+    // the shared proxy state. Nothing process-global is mutated, so a retired
+    // generation's draining sessions keep the table they were admitted under.
     if old_hot.dns_overrides != applied_hot.dns_overrides
-        && let Err(e) = crate::network::dns_overrides::install_entries(&applied_hot.dns_overrides)
+        && let Err(e) = crate::network::dns_overrides::validate_entries(&applied_hot.dns_overrides)
     {
         error!(
             "config reload: invalid network.dns_overrides: {}; keeping old config",
@@ -1404,9 +1408,20 @@ fn reload_config(
 /// startup probe — used when generating proxy links for newly added users,
 /// matching the same logic as the startup output.
 /// The watcher releases its notify and signal resources when `cancellation` fires.
+///
+/// `initial_snapshot_hash` must be the rendered hash of the snapshot `initial`
+/// was loaded from — not a fresh read of the file. The two differ whenever a
+/// write lands between the caller loading its config and the watcher starting
+/// (a reload spends a probe, a TLS bootstrap and ME init in that window), and
+/// seeding the suppression state from disk would make the watcher believe that
+/// write was already applied: it would be absent from the runtime *and*
+/// permanently suppressed, so a user added mid-reload could never authenticate.
+/// Passing `None` disables suppression and forces the first watcher pass to
+/// apply whatever is on disk.
 pub fn spawn_config_watcher(
     config_path: PathBuf,
     initial: Arc<ProxyConfig>,
+    initial_snapshot_hash: Option<u64>,
     detected_ip_v4: Option<IpAddr>,
     detected_ip_v6: Option<IpAddr>,
     cancellation: tokio_util::sync::CancellationToken,
@@ -1416,12 +1431,10 @@ pub fn spawn_config_watcher(
     let (log_tx, log_rx) = watch::channel(initial_level);
 
     let config_path = normalize_watch_path(&config_path);
-    let initial_loaded = ProxyConfig::load_with_metadata(&config_path).ok();
-    let initial_manifest = initial_loaded
-        .as_ref()
+    let initial_manifest = ProxyConfig::load_with_metadata(&config_path)
+        .ok()
         .map(|loaded| WatchManifest::from_source_files(&loaded.source_files))
         .unwrap_or_else(|| WatchManifest::from_source_files(std::slice::from_ref(&config_path)));
-    let initial_snapshot_hash = initial_loaded.as_ref().map(|loaded| loaded.rendered_hash);
 
     tokio::spawn(async move {
         let (notify_tx, mut notify_rx) = mpsc::channel::<()>(4);

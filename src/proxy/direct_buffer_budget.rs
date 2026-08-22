@@ -66,8 +66,13 @@ struct SystemMemorySample {
 }
 
 /// Process-wide hard envelope and adaptive target for Direct copy buffers.
+///
+/// Process-scoped by construction: exactly one envelope exists for the process
+/// and it is shared by every runtime generation, so a drain reload cannot commit
+/// two full envelopes at once. `set_hard_limit` re-points the ceiling when a
+/// reload changes `general.direct_relay_buffer_budget_max_bytes`.
 pub(crate) struct DirectBufferBudget {
-    hard_limit_bytes: u64,
+    hard_limit_bytes: AtomicU64,
     target_bytes: AtomicU64,
     reserved_bytes: AtomicU64,
     pressure_generation: AtomicU64,
@@ -91,7 +96,7 @@ impl DirectBufferBudget {
         let hard_limit_bytes = align_down(hard_limit_bytes.max(DIRECT_BUFFER_UNIT_BYTES)) as u64;
         let (pressure_tx, _) = watch::channel(0);
         Arc::new(Self {
-            hard_limit_bytes,
+            hard_limit_bytes: AtomicU64::new(hard_limit_bytes),
             target_bytes: AtomicU64::new(hard_limit_bytes),
             reserved_bytes: AtomicU64::new(0),
             pressure_generation: AtomicU64::new(0),
@@ -108,6 +113,27 @@ impl DirectBufferBudget {
             global_pressure_demotion_total: AtomicU64::new(0),
             tier_sessions: std::array::from_fn(|_| AtomicU64::new(0)),
         })
+    }
+
+    /// Returns the absolute ceiling this envelope will never exceed.
+    pub(crate) fn hard_limit_bytes(&self) -> u64 {
+        self.hard_limit_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Re-points the ceiling after a reload changed the configured maximum.
+    ///
+    /// The envelope is process-scoped, so a reload retunes it in place instead
+    /// of minting a second one; the adaptive target is clamped down immediately
+    /// when the new ceiling is lower.
+    pub(crate) fn set_hard_limit(&self, hard_limit_bytes: usize) {
+        let hard_limit_bytes = align_down(hard_limit_bytes.max(DIRECT_BUFFER_UNIT_BYTES)) as u64;
+        self.hard_limit_bytes
+            .store(hard_limit_bytes, Ordering::Relaxed);
+        let _ = self
+            .target_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |target| {
+                (target > hard_limit_bytes).then_some(hard_limit_bytes)
+            });
     }
 
     /// Returns the current pressure-adjusted reservation target.
@@ -128,11 +154,11 @@ impl DirectBufferBudget {
     ) -> Option<DirectBufferLease> {
         let bytes = align_up(bytes) as u64;
         let limit = if allow_above_target {
-            self.hard_limit_bytes
+            self.hard_limit_bytes()
         } else {
             self.target_bytes
                 .load(Ordering::Relaxed)
-                .min(self.hard_limit_bytes)
+                .min(self.hard_limit_bytes())
         };
         if !self.try_add_reserved(bytes, limit) {
             return None;
@@ -164,14 +190,14 @@ impl DirectBufferBudget {
     }
 
     fn target_floor_bytes(&self) -> u64 {
-        (self.hard_limit_bytes / 8)
+        (self.hard_limit_bytes() / 8)
             .max(TARGET_FLOOR_MIN_BYTES as u64)
-            .min(self.hard_limit_bytes)
+            .min(self.hard_limit_bytes())
     }
 
     fn set_target_bytes(&self, target: u64) {
         let target =
-            align_down(target.clamp(self.target_floor_bytes(), self.hard_limit_bytes) as usize)
+            align_down(target.clamp(self.target_floor_bytes(), self.hard_limit_bytes()) as usize)
                 as u64;
         let previous = self.target_bytes.swap(target, Ordering::AcqRel);
         if target < previous {
@@ -223,7 +249,7 @@ impl DirectBufferBudget {
     /// Captures all bounded metrics without allocating or locking.
     pub(crate) fn snapshot(&self) -> DirectBufferBudgetSnapshot {
         DirectBufferBudgetSnapshot {
-            hard_limit_bytes: self.hard_limit_bytes,
+            hard_limit_bytes: self.hard_limit_bytes(),
             target_bytes: self.target_bytes.load(Ordering::Relaxed),
             reserved_bytes: self.reserved_bytes.load(Ordering::Relaxed),
             memory_total_bytes: self.memory_total_bytes.load(Ordering::Relaxed),
@@ -276,7 +302,7 @@ impl DirectBufferLease {
             .budget
             .target_bytes
             .load(Ordering::Relaxed)
-            .min(self.budget.hard_limit_bytes);
+            .min(self.budget.hard_limit_bytes());
         if !self.budget.try_add_reserved(delta, limit) {
             self.budget
                 .promotion_denied_total
@@ -337,13 +363,26 @@ pub(crate) async fn resolve_direct_buffer_hard_limit(configured: usize) -> usize
     align_down(derived as usize).max(DIRECT_BUFFER_UNIT_BYTES)
 }
 
+/// Generation-scoped inputs the process-wide budget controller reads each tick.
+///
+/// The budget, the buffer pool and the controller itself are process-scoped;
+/// only these three observations belong to whichever generation is currently
+/// active, so a reload republishes them instead of spawning a second controller.
+pub(crate) struct DirectBufferBudgetInputs {
+    pub(crate) stats: Arc<Stats>,
+    pub(crate) shared: Arc<ProxySharedState>,
+    pub(crate) max_connections: u32,
+}
+
 /// Runs the control-plane loop for Direct budget and shared pool pressure.
+///
+/// Exactly one of these runs per process. It re-reads `inputs_rx` every tick so
+/// a runtime cutover retargets it at the new generation without ever leaving two
+/// controllers fighting over one envelope.
 pub(crate) async fn run_direct_buffer_budget_controller(
     budget: Arc<DirectBufferBudget>,
     buffer_pool: Arc<BufferPool>,
-    stats: Arc<Stats>,
-    shared: Arc<ProxySharedState>,
-    max_connections: u32,
+    inputs_rx: watch::Receiver<Arc<DirectBufferBudgetInputs>>,
 ) {
     let mut interval = tokio::time::interval(CONTROL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -361,6 +400,10 @@ pub(crate) async fn run_direct_buffer_budget_controller(
 
     loop {
         interval.tick().await;
+        let inputs = inputs_rx.borrow().clone();
+        let stats = &inputs.stats;
+        let shared = &inputs.shared;
+        let max_connections = inputs.max_connections;
         let sample = read_system_memory_sample().await;
         budget.update_system_sample(sample);
 

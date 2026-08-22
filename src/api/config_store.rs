@@ -79,7 +79,7 @@ pub(crate) async fn current_revision_for_maestro(config_path: &Path) -> Result<S
     Ok(compute_revision(&content))
 }
 
-pub(super) fn compute_revision(content: &str) -> String {
+pub(crate) fn compute_revision(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     hex::encode(hasher.finalize())
@@ -93,12 +93,53 @@ pub(super) async fn load_config_from_disk(config_path: &Path) -> Result<ProxyCon
         .map_err(|e| ApiFailure::internal(format!("failed to load config: {}", e)))
 }
 
-pub(super) async fn load_config_for_reload(config_path: &Path) -> Result<ProxyConfig, ApiFailure> {
+/// Loads and fully validates the config a reload will install.
+///
+/// Returns the config together with the rendered hash of the snapshot it came
+/// from; the new generation's file watcher is seeded with that hash so a write
+/// landing during preparation is neither lost nor permanently suppressed.
+///
+/// `ProxyConfig::load` only runs the loader's own checks (logging, upstreams,
+/// user-auth rebuild) — not `validate()`, where the cross-field invariants live,
+/// including `access.users.is_empty()`. Skipping it here let a bare reload POST
+/// install a config that is fatal at startup and rejected by SIGHUP: every
+/// handshake would fail, the old generation's sessions would already be stopped,
+/// and only a process restart could recover.
+pub(super) async fn load_config_for_reload(
+    config_path: &Path,
+) -> Result<(ProxyConfig, Option<u64>), ApiFailure> {
     let config_path = config_path.to_path_buf();
-    tokio::task::spawn_blocking(move || ProxyConfig::load(config_path))
+    let loaded = tokio::task::spawn_blocking(move || ProxyConfig::load_with_metadata(config_path))
         .await
         .map_err(|error| ApiFailure::internal(format!("failed to join config loader: {}", error)))?
-        .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {}", error)))
+        .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {}", error)))?;
+    loaded
+        .config
+        .validate()
+        .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {}", error)))?;
+    Ok((loaded.config, Some(loaded.rendered_hash)))
+}
+
+/// Puts `previous_content` back only if `path` still holds `expected_revision`.
+///
+/// Used by `failure_policy=rollback` to undo a patch that was committed to disk
+/// before the reload ran. The revision check is what keeps the restore from
+/// clobbering an unrelated edit that landed in the meantime.
+pub(crate) async fn restore_config_if_unchanged(
+    path: &Path,
+    expected_revision: &str,
+    previous_content: &str,
+) -> Result<bool, String> {
+    let current = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|error| format!("failed to read config: {}", error))?;
+    if compute_revision(&current) != expected_revision {
+        return Ok(false);
+    }
+    write_atomic(path.to_path_buf(), previous_content.to_string())
+        .await
+        .map_err(|failure| failure.message)?;
+    Ok(true)
 }
 
 #[allow(dead_code)]

@@ -1,8 +1,14 @@
 //! Runtime DNS overrides for `host:port` targets.
+//!
+//! Overrides are **generation-scoped**. There is deliberately no
+//! process-global table: a session, background task or probe that belongs to a
+//! retired generation must keep resolving through the snapshot it was started
+//! with, not through whatever a later reload installed. Each owner
+//! (`UpstreamManager`, `ProxySharedState`, `run_probe`) holds its own
+//! [`DnsOverrides`] built from that generation's `network.dns_overrides`.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::{OnceLock, RwLock};
 
 use crate::error::{ProxyError, Result};
 
@@ -33,12 +39,6 @@ impl DnsOverrides {
     pub fn resolve_socket_addr(&self, host: &str, port: u16) -> Option<SocketAddr> {
         self.resolve(host, port).map(|ip| SocketAddr::new(ip, port))
     }
-}
-
-static DNS_OVERRIDES: OnceLock<RwLock<OverrideMap>> = OnceLock::new();
-
-fn overrides_store() -> &'static RwLock<OverrideMap> {
-    DNS_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
 fn parse_ip_spec(ip_spec: &str) -> Result<IpAddr> {
@@ -125,30 +125,6 @@ pub fn validate_entries(entries: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Replace runtime DNS overrides with a new validated snapshot.
-pub fn install_entries(entries: &[String]) -> Result<()> {
-    let parsed = parse_entries(entries)?;
-    let mut guard = overrides_store().write().map_err(|_| {
-        ProxyError::Config("network.dns_overrides runtime lock is poisoned".to_string())
-    })?;
-    *guard = parsed;
-    Ok(())
-}
-
-/// Resolve a hostname override for `(host, port)` if present.
-pub fn resolve(host: &str, port: u16) -> Option<IpAddr> {
-    let key = (host.to_ascii_lowercase(), port);
-    overrides_store()
-        .read()
-        .ok()
-        .and_then(|guard| guard.get(&key).copied())
-}
-
-/// Resolve a hostname override and construct a socket address when present.
-pub fn resolve_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
-    resolve(host, port).map(|ip| SocketAddr::new(ip, port))
-}
-
 /// Parse a runtime endpoint in `host:port` format.
 ///
 /// Supports:
@@ -199,12 +175,18 @@ mod tests {
     }
 
     #[test]
-    fn install_and_resolve_are_case_insensitive_for_host() {
-        let entries = vec!["MyPetrovich.ru:8443:127.0.0.1".to_string()];
-        install_entries(&entries).unwrap();
+    fn parse_and_resolve_are_case_insensitive_for_host() {
+        let overrides = DnsOverrides::from_entries(&["MyPetrovich.ru:8443:127.0.0.1".to_string()])
+            .expect("entry must parse");
 
-        let resolved = resolve("mypetrovich.ru", 8443);
-        assert_eq!(resolved, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(
+            overrides.resolve("mypetrovich.ru", 8443),
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(
+            overrides.resolve_socket_addr("MYPETROVICH.RU", 8443),
+            Some("127.0.0.1:8443".parse().unwrap())
+        );
     }
 
     #[test]

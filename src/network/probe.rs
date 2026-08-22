@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinSet;
@@ -67,6 +68,11 @@ pub async fn run_probe(
     stun_nat_probe_concurrency: usize,
 ) -> Result<NetworkProbe> {
     let mut probe = NetworkProbe::default();
+    // Generation-local override table: the probe belongs to the runtime being
+    // prepared, so it resolves through that config's `network.dns_overrides`.
+    let dns_overrides = Arc::new(crate::network::dns_overrides::DnsOverrides::from_entries(
+        &config.dns_overrides,
+    )?);
     let servers = collect_stun_servers(config);
     let mut detected_ipv4 = detect_local_ip_v4();
     let mut detected_ipv6 = detect_local_ip_v6();
@@ -88,6 +94,7 @@ pub async fn run_probe(
                 None,
                 None,
                 config.stun_tcp_fallback,
+                &dns_overrides,
             )
             .await
         }
@@ -171,6 +178,7 @@ pub async fn run_probe(
             bind_v4,
             bind_v6,
             config.stun_tcp_fallback,
+            &dns_overrides,
         )
         .await;
         if let Some(reflected) = direct_stun_res.v4.map(|r| r.reflected_addr) {
@@ -286,6 +294,7 @@ async fn probe_stun_servers_parallel(
     bind_v4: Option<IpAddr>,
     bind_v6: Option<IpAddr>,
     tcp_fallback: bool,
+    dns_overrides: &Arc<crate::network::dns_overrides::DnsOverrides>,
 ) -> DualStunResult {
     let mut join_set = JoinSet::new();
     let mut next_idx = 0usize;
@@ -295,6 +304,7 @@ async fn probe_stun_servers_parallel(
     while next_idx < servers.len() || !join_set.is_empty() {
         while next_idx < servers.len() && join_set.len() < concurrency {
             let stun_addr = servers[next_idx].clone();
+            let dns_overrides = dns_overrides.clone();
             next_idx += 1;
             join_set.spawn(async move {
                 let batch_timeout = if tcp_fallback {
@@ -308,6 +318,7 @@ async fn probe_stun_servers_parallel(
                         IpFamily::V4,
                         bind_v4,
                         tcp_fallback,
+                        &dns_overrides,
                     )
                     .await?;
                     let v6 = stun_probe_family_with_bind_and_tcp_fallback(
@@ -315,6 +326,7 @@ async fn probe_stun_servers_parallel(
                         IpFamily::V6,
                         bind_v6,
                         tcp_fallback,
+                        &dns_overrides,
                     )
                     .await?;
                     Ok::<DualStunResult, crate::error::ProxyError>(DualStunResult { v4, v6 })

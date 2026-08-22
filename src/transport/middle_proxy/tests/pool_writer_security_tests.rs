@@ -472,3 +472,57 @@ async fn stress_parallel_duplicate_removals_are_idempotent() {
     assert!(pool.writers.read().await.is_empty());
     assert_eq!(pool.conn_count.load(Ordering::Relaxed), 0);
 }
+
+#[tokio::test]
+async fn shutdown_cancels_every_writer_and_leaves_the_pool_empty() {
+    // A retired runtime generation never calls `remove_writer_with_mode`, so
+    // without `MePool::shutdown` the detached writer lifecycle tasks — and their
+    // TCP connections to the middle proxies — outlive the generation that owns
+    // them and accumulate at pool_size sockets per reload.
+    let pool = make_pool().await;
+    let mut tokens = Vec::new();
+    for index in 0..4u64 {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4000 + index as u16);
+        insert_writer(&pool, index, 2, addr, false, Instant::now()).await;
+        let token = pool.writers.read().await[index as usize].cancel.clone();
+        assert!(!token.is_cancelled());
+        tokens.push(token);
+    }
+
+    let cancelled = pool.shutdown().await;
+
+    assert_eq!(cancelled, 4);
+    assert!(
+        tokens.iter().all(|token| token.is_cancelled()),
+        "every writer lifecycle task must be cancelled"
+    );
+    assert!(pool.writers.read().await.is_empty());
+    assert_eq!(pool.conn_count.load(Ordering::Relaxed), 0);
+
+    // Idempotent: a second teardown (shutdown after a reload teardown) is a no-op.
+    assert_eq!(pool.shutdown().await, 0);
+}
+
+#[tokio::test]
+async fn repeated_shutdowns_do_not_accumulate_writers_across_generations() {
+    // Stands in for "reload N times and assert the writer/fd count stays flat".
+    const GENERATIONS: usize = 8;
+    const POOL_SIZE: u64 = 3;
+
+    for generation in 0..GENERATIONS {
+        let pool = make_pool().await;
+        for index in 0..POOL_SIZE {
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000 + index as u16);
+            insert_writer(&pool, index, 2, addr, false, Instant::now()).await;
+        }
+        assert_eq!(pool.writers.read().await.len(), POOL_SIZE as usize);
+
+        assert_eq!(
+            pool.shutdown().await,
+            POOL_SIZE as usize,
+            "generation {generation} must release exactly its own writers"
+        );
+        assert!(pool.writers.read().await.is_empty());
+        assert_eq!(pool.conn_count.load(Ordering::Relaxed), 0);
+    }
+}

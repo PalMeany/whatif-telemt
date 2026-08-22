@@ -385,6 +385,14 @@ impl UpstreamManager {
         Ok(self)
     }
 
+    /// Returns this generation's DNS override snapshot.
+    ///
+    /// Handed to the few connect paths that resolve outside `resolve_hostname`
+    /// so they consult the generation's table rather than a process-global one.
+    pub(crate) fn dns_overrides(&self) -> Arc<DnsOverrides> {
+        self.dns_overrides.load_full()
+    }
+
     pub(crate) fn update_dns_overrides(&self, entries: &[String]) -> Result<()> {
         let snapshot = DnsOverrides::from_entries(entries)?;
         self.dns_overrides.store(Arc::new(snapshot));

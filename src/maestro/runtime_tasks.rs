@@ -40,26 +40,34 @@ pub(crate) struct RuntimeWatches {
 #[derive(Clone)]
 pub(crate) struct RuntimeLogFilter {
     handle: reload::Handle<EnvFilter, Registry>,
+    /// Whether `RUST_LOG` was set for this process.
+    ///
+    /// Process-scoped, so it must survive runtime reloads: a reload that
+    /// re-derived the filter from `general.log_level` alone would silently
+    /// discard an operator's `RUST_LOG=telemt::proxy=trace` mid-incident.
+    has_rust_log: bool,
 }
 
 impl RuntimeLogFilter {
     pub(crate) fn new(handle: reload::Handle<EnvFilter, Registry>) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            has_rust_log: std::env::var_os("RUST_LOG").is_some(),
+        }
     }
 
     pub(crate) fn start(
         &self,
-        has_rust_log: bool,
         effective_log_level: &LogLevel,
         log_level_rx: watch::Receiver<LogLevel>,
         task_scope: RuntimeTaskScope,
     ) {
-        self.apply(effective_log_level, has_rust_log);
+        self.apply(effective_log_level);
         self.spawn_watcher(log_level_rx, task_scope);
     }
 
     pub(crate) fn apply_reload(&self, level: &LogLevel) {
-        self.apply(level, false);
+        self.apply(level);
     }
 
     pub(crate) fn spawn_watcher(
@@ -79,8 +87,8 @@ impl RuntimeLogFilter {
         });
     }
 
-    fn apply(&self, level: &LogLevel, has_rust_log: bool) {
-        let runtime_filter = EnvFilter::new(log_filter_spec(has_rust_log, level));
+    fn apply(&self, level: &LogLevel) {
+        let runtime_filter = EnvFilter::new(log_filter_spec(self.has_rust_log, level));
         if let Err(error) = self.handle.reload(runtime_filter) {
             tracing::error!(error = %error, "Failed to update runtime log filter");
         }
@@ -91,6 +99,7 @@ impl RuntimeLogFilter {
 pub(crate) async fn spawn_runtime_tasks(
     config: &Arc<ProxyConfig>,
     config_path: &Path,
+    config_snapshot_hash: Option<u64>,
     probe: &NetworkProbe,
     prefer_ipv6: bool,
     decision_ipv4_dc: bool,
@@ -155,6 +164,7 @@ pub(crate) async fn spawn_runtime_tasks(
         spawn_config_watcher(
             config_path.to_path_buf(),
             config.clone(),
+            config_snapshot_hash,
             detected_ip_v4,
             detected_ip_v6,
             task_scope.cancellation_token(),
@@ -167,6 +177,7 @@ pub(crate) async fn spawn_runtime_tasks(
         .await;
     let stats_policy = stats.clone();
     let upstream_policy = upstream_manager.clone();
+    let shared_policy = shared_state.clone();
     let mut config_rx_policy = config_rx.clone();
     task_scope.spawn(async move {
         loop {
@@ -176,8 +187,18 @@ pub(crate) async fn spawn_runtime_tasks(
             let cfg = config_rx_policy.borrow_and_update().clone();
             stats_policy
                 .apply_telemetry_policy(TelemetryPolicy::from_config(&cfg.general.telemetry));
+            // Both owners of this generation's override table are updated here;
+            // there is no process-global table to install into.
+            match crate::network::dns_overrides::DnsOverrides::from_entries(
+                &cfg.network.dns_overrides,
+            ) {
+                Ok(overrides) => shared_policy.set_dns_overrides(overrides),
+                Err(error) => {
+                    warn!(error = %error, "Failed to update shared-state DNS overrides")
+                }
+            }
             if let Err(error) = upstream_policy.update_dns_overrides(&cfg.network.dns_overrides) {
-                warn!(error = %error, "Failed to update generation DNS overrides");
+                warn!(error = %error, "Failed to update upstream DNS overrides");
             }
             if let Some(pool) = &me_pool_for_policy {
                 pool.update_runtime_transport_policy(

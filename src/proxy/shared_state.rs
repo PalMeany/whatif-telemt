@@ -5,10 +5,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
+use crate::network::dns_overrides::DnsOverrides;
 use crate::proxy::direct_buffer_budget::{DirectBufferBudget, fallback_direct_buffer_hard_limit};
 use crate::proxy::handshake::{AuthProbeSaturationState, AuthProbeState};
 use crate::proxy::middle_relay::{DesyncDedupRotationState, RelayIdleCandidateRegistry};
@@ -76,6 +78,13 @@ pub(crate) struct ProxySharedState {
     pub(crate) conntrack_pressure_active: AtomicBool,
     pub(crate) conntrack_close_tx: Mutex<Option<mpsc::Sender<ConntrackCloseEvent>>>,
     masking_fallback_permits: Arc<Semaphore>,
+    /// Generation-local `network.dns_overrides` snapshot.
+    ///
+    /// Owned by the generation, never by the process: sessions still draining
+    /// from a retired generation must keep resolving through the override table
+    /// they were admitted under, not through the one a newer generation
+    /// installed mid-drain.
+    dns_overrides: ArcSwap<DnsOverrides>,
 }
 
 #[must_use = "registered user sessions must be kept alive until relay completion"]
@@ -146,7 +155,18 @@ impl ProxySharedState {
             conntrack_pressure_active: AtomicBool::new(false),
             conntrack_close_tx: Mutex::new(None),
             masking_fallback_permits: Arc::new(Semaphore::new(MASKING_FALLBACK_MAX_CONCURRENT)),
+            dns_overrides: ArcSwap::from_pointee(DnsOverrides::default()),
         })
+    }
+
+    /// Returns this generation's DNS override snapshot.
+    pub(crate) fn dns_overrides(&self) -> Arc<DnsOverrides> {
+        self.dns_overrides.load_full()
+    }
+
+    /// Replaces this generation's DNS override snapshot after a hot reload.
+    pub(crate) fn set_dns_overrides(&self, overrides: DnsOverrides) {
+        self.dns_overrides.store(Arc::new(overrides));
     }
 
     /// Attempts to reserve one masking fallback slot for a pre-auth connection.

@@ -132,6 +132,16 @@ impl Stats {
         self.quota_store.reset(user, last_reset_epoch_secs)
     }
 
+    /// Forgets every counter for a user removed from the configuration.
+    ///
+    /// Quota lives in the process-scoped `QuotaStore`, so it survives both the
+    /// config edit and the runtime generation that observed it; dropping it here
+    /// keeps a re-provisioned username from starting pre-charged.
+    pub fn forget_user(&self, user: &str) {
+        self.user_stats.remove(user);
+        self.quota_store.remove(user);
+    }
+
     pub fn user_quota_snapshot(&self) -> HashMap<String, UserQuotaSnapshot> {
         self.quota_store.snapshot()
     }

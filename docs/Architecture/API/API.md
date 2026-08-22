@@ -303,10 +303,10 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | Field | Type | Description |
 | --- | --- | --- |
 | `revision` | `string` | SHA-256 hex of the config file after the patch was written. |
-| `restart_required` | `bool` | Legacy classifier result: `true` when the old file watcher alone cannot apply every changed field. Use `runtime_reload_required` and `process_restart_required` for new integrations. |
+| `restart_required` | `bool` | Deprecated alias of `runtime_reload_required`, kept for compatibility. It carries the identical value; do not treat the two as different signals. |
 | `runtime_reload_required` | `bool` | `true` when full effect requires a Maestro runtime-generation reload rather than the legacy hot-field overlay. |
-| `process_restart_required` | `bool` | `true` when process-owned sockets or paths changed and remain deferred after an in-process reload. |
-| `deferred_process_fields` | `string[]` | Process-owned fields that the active process cannot rebind during generation activation. |
+| `process_restart_required` | `bool` | `true` when process-owned sockets or paths changed and remain deferred after an in-process reload. Equivalent to `deferred_process_fields` being non-empty. |
+| `deferred_process_fields` | `string[]` | Process-owned fields that the active process cannot rebind during generation activation. Baseline is always **the configuration this process is currently running** versus the candidate — the same baseline `GET /v1/system/reload/{id}` reports, so the two never disagree. |
 | `changed` | `string[]` | Top-level section names that differed between the old and new config (e.g. `["censorship"]`). |
 | `reload` | `ReloadAccepted?` | Present only when the patch included a valid reload query and Maestro accepted the operation. |
 
@@ -1427,7 +1427,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `reload=instant` | no | Activates a new generation and cancels sessions owned by the previous generation. |
 | `reload=drain` | no | Activates a new generation and lets old sessions finish until `timeout_secs`. |
 | `timeout_secs=1..3600` | for `reload=drain` | Bounded old-generation drain interval. Invalid with `reload=instant`. |
-| `failure_policy=keep_new\|rollback` | no | Defaults to `keep_new`. `rollback` applies only through the activation barrier, before old-generation teardown. |
+| `failure_policy=keep_new\|rollback` | no | Defaults to `keep_new`. On `rollback`, a reload that fails or is rejected at the activation barrier both discards the candidate runtime **and restores the pre-patch config file**, so the proxy does not keep enforcing — or restart into — a config the reload rejected. The restore is skipped (and reported in `warnings`) if the file changed after this patch wrote it. |
 
 Without a `reload` query parameter, the endpoint preserves the legacy behavior: it writes the patch and the file watcher applies only supported hot fields.
 
@@ -1452,7 +1452,7 @@ Without a `reload` query parameter, the endpoint preserves the legacy behavior: 
 ```
 
 - `revision` — SHA-256 hex of the config file after the write.
-- `restart_required` — legacy file-watcher classification retained for compatibility.
+- `restart_required` — deprecated alias of `runtime_reload_required` with the identical value.
 - `runtime_reload_required` — reports whether a full Maestro generation reload is needed for runtime effect.
 - `process_restart_required` and `deferred_process_fields` — report process-owned sockets or paths that remain unchanged by an in-process reload.
 - `changed` — list of top-level section names that differed.
@@ -1472,6 +1472,7 @@ Without a `reload` query parameter, the endpoint preserves the legacy behavior: 
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |
 | `409` | `revision_conflict` | `If-Match` header supplied but does not match current revision. |
 | `409` | `reload_in_progress` | Another runtime reload is active; the patch is not written. |
+| `503` | `maestro_unavailable` | The reload coordinator is shutting down. The reload slot is reserved before the file is touched, so the patch is **not** written in this case. |
 | `500` | `internal_error` | I/O or serialization failure. |
 
 **curl example:**
@@ -1500,13 +1501,35 @@ Loads the current on-disk config under the API mutation lock and submits an immu
 }
 ```
 
-The endpoint returns `202` with `ReloadAccepted`. A concurrent non-terminal reload returns `409 reload_in_progress`. Config parsing or validation failure is reported before a command is submitted.
+The endpoint returns `202` with `ReloadAccepted`. A concurrent non-terminal reload returns `409 reload_in_progress`. The snapshot is loaded **and fully validated** (`ProxyConfig::validate`, the same check startup and SIGHUP apply) before a command is submitted; a config that fails validation — for example one with no configured users — returns `400` and never reaches the activation barrier.
+
+Preparation is bounded by a hard 180-second deadline. Exceeding it fails the reload with `error_kind = "timeout"` and releases the reload slot, so a probe or Middle-End init that never returns cannot wedge every later submission at `409`.
 
 ### `GET /v1/system/reload/{id}`
 
-Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activating`, `draining`, `succeeded`, `rolled_back`, or `failed`. Terminal statuses include `finished_at_epoch_secs`; failures include `error`. Successful activation may include `warnings` for old-generation cleanup failures and `deferred_process_fields` for process-owned settings.
+Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activating`, `draining`, `succeeded`, `rolled_back`, or `failed`. Terminal statuses include `finished_at_epoch_secs`; failures include `error` plus `error_kind`, a stable slug from `config_invalid`, `dns_overrides_invalid`, `probe_failed`, `tls_bootstrap_failed`, `middle_end_unavailable`, `revision_changed`, `timeout`, `cancelled`, `internal`. Successful activation may include `warnings` for old-generation cleanup failures and `deferred_process_fields` for process-owned settings.
 
-Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. API, metrics, client TCP/Unix listeners, PID ownership, and logging remain process-scoped; changed bind/path fields are reported as deferred and do not cause Maestro to invoke systemd, containerd, or another process supervisor.
+### `DELETE /v1/system/reload/{id}`
+
+Cancels the in-flight reload. Preparation aborts and releases the reload slot; a `drain` in progress collapses immediately to cancelling the retired generation's remaining sessions. Returns `202` with the current `ReloadStatus`, `409 reload_not_active` when `{id}` is not the active operation, `404 reload_not_found` for an unknown id, and `403 read_only` in read-only mode. Process shutdown cancels the active reload the same way.
+
+### Ownership: process scope versus generation scope
+
+Runtime generation activation rebuilds statistics, upstream routing, replay state, TLS-front cache, IP tracking, admission/route state, per-generation DNS overrides, and Middle-End orchestration.
+
+The following are **process-scoped**: they exist once for the process lifetime and a reload retunes them in place rather than allocating a second copy.
+
+| Resource | Why it is process-scoped |
+| --- | --- |
+| Per-user quota accounting | Charges must be continuous across generations. |
+| Process start instant | `telemt_uptime_seconds` measures process uptime, not generation uptime. |
+| Connection admission budget (`server.max_connections`) | A per-generation semaphore let a `drain` reload run at 2x the configured cap while the retired generation's sessions still held their permits. Reload retunes the single budget via permit add/forget. |
+| Relay buffer pool and Direct copy-buffer envelope | Two committed envelopes at once would double the memory ceiling during a drain. |
+| API, metrics, client TCP/Unix listeners, PID ownership, logging | Changed bind/path fields are reported as deferred and do not cause Maestro to invoke systemd, containerd, or another process supervisor. |
+
+`network.dns_overrides` is deliberately **not** process-scoped. Each generation owns its own snapshot, so sessions and background tasks draining from a retired generation keep resolving through the table they were admitted under.
+
+Connections that a retired generation accepts after it stopped admitting sessions are counted by `telemt_session_admission_closed_total` and logged at debug level, so cutover drops are observable instead of silent.
 
 Reload preparation requires every configured TLS-front domain to have a non-default cached profile and requires a ready Middle-End pool when direct fallback is disabled. A candidate that does not satisfy either readiness condition fails without replacing the active generation.
 

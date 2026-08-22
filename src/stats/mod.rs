@@ -141,6 +141,12 @@ pub struct Stats {
     route_cutover_parked_middle_total: AtomicU64,
     handshake_timeouts: AtomicU64,
     accept_permit_timeout_total: AtomicU64,
+    /// Accepted connections dropped because the generation stopped admitting.
+    ///
+    /// Cutover closes the retired generation's admission gate between the accept
+    /// and the session registration; without this counter those drops were
+    /// completely invisible — `connects_bad` does not move for them.
+    session_admission_closed_total: AtomicU64,
     conntrack_control_enabled_gauge: AtomicBool,
     conntrack_control_available_gauge: AtomicBool,
     conntrack_pressure_active_gauge: AtomicBool,
@@ -406,17 +412,24 @@ impl UserStats {
 
 impl Stats {
     pub fn new() -> Self {
-        Self::with_quota_store(Arc::new(QuotaStore::default()))
+        Self::with_quota_store(Arc::new(QuotaStore::default()), Instant::now())
     }
 
-    pub(crate) fn with_quota_store(quota_store: Arc<QuotaStore>) -> Self {
+    /// Builds a generation-scoped `Stats` on top of process-scoped state.
+    ///
+    /// `started_at` is the *process* start instant, not this generation's. A
+    /// runtime reload mints a fresh `Stats`, and `telemt_uptime_seconds` must
+    /// keep measuring process uptime across that cutover; seeding it with
+    /// `Instant::now()` would drop the gauge to ~0 on every reload and fire
+    /// crash-loop alerts.
+    pub(crate) fn with_quota_store(quota_store: Arc<QuotaStore>, started_at: Instant) -> Self {
         let stats = Self {
             quota_store,
             ..Self::default()
         };
         stats.apply_telemetry_policy(TelemetryPolicy::default());
         stats.refresh_cached_epoch_secs();
-        *stats.start_time.write() = Some(Instant::now());
+        *stats.start_time.write() = Some(started_at);
         stats
     }
 }

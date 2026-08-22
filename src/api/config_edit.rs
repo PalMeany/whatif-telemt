@@ -6,13 +6,13 @@ use toml::Value as Toml;
 
 use super::ApiShared;
 use super::config_store::{
-    EDITABLE_SECTIONS, compute_revision, current_revision, load_config_from_disk,
-    save_sections_to_disk,
+    EDITABLE_SECTIONS, compute_revision, current_revision, load_config_for_reload,
+    load_config_from_disk, save_sections_to_disk,
 };
 use super::model::ApiFailure;
 use crate::config::ProxyConfig;
 use crate::config::hot_reload::classify_config_changes;
-use crate::maestro::reload::{ReloadAccepted, ReloadRequest, ReloadSubmitError};
+use crate::maestro::reload::{ConfigRollback, ReloadAccepted, ReloadFailurePolicy, ReloadRequest};
 use crate::maestro::runtime_build::deferred_process_fields;
 use serde::Serialize;
 use std::path::Path;
@@ -21,9 +21,14 @@ use std::sync::Arc;
 #[derive(Debug, Serialize)]
 pub(super) struct PatchConfigResponse {
     pub revision: String,
+    /// Deprecated alias of `runtime_reload_required`, kept for compatibility.
     pub restart_required: bool,
+    /// The change is not hot-reloadable and needs a runtime reload to take effect.
     pub runtime_reload_required: bool,
+    /// The change touches process-owned fields no reload can apply.
     pub process_restart_required: bool,
+    /// Process-owned fields that differ from the configuration this process is
+    /// currently running. Same baseline as `GET /v1/system/reload/{id}` reports.
     pub deferred_process_fields: Vec<String>,
     pub changed: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -40,34 +45,86 @@ pub(super) async fn patch_config(
     shared: &ApiShared,
 ) -> Result<PatchConfigResponse, ApiFailure> {
     let _guard = shared.mutation_lock.lock().await;
-    if reload_request.is_some()
-        && let Some(reload_id) = shared.reload_control.in_progress().await
-    {
-        return Err(ApiFailure::new(
-            hyper::StatusCode::CONFLICT,
-            "reload_in_progress",
-            format!("Reload {} is already in progress", reload_id),
-        ));
-    }
-    let mut resp = apply_patch_to_path(&shared.config_path, &patch_json, expected_revision).await?;
-    if let Some(request) = reload_request {
-        let config = Arc::new(load_config_from_disk(&shared.config_path).await?);
-        let accepted = shared
-            .reload_control
-            .submit(config, resp.revision.clone(), request)
+    // Reserve the reload slot BEFORE touching the file. Reserving afterwards
+    // meant a PATCH issued during the shutdown window committed its write and
+    // then answered 503, leaving disk ahead of every runtime.
+    let ticket = match reload_request.clone() {
+        Some(request) => Some(
+            shared
+                .reload_control
+                .reserve(request)
+                .await
+                .map_err(super::reload_submit_failure)?,
+        ),
+        None => None,
+    };
+
+    // Captured for `failure_policy=rollback`: the merged config is committed to
+    // disk here and the live generation's watcher hot-applies it, so a rolled
+    // back reload has to be able to put these bytes back.
+    let wants_rollback = reload_request
+        .as_ref()
+        .is_some_and(|request| request.failure_policy == ReloadFailurePolicy::Rollback);
+    let previous_content = if wants_rollback {
+        Some(
+            tokio::fs::read_to_string(&shared.config_path)
+                .await
+                .map_err(|e| ApiFailure::internal(format!("failed to read config: {}", e)))?,
+        )
+    } else {
+        None
+    };
+
+    let patched = apply_patch_to_path(&shared.config_path, &patch_json, expected_revision).await;
+    let mut resp = match patched {
+        Ok(resp) => resp,
+        Err(error) => {
+            if let Some(ticket) = ticket {
+                ticket.abandon(reload_error_for(&error)).await;
+            }
+            return Err(error);
+        }
+    };
+
+    // One baseline everywhere: process-owned fields that differ from the config
+    // this process is actually running, not from whatever the file held a moment
+    // ago. `apply_patch_to_path` can only see the latter.
+    let written = match load_config_from_disk(&shared.config_path).await {
+        Ok(written) => written,
+        Err(error) => {
+            if let Some(ticket) = ticket {
+                ticket.abandon(reload_error_for(&error)).await;
+            }
+            return Err(error);
+        }
+    };
+    resp.deferred_process_fields =
+        deferred_process_fields(&shared.active_runtime.load().config(), &written);
+    resp.process_restart_required = !resp.deferred_process_fields.is_empty();
+
+    if let Some(ticket) = ticket {
+        let loaded = load_config_for_reload(&shared.config_path).await;
+        let (config, snapshot_hash) = match loaded {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                ticket.abandon(reload_error_for(&error)).await;
+                return Err(error);
+            }
+        };
+        let rollback = previous_content.map(|previous_content| ConfigRollback {
+            path: shared.config_path.clone(),
+            previous_content,
+            written_revision: resp.revision.clone(),
+        });
+        let accepted = ticket
+            .dispatch(
+                Arc::new(config),
+                snapshot_hash,
+                resp.revision.clone(),
+                rollback,
+            )
             .await
-            .map_err(|error| match error {
-                ReloadSubmitError::InProgress(reload_id) => ApiFailure::new(
-                    hyper::StatusCode::CONFLICT,
-                    "reload_in_progress",
-                    format!("Reload {} is already in progress", reload_id),
-                ),
-                ReloadSubmitError::MaestroUnavailable => ApiFailure::new(
-                    hyper::StatusCode::SERVICE_UNAVAILABLE,
-                    "maestro_unavailable",
-                    "Maestro reload coordinator is unavailable",
-                ),
-            })?;
+            .map_err(super::reload_submit_failure)?;
         resp.reload = Some(accepted);
     }
     drop(_guard);
@@ -75,6 +132,15 @@ pub(super) async fn patch_config(
         .runtime_events
         .record("api.config.patch.ok", format!("changed={:?}", resp.changed));
     Ok(resp)
+}
+
+/// Classifies an API failure for the reload status of an abandoned ticket.
+fn reload_error_for(error: &ApiFailure) -> crate::maestro::reload::ReloadError {
+    if error.status == hyper::StatusCode::BAD_REQUEST {
+        crate::maestro::reload::ReloadError::ConfigInvalid(error.message.clone())
+    } else {
+        crate::maestro::reload::ReloadError::Internal(error.message.clone())
+    }
 }
 
 /// Core patch logic, decoupled from hyper/shared-state so it is unit-testable
@@ -151,7 +217,11 @@ pub(super) async fn apply_patch_to_path(
         .validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
 
-    // 4. classify changes (Telemt's own hot/restart rule)
+    // 4. classify changes (Telemt's own hot/restart rule).
+    //    `deferred_process_fields` here is a disk-before/disk-after
+    //    approximation: this function is decoupled from shared state and cannot
+    //    see what the process is running. `patch_config` overwrites it with the
+    //    running-generation baseline so callers get exactly one answer.
     let class = classify_config_changes(&old_cfg, &new_cfg);
     let deferred_process_fields = deferred_process_fields(&old_cfg, &new_cfg);
 
@@ -160,6 +230,8 @@ pub(super) async fn apply_patch_to_path(
 
     Ok(PatchConfigResponse {
         revision,
+        // Legacy alias: both mean "this change is not hot-reloadable". A process
+        // restart is reported separately via `process_restart_required`.
         restart_required: class.restart_required,
         runtime_reload_required: class.restart_required,
         process_restart_required: !deferred_process_fields.is_empty(),

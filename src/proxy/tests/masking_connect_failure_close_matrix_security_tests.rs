@@ -1,5 +1,5 @@
 use super::*;
-use crate::network::dns_overrides::install_entries;
+use crate::network::dns_overrides::DnsOverrides;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::time::{Duration, Instant, timeout};
 
@@ -8,6 +8,7 @@ async fn run_connect_failure_case(
     port: u16,
     timing_normalization_enabled: bool,
     peer: SocketAddr,
+    dns_overrides: &[String],
 ) -> Duration {
     let mut config = ProxyConfig::default();
     config.general.beobachten = false;
@@ -26,9 +27,14 @@ async fn run_connect_failure_case(
     let (mut client_writer, client_reader) = duplex(1024);
     let (mut client_visible_reader, client_visible_writer) = duplex(1024);
 
+    // DNS overrides are generation-scoped, so the test installs them on the
+    // generation state the handler is given rather than on a process global.
+    let shared = ProxySharedState::new();
+    shared.set_dns_overrides(DnsOverrides::from_entries(dns_overrides).unwrap());
+
     let started = Instant::now();
     let task = tokio::spawn(async move {
-        handle_bad_client(
+        handle_bad_client_with_shared(
             client_reader,
             client_visible_writer,
             probe,
@@ -36,6 +42,7 @@ async fn run_connect_failure_case(
             local_addr,
             &config,
             &beobachten,
+            shared.as_ref(),
         )
         .await;
     });
@@ -70,9 +77,14 @@ async fn connect_failure_refusal_close_behavior_matrix() {
         let peer: SocketAddr = format!("203.0.113.210:{}", 54100 + idx as u16)
             .parse()
             .unwrap();
-        let elapsed =
-            run_connect_failure_case("127.0.0.1", unused_port, timing_normalization_enabled, peer)
-                .await;
+        let elapsed = run_connect_failure_case(
+            "127.0.0.1",
+            unused_port,
+            timing_normalization_enabled,
+            peer,
+            &[],
+        )
+        .await;
 
         if timing_normalization_enabled {
             assert!(
@@ -95,7 +107,7 @@ async fn connect_failure_overridden_hostname_close_behavior_matrix() {
     drop(temp_listener);
 
     // Make hostname resolution deterministic in tests so timing ceilings are meaningful.
-    install_entries(&[format!("mask.invalid:{}:127.0.0.1", unused_port)]).unwrap();
+    let dns_overrides = [format!("mask.invalid:{}:127.0.0.1", unused_port)];
 
     for (idx, timing_normalization_enabled) in [false, true].into_iter().enumerate() {
         let peer: SocketAddr = format!("203.0.113.220:{}", 54200 + idx as u16)
@@ -106,6 +118,7 @@ async fn connect_failure_overridden_hostname_close_behavior_matrix() {
             unused_port,
             timing_normalization_enabled,
             peer,
+            &dns_overrides,
         )
         .await;
 
@@ -121,6 +134,4 @@ async fn connect_failure_overridden_hostname_close_behavior_matrix() {
             );
         }
     }
-
-    install_entries(&[]).unwrap();
 }

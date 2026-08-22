@@ -17,6 +17,7 @@ use arc_swap::ArcSwap;
 use tokio::signal;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::generation::RuntimeGeneration;
@@ -53,6 +54,7 @@ pub(crate) async fn wait_for_shutdown(
     quota_state_path: PathBuf,
     synlimit_controller: synlimit_control::SynlimitController,
     reload_supervisor: ReloadSupervisorHandle,
+    listener_shutdown: CancellationToken,
 ) {
     let signal = wait_for_shutdown_signal().await;
     perform_shutdown(
@@ -62,6 +64,7 @@ pub(crate) async fn wait_for_shutdown(
         quota_state_path,
         synlimit_controller,
         reload_supervisor,
+        listener_shutdown,
     )
     .await;
 }
@@ -94,10 +97,15 @@ async fn perform_shutdown(
     quota_state_path: PathBuf,
     synlimit_controller: synlimit_control::SynlimitController,
     reload_supervisor: ReloadSupervisorHandle,
+    listener_shutdown: CancellationToken,
 ) {
     let shutdown_started_at = Instant::now();
     info!(signal = %signal, "Received shutdown signal");
 
+    // First thing: unbind the listeners. Closing session admission alone leaves
+    // the fds bound, so new clients keep completing a handshake and getting an
+    // RST for the whole shutdown window instead of a clean ECONNREFUSED.
+    listener_shutdown.cancel();
     reload_supervisor.quiesce().await;
     let runtime = active_runtime.load_full();
     let stats = runtime.stats.as_ref();
@@ -131,6 +139,15 @@ async fn perform_shutdown(
             Err(_) => {
                 warn!("ME shutdown: RPC_CLOSE_CONN broadcast timed out");
             }
+        }
+        // The broadcast only signals clients; cancel the writer tasks and drop
+        // their sockets too.
+        let cancelled = pool.shutdown().await;
+        if cancelled > 0 {
+            info!(
+                cancelled_writers = cancelled,
+                "ME shutdown: writers cancelled"
+            );
         }
     }
 

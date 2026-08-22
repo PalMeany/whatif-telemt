@@ -66,6 +66,7 @@ impl SessionAdmission {
             .fetch_or(SESSION_ADMISSION_CLOSED, Ordering::AcqRel);
     }
 
+    #[cfg(test)]
     fn reopen(&self) {
         self.state
             .fetch_and(!SESSION_ADMISSION_CLOSED, Ordering::AcqRel);
@@ -250,11 +251,6 @@ impl RuntimeGeneration {
         self.session_admission.close();
     }
 
-    /// Reopens admission after a candidate activation rolls back.
-    pub(crate) fn resume_accepting_sessions(&self) {
-        self.session_admission.reopen();
-    }
-
     /// Waits for registered sessions and cancels them when the deadline expires.
     pub(crate) async fn drain_sessions(&self, timeout: Duration) -> bool {
         self.stop_accepting_sessions();
@@ -363,6 +359,33 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), scope.stop())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn retiring_generations_leaves_no_background_tasks_behind() {
+        // Stands in for "reload N times and assert the task count stays flat":
+        // every generation's scope must fully drain, or each reload leaks its
+        // whole background fleet for the process lifetime.
+        const GENERATIONS: usize = 16;
+        const TASKS_PER_GENERATION: usize = 8;
+
+        for generation in 0..GENERATIONS {
+            let scope = RuntimeTaskScope::new();
+            for _ in 0..TASKS_PER_GENERATION {
+                scope.spawn(std::future::pending());
+            }
+            assert_eq!(scope.tracker.len(), TASKS_PER_GENERATION);
+
+            tokio::time::timeout(Duration::from_secs(1), scope.stop())
+                .await
+                .unwrap_or_else(|_| panic!("generation {generation} scope must drain"));
+
+            assert_eq!(
+                scope.tracker.len(),
+                0,
+                "generation {generation} left background tasks running"
+            );
+        }
     }
 
     #[tokio::test]

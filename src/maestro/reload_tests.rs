@@ -48,6 +48,7 @@ fn status_uses_documented_deferred_process_fields_key() {
         deferred_fields: vec!["server.listeners".to_string()],
         warnings: Vec::new(),
         error: None,
+        error_kind: None,
     };
     let value = serde_json::to_value(status).unwrap();
 
@@ -64,6 +65,7 @@ async fn coordinator_rejects_concurrent_reload_and_releases_terminal_slot() {
     let first = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-1".to_string(),
             ReloadRequest::default(),
         )
@@ -73,6 +75,7 @@ async fn coordinator_rejects_concurrent_reload_and_releases_terminal_slot() {
     let second = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-2".to_string(),
             ReloadRequest::default(),
         )
@@ -84,6 +87,7 @@ async fn coordinator_rejects_concurrent_reload_and_releases_terminal_slot() {
     let third = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-3".to_string(),
             ReloadRequest::default(),
         )
@@ -99,6 +103,7 @@ async fn terminal_outcomes_release_slot_and_only_success_advances_generation() {
     let failed = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-failed".to_string(),
             ReloadRequest::default(),
         )
@@ -108,16 +113,23 @@ async fn terminal_outcomes_release_slot_and_only_success_advances_generation() {
     control
         .mark_phase(failed.reload_id, ReloadPhase::Preparing)
         .await;
-    control.fail(failed.reload_id, "prepare failed").await;
+    control
+        .fail(
+            failed.reload_id,
+            ReloadError::Probe("prepare failed".to_string()),
+        )
+        .await;
     let failed_status = control.status(failed.reload_id).await.unwrap();
     assert_eq!(failed_status.state, ReloadPhase::Failed);
     assert_eq!(failed_status.error.as_deref(), Some("prepare failed"));
+    assert_eq!(failed_status.error_kind, Some("probe_failed"));
     assert!(failed_status.started_at_epoch_secs.is_some());
     assert!(failed_status.finished_at_epoch_secs.is_some());
 
     let rolled_back = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-rollback".to_string(),
             ReloadRequest::default(),
         )
@@ -126,12 +138,16 @@ async fn terminal_outcomes_release_slot_and_only_success_advances_generation() {
     let _command = receiver.recv().await.unwrap();
     assert_eq!(rolled_back.target_generation, 8);
     control
-        .rolled_back(rolled_back.reload_id, "revision changed")
+        .rolled_back(
+            rolled_back.reload_id,
+            ReloadError::RevisionChanged("revision changed".to_string()),
+        )
         .await;
 
     let succeeded = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-success".to_string(),
             ReloadRequest::default(),
         )
@@ -146,6 +162,7 @@ async fn terminal_outcomes_release_slot_and_only_success_advances_generation() {
     let next = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-next".to_string(),
             ReloadRequest::default(),
         )
@@ -160,6 +177,7 @@ async fn stale_success_cannot_advance_generation_or_release_active_reload() {
     let active = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-active".to_string(),
             ReloadRequest::default(),
         )
@@ -170,10 +188,16 @@ async fn stale_success_cannot_advance_generation_or_release_active_reload() {
     control.succeed(active.reload_id + 100, 99).await;
 
     assert_eq!(control.in_progress().await, Some(active.reload_id));
-    control.fail(active.reload_id, "expected failure").await;
+    control
+        .fail(
+            active.reload_id,
+            ReloadError::Internal("expected failure".to_string()),
+        )
+        .await;
     let next = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-next".to_string(),
             ReloadRequest::default(),
         )
@@ -190,6 +214,7 @@ async fn status_history_retains_only_the_latest_entries() {
         let accepted = control
             .submit(
                 Arc::new(ProxyConfig::default()),
+                None,
                 format!("rev-{index}"),
                 ReloadRequest::default(),
             )
@@ -197,7 +222,12 @@ async fn status_history_retains_only_the_latest_entries() {
             .unwrap();
         let _command = receiver.recv().await.unwrap();
         reload_ids.push(accepted.reload_id);
-        control.fail(accepted.reload_id, "expected failure").await;
+        control
+            .fail(
+                accepted.reload_id,
+                ReloadError::Internal("expected failure".to_string()),
+            )
+            .await;
     }
 
     assert!(control.status(reload_ids[0]).await.is_none());
@@ -213,6 +243,7 @@ async fn closed_command_channel_marks_reload_failed_and_releases_slot() {
     let result = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-closed".to_string(),
             ReloadRequest::default(),
         )
@@ -234,6 +265,7 @@ async fn shutdown_gate_rejects_new_commands_without_disturbing_active_status() {
     let active = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-active".to_string(),
             ReloadRequest::default(),
         )
@@ -245,6 +277,7 @@ async fn shutdown_gate_rejects_new_commands_without_disturbing_active_status() {
     let rejected = control
         .submit(
             Arc::new(ProxyConfig::default()),
+            None,
             "rev-rejected".to_string(),
             ReloadRequest::default(),
         )
@@ -252,5 +285,136 @@ async fn shutdown_gate_rejects_new_commands_without_disturbing_active_status() {
 
     assert_eq!(rejected, Err(ReloadSubmitError::MaestroUnavailable));
     assert_eq!(control.in_progress().await, Some(active.reload_id));
-    control.fail(active.reload_id, "shutdown test").await;
+    control
+        .fail(
+            active.reload_id,
+            ReloadError::Internal("shutdown test".to_string()),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn concurrent_reservations_never_share_a_generation_id() {
+    // Reading `active_generation` outside the status mutex let two submissions
+    // observe the same value; `runtime_watch` then treats the second cutover as
+    // a no-op because the generation id did not change.
+    const ROUNDS: u64 = 256;
+    let (control, mut receiver) = ReloadControl::channel(1);
+    let mut seen = std::collections::HashSet::new();
+
+    for _ in 0..ROUNDS {
+        let racer = control.clone();
+        let contender =
+            tokio::spawn(async move { racer.reserve(ReloadRequest::default()).await.ok() });
+        let mine = control.reserve(ReloadRequest::default()).await.ok();
+        let theirs = contender.await.unwrap();
+
+        // Exactly one of the two wins the single slot.
+        let winner = match (mine, theirs) {
+            (Some(ticket), None) | (None, Some(ticket)) => ticket,
+            (Some(_), Some(_)) => panic!("two reservations held the single reload slot"),
+            (None, None) => panic!("neither reservation acquired the free slot"),
+        };
+        let accepted = winner
+            .dispatch(
+                Arc::new(ProxyConfig::default()),
+                None,
+                "rev".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            seen.insert(accepted.target_generation),
+            "generation {} was handed out twice",
+            accepted.target_generation
+        );
+        let _command = receiver.recv().await.unwrap();
+        control
+            .succeed(accepted.reload_id, accepted.target_generation)
+            .await;
+    }
+
+    assert_eq!(seen.len() as u64, ROUNDS);
+}
+
+#[tokio::test]
+async fn dropping_a_ticket_releases_the_slot_instead_of_wedging_the_api() {
+    // The API reserves before writing to disk; an early `?` on any intermediate
+    // step must not leave every later submission answering 409 forever.
+    let (control, _receiver) = ReloadControl::channel(1);
+    let ticket = control.reserve(ReloadRequest::default()).await.unwrap();
+    assert!(control.in_progress().await.is_some());
+
+    drop(ticket);
+    for _ in 0..64 {
+        if control.in_progress().await.is_none() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(control.in_progress().await, None);
+    let status = control.status(1).await.unwrap();
+    assert_eq!(status.state, ReloadPhase::Failed);
+    assert_eq!(status.error_kind, Some("internal"));
+}
+
+#[tokio::test]
+async fn abandoned_ticket_reports_the_failure_and_frees_the_slot() {
+    let (control, _receiver) = ReloadControl::channel(1);
+    let ticket = control.reserve(ReloadRequest::default()).await.unwrap();
+
+    ticket
+        .abandon(ReloadError::ConfigInvalid("no users".to_string()))
+        .await;
+
+    assert_eq!(control.in_progress().await, None);
+    let status = control.status(1).await.unwrap();
+    assert_eq!(status.state, ReloadPhase::Failed);
+    assert_eq!(status.error_kind, Some("config_invalid"));
+    assert!(control.reserve(ReloadRequest::default()).await.is_ok());
+}
+
+#[tokio::test]
+async fn cancel_targets_only_the_active_reload() {
+    let (control, mut receiver) = ReloadControl::channel(1);
+    let accepted = control
+        .submit(
+            Arc::new(ProxyConfig::default()),
+            None,
+            "rev".to_string(),
+            ReloadRequest::default(),
+        )
+        .await
+        .unwrap();
+    let command = receiver.recv().await.unwrap();
+
+    assert!(!control.cancel(accepted.reload_id + 1).await);
+    assert!(!command.cancel.is_cancelled());
+
+    assert!(control.cancel(accepted.reload_id).await);
+    assert!(command.cancel.is_cancelled());
+
+    control
+        .fail(accepted.reload_id, ReloadError::Cancelled)
+        .await;
+    assert!(!control.cancel(accepted.reload_id).await);
+}
+
+#[test]
+fn error_kinds_are_distinguishable_for_every_failure_class() {
+    let kinds = [
+        ReloadError::ConfigInvalid("x".into()).kind(),
+        ReloadError::DnsOverrides("x".into()).kind(),
+        ReloadError::Probe("x".into()).kind(),
+        ReloadError::TlsBootstrap("x".into()).kind(),
+        ReloadError::MiddleEndUnavailable("x".into()).kind(),
+        ReloadError::RevisionChanged("x".into()).kind(),
+        ReloadError::Timeout("x".into()).kind(),
+        ReloadError::Cancelled.kind(),
+        ReloadError::Internal("x".into()).kind(),
+    ];
+    let unique: std::collections::HashSet<_> = kinds.iter().collect();
+    assert_eq!(unique.len(), kinds.len(), "error kinds must not collide");
 }

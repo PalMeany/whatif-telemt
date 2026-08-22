@@ -11,13 +11,23 @@
 // - admission: conditional-cast gate and route mode switching.
 // - listeners: TCP/Unix listener bind and accept-loop orchestration.
 // - shutdown: graceful shutdown sequence and uptime logging.
+// - process_scope: state owned by the process across every runtime generation.
+// - generation: one runtime generation's owned data plane and task scope.
+// - runtime_build: candidate generation preparation for an in-process reload.
+// - reload: reload request types and the process-scoped reload coordinator.
+// - reload_error: failure taxonomy and rollback payload for reloads.
+// - reload_status: bounded reload status history and the single-slot invariant.
+// - reload_supervisor: reload state machine and generation cutover.
 mod admission;
 mod connectivity;
 pub(crate) mod generation;
 mod helpers;
 mod listeners;
 mod me_startup;
+mod process_scope;
 pub(crate) mod reload;
+pub(crate) mod reload_error;
+pub(crate) mod reload_status;
 mod reload_supervisor;
 pub(crate) mod runtime_build;
 mod runtime_tasks;
@@ -28,7 +38,7 @@ use arc_swap::ArcSwap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, Semaphore, watch};
+use tokio::sync::{RwLock, watch};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload as tracing_reload};
 
@@ -38,9 +48,6 @@ use crate::conntrack_control;
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
-use crate::proxy::direct_buffer_budget::{
-    DirectBufferBudget, resolve_direct_buffer_hard_limit, run_direct_buffer_budget_controller,
-};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
 use crate::startup::{
@@ -51,8 +58,7 @@ use crate::startup::{
 };
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
-use crate::stats::{QuotaStore, ReplayChecker, Stats};
-use crate::stream::BufferPool;
+use crate::stats::{ReplayChecker, Stats};
 use crate::synlimit_control;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
@@ -170,8 +176,15 @@ async fn run_telemt_core(
         std::process::exit(1);
     }
 
-    let mut config = match ProxyConfig::load(&config_path) {
-        Ok(c) => c,
+    // Keep the rendered hash of the snapshot we actually boot with: the config
+    // watcher seeds its suppression state from it, so it must describe *this*
+    // load and not a later re-read of the file.
+    let mut config_snapshot_hash: Option<u64> = None;
+    let mut config = match ProxyConfig::load_with_metadata(&config_path) {
+        Ok(loaded) => {
+            config_snapshot_hash = Some(loaded.rendered_hash);
+            loaded.config
+        }
         Err(e) => {
             if config_path.exists() {
                 eprintln!("[telemt] Error: {}", e);
@@ -320,7 +333,9 @@ async fn run_telemt_core(
         }
     }
 
-    if let Err(e) = crate::network::dns_overrides::install_entries(&config.network.dns_overrides) {
+    // Validation only: the override table itself is owned by each runtime
+    // generation (upstream manager + shared proxy state), never by the process.
+    if let Err(e) = crate::network::dns_overrides::validate_entries(&config.network.dns_overrides) {
         eprintln!("[telemt] Invalid network.dns_overrides: {}", e);
         std::process::exit(1);
     }
@@ -439,8 +454,13 @@ async fn run_telemt_core(
         warn!("Using default tls_domain. Consider setting a custom domain.");
     }
 
-    let quota_store = Arc::new(QuotaStore::default());
-    let stats = Arc::new(Stats::with_quota_store(quota_store.clone()));
+    // Everything that must outlive a runtime generation lives here; a reload
+    // retunes it in place rather than minting a second copy.
+    let process_scope = process_scope::ProcessScope::new(&config).await;
+    let stats = Arc::new(Stats::with_quota_store(
+        process_scope.quota_store(),
+        process_scope.started_at(),
+    ));
     let runtime_task_scope = generation::RuntimeTaskScope::new();
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
     let quota_state_path = config.general.quota_state_path.clone();
@@ -487,16 +507,17 @@ async fn run_telemt_core(
             config.network.dns_overrides.len()
         );
     }
-    let direct_buffer_hard_limit =
-        resolve_direct_buffer_hard_limit(config.general.direct_relay_buffer_budget_max_bytes).await;
-    let direct_buffer_budget = DirectBufferBudget::new(direct_buffer_hard_limit);
+    let direct_buffer_budget = process_scope.direct_buffer_budget();
     info!(
-        hard_limit_bytes = direct_buffer_hard_limit,
+        hard_limit_bytes = direct_buffer_budget.hard_limit_bytes(),
         configured_override_bytes = config.general.direct_relay_buffer_budget_max_bytes,
         "Direct relay buffer budget initialized"
     );
     let shared_state =
         ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone());
+    shared_state.set_dns_overrides(crate::network::dns_overrides::DnsOverrides::from_entries(
+        &config.network.dns_overrides,
+    )?);
     shared_state.apply_user_enabled_config(&config.access.user_enabled);
     shared_state.traffic_limiter.apply_policy(
         config.access.user_rate_limits.clone(),
@@ -539,12 +560,8 @@ async fn run_telemt_core(
             }
         };
         if listen.port() != 0 {
-            let stats_api = stats.clone();
-            let ip_tracker_api = ip_tracker.clone();
-            let me_pool_api = api_me_pool.clone();
-            let upstream_manager_api = upstream_manager.clone();
-            let route_runtime_api = route_runtime.clone();
-            let proxy_shared_api = shared_state.clone();
+            // Only process-scoped state crosses into the API task; everything
+            // generation-scoped is read from the active generation per request.
             let config_path_api = config_path.clone();
             let quota_state_path_api = quota_state_path.clone();
             let startup_tracker_api = startup_tracker.clone();
@@ -555,12 +572,6 @@ async fn run_telemt_core(
             tokio::spawn(async move {
                 api::serve(
                     listen,
-                    stats_api,
-                    ip_tracker_api,
-                    me_pool_api,
-                    route_runtime_api,
-                    proxy_shared_api,
-                    upstream_manager_api,
                     config_path_api,
                     quota_state_path_api,
                     detected_ips_rx_api,
@@ -645,13 +656,9 @@ async fn run_telemt_core(
     let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
 
-    // Connection concurrency limit (0 = unlimited)
-    let max_connections_limit = if config.server.max_connections == 0 {
-        Semaphore::MAX_PERMITS
-    } else {
-        config.server.max_connections as usize
-    };
-    let max_connections = Arc::new(Semaphore::new(max_connections_limit));
+    // Connection concurrency limit (0 = unlimited). Process-scoped: every
+    // generation admits against this one budget.
+    let max_connections = process_scope.connection_limiter().semaphore();
 
     let me2dc_fallback = config.general.me2dc_fallback;
     let me_init_retry_attempts = config.general.me_init_retry_attempts;
@@ -780,7 +787,7 @@ async fn run_telemt_core(
         Duration::from_secs(config.access.replay_window_secs),
     ));
 
-    let buffer_pool = Arc::new(BufferPool::with_config(64 * 1024, 4096));
+    let buffer_pool = process_scope.buffer_pool();
 
     if direct_first_startup {
         startup_tracker
@@ -813,6 +820,7 @@ async fn run_telemt_core(
     let runtime_watches = runtime_tasks::spawn_runtime_tasks(
         &config,
         &config_path,
+        config_snapshot_hash,
         &probe,
         prefer_ipv6,
         decision.ipv4_dc,
@@ -836,7 +844,6 @@ async fn run_telemt_core(
     let detected_ip_v4 = runtime_watches.detected_ip_v4;
     let detected_ip_v6 = runtime_watches.detected_ip_v6;
     runtime_log_filter.start(
-        has_rust_log,
         &effective_log_level,
         log_level_rx,
         runtime_task_scope.clone(),
@@ -926,13 +933,10 @@ async fn run_telemt_core(
         shared_state.clone(),
         conntrack_scope.cancellation_token(),
     ));
-    runtime_task_scope.spawn(run_direct_buffer_budget_controller(
-        direct_buffer_budget,
-        buffer_pool.clone(),
-        stats.clone(),
-        shared_state.clone(),
-        config.server.max_connections,
-    ));
+    // One controller for the whole process; it re-reads the active generation
+    // each tick instead of being re-spawned per generation.
+    process_scope.publish_generation(&config, stats.clone(), shared_state.clone());
+    let _budget_controller = process_scope.spawn_budget_controller();
 
     let runtime_generation = generation::RuntimeGeneration::new(
         1,
@@ -959,7 +963,7 @@ async fn run_telemt_core(
         reload_control,
         reload_commands,
         config_path.clone(),
-        quota_store,
+        process_scope.clone(),
         detected_ips_tx,
         runtime_log_filter,
         runtime_watch_tx.clone(),
@@ -1002,9 +1006,16 @@ async fn run_telemt_core(
     // Spawn signal handlers for SIGUSR1/SIGUSR2 (non-shutdown signals)
     shutdown::spawn_signal_handlers(active_runtime.clone(), process_started_at);
 
-    listeners::spawn_tcp_accept_loops(listeners, active_runtime.clone());
+    // Owned by the process: shutdown drops the listening sockets so the port
+    // stops completing handshakes it is only going to reset.
+    let listener_shutdown = tokio_util::sync::CancellationToken::new();
+    listeners::spawn_tcp_accept_loops(listeners, active_runtime.clone(), listener_shutdown.clone());
     #[cfg(unix)]
-    listeners::spawn_unix_accept_loop(unix_listener, active_runtime.clone());
+    listeners::spawn_unix_accept_loop(
+        unix_listener,
+        active_runtime.clone(),
+        listener_shutdown.clone(),
+    );
 
     // The WEB carrier resolves its runtime pieces per stream, so it follows
     // configuration reloads through the active generation like every listener.
@@ -1024,6 +1035,7 @@ async fn run_telemt_core(
         quota_state_path,
         synlimit_controller,
         reload_supervisor,
+        listener_shutdown,
     )
     .await;
 

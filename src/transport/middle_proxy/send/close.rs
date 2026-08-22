@@ -95,6 +95,39 @@ impl MePool {
         total
     }
 
+    /// Tears the pool down permanently: cancels every writer task and drops its socket.
+    ///
+    /// `shutdown_send_close_conn_all` only signals *clients*; the writer
+    /// lifecycle tasks are detached `tokio::spawn`s whose only cancellation
+    /// source is `MeWriter::cancel`. A retired runtime generation never calls
+    /// `remove_writer_with_mode`, so without this the tasks and their TCP
+    /// connections to the middle proxies survive the generation that owns them
+    /// and accumulate at `pool_size` sockets per reload.
+    ///
+    /// Returns the number of writers cancelled.
+    pub async fn shutdown(self: &Arc<Self>) -> usize {
+        let mut guard = self.writers.write().await;
+        let retired = std::mem::take(&mut *guard);
+        drop(guard);
+
+        let cancelled = retired.len();
+        for writer in &retired {
+            writer.cancel.cancel();
+            // Best-effort accelerator only; teardown must not depend on the channel.
+            let _ = writer.tx.try_send(WriterCommand::Close);
+        }
+        let _ = self
+            .conn_count
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub(cancelled))
+            });
+        if cancelled > 0 {
+            self.notify_writer_epoch();
+            debug!(cancelled, "ME pool shut down: writer tasks cancelled");
+        }
+        cancelled
+    }
+
     /// Returns the current number of active ME writers tracked by the pool.
     pub fn connection_count(&self) -> usize {
         self.conn_count.load(Ordering::Relaxed)

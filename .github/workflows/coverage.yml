@@ -7,6 +7,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Minimum line coverage the build must keep. Measured at 54.9% when this gate
+  # was introduced; the floor sits just below that. This is a ratchet: raise it
+  # as coverage improves, never lower it to make a red build green. Without a
+  # threshold the job only uploaded an artifact, so a wholly uncovered module
+  # produced no CI signal at all.
+  COVERAGE_MIN_LINES: "50"
 
 jobs:
   coverage:
@@ -40,9 +46,23 @@ jobs:
         run: cargo install --locked cargo-llvm-cov || true
 
       - name: Generate LCOV report
-        run: cargo llvm-cov --locked --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov --locked \
+            --lcov --output-path lcov.info \
+            --fail-under-lines "$COVERAGE_MIN_LINES"
+
+      - name: Publish coverage summary
+        if: always()
+        run: |
+          {
+            echo "### Line coverage (floor: ${COVERAGE_MIN_LINES}%)"
+            echo '```'
+            cargo llvm-cov report --summary-only || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload LCOV report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: telemt-lcov

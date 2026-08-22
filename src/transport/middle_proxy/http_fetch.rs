@@ -12,7 +12,7 @@ use tokio_rustls::TlsConnector;
 use tracing::debug;
 
 use crate::error::{ProxyError, Result};
-use crate::network::dns_overrides::resolve_socket_addr;
+use crate::network::dns_overrides::DnsOverrides;
 use crate::transport::{UpstreamManager, UpstreamStream};
 
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -71,6 +71,12 @@ async fn connect_https_transport(
     port: u16,
     upstream: Option<Arc<UpstreamManager>>,
 ) -> Result<UpstreamStream> {
+    // Generation-local table: an ME control fetch issued by a retired generation
+    // must not silently pick up a newer generation's overrides.
+    let dns_overrides: Arc<DnsOverrides> = upstream
+        .as_ref()
+        .map(|manager| manager.dns_overrides())
+        .unwrap_or_default();
     if let Some(manager) = upstream {
         let target = manager.resolve_hostname(host, port).await?;
         return timeout(HTTP_CONNECT_TIMEOUT, manager.connect(target, None, None))
@@ -81,7 +87,7 @@ async fn connect_https_transport(
             });
     }
 
-    if let Some(addr) = resolve_socket_addr(host, port) {
+    if let Some(addr) = dns_overrides.resolve_socket_addr(host, port) {
         let stream = timeout(HTTP_CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await
             .map_err(|_| ProxyError::Proxy(format!("connect timeout for {host}:{port}")))?

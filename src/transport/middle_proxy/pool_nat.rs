@@ -31,7 +31,12 @@ pub async fn stun_probe(stun_addr: Option<String>) -> Result<crate::network::stu
             "STUN server is not configured".to_string(),
         ));
     }
-    stun_probe_dual_with_tcp_fallback(&stun_addr, false).await
+    stun_probe_dual_with_tcp_fallback(
+        &stun_addr,
+        false,
+        &crate::network::dns_overrides::DnsOverrides::default(),
+    )
+    .await
 }
 
 #[allow(dead_code)]
@@ -66,10 +71,18 @@ impl MePool {
         let mut best_by_ip: HashMap<IpAddr, (usize, std::net::SocketAddr)> = HashMap::new();
         let concurrency = self.nat_runtime.nat_probe_concurrency.max(1);
         let tcp_fallback = self.nat_runtime.stun_tcp_fallback;
+        // The pool belongs to one generation; its NAT probes resolve through
+        // that generation's override table, not a process-global one.
+        let dns_overrides = self
+            .upstream
+            .as_ref()
+            .map(|manager| manager.dns_overrides())
+            .unwrap_or_default();
 
         while next_idx < servers.len() || !join_set.is_empty() {
             while next_idx < servers.len() && join_set.len() < concurrency {
                 let stun_addr = servers[next_idx].clone();
+                let dns_overrides = dns_overrides.clone();
                 next_idx += 1;
                 join_set.spawn(async move {
                     let batch_timeout = if tcp_fallback {
@@ -84,6 +97,7 @@ impl MePool {
                             family,
                             bind_ip,
                             tcp_fallback,
+                            &dns_overrides,
                         ),
                     )
                     .await;

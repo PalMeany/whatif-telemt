@@ -110,6 +110,14 @@ impl Stats {
         }
     }
 
+    /// Records a connection dropped because its generation stopped admitting.
+    pub fn increment_session_admission_closed_total(&self) {
+        if self.telemetry_core_enabled() {
+            self.session_admission_closed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn set_conntrack_control_enabled(&self, enabled: bool) {
         self.conntrack_control_enabled_gauge
             .store(enabled, Ordering::Relaxed);

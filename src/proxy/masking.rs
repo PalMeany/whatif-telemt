@@ -1,7 +1,7 @@
 //! Masking - forward unrecognized traffic to mask host
 
 use crate::config::ProxyConfig;
-use crate::network::dns_overrides::resolve_socket_addr;
+use crate::network::dns_overrides::DnsOverrides;
 use crate::protocol::tls;
 use crate::proxy::shared_state::ProxySharedState;
 use crate::stats::beobachten::BeobachtenStore;
@@ -532,8 +532,9 @@ fn parse_mask_host_ip_literal(host: &str) -> Option<IpAddr> {
 async fn resolve_mask_target_addrs(
     mask_host: &str,
     mask_port: u16,
+    dns_overrides: &DnsOverrides,
 ) -> std::io::Result<Vec<SocketAddr>> {
-    if let Some(addr) = resolve_socket_addr(mask_host, mask_port) {
+    if let Some(addr) = dns_overrides.resolve_socket_addr(mask_host, mask_port) {
         return Ok(vec![addr]);
     }
 
@@ -1112,7 +1113,13 @@ pub(crate) async fn handle_bad_client_with_shared<R, W>(
     let mask_host = mask_target.host;
     let mask_port = mask_target.port;
 
-    let resolved_mask_addrs = match resolve_mask_target_addrs(mask_host, mask_port).await {
+    let resolved_mask_addrs = match resolve_mask_target_addrs(
+        mask_host,
+        mask_port,
+        shared.dns_overrides().as_ref(),
+    )
+    .await
+    {
         Ok(addrs) => addrs,
         Err(e) => {
             let outcome_started = Instant::now();

@@ -1,29 +1,30 @@
+use std::future::Future;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{RwLock, Semaphore, watch};
+use tokio::sync::{RwLock, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::ProxyConfig;
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
+use crate::network::dns_overrides::DnsOverrides;
 use crate::network::probe::{decide_network_capabilities, run_probe};
-use crate::proxy::direct_buffer_budget::{
-    DirectBufferBudget, resolve_direct_buffer_hard_limit, run_direct_buffer_budget_controller,
-};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
 use crate::startup::StartupTracker;
 use crate::stats::beobachten::BeobachtenStore;
 use crate::stats::telemetry::TelemetryPolicy;
-use crate::stats::{QuotaStore, ReplayChecker, Stats};
-use crate::stream::BufferPool;
+use crate::stats::{ReplayChecker, Stats};
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
 
 use super::admission;
 use super::generation::{RuntimeGeneration, RuntimeTaskScope};
+use super::process_scope::ProcessScope;
+use super::reload::ReloadError;
 use super::runtime_tasks::RuntimeLogFilter;
 use super::{me_startup, runtime_tasks, tls_bootstrap};
 
@@ -32,20 +33,59 @@ pub(crate) struct PreparedRuntime {
     pub(crate) detected_ips: (Option<IpAddr>, Option<IpAddr>),
 }
 
+/// Awaits `future` unless `cancel` fires first, tearing down `scope` on abort.
+///
+/// Every long stage of preparation (probe, TLS bootstrap, Middle-End init) can
+/// block indefinitely on an unreachable peer. Racing them against the token is
+/// only safe if the tasks already spawned into the candidate's scope are stopped
+/// on the way out, otherwise a cancelled reload leaks a whole generation's
+/// background tasks.
+async fn cancellable<F>(
+    cancel: &CancellationToken,
+    scope: &RuntimeTaskScope,
+    future: F,
+) -> Result<F::Output, ReloadError>
+where
+    F: Future,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            scope.stop().await;
+            Err(ReloadError::Cancelled)
+        }
+        value = future => Ok(value),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare_runtime(
     generation_id: u64,
     config: ProxyConfig,
+    config_snapshot_hash: Option<u64>,
     config_path: &Path,
-    quota_store: Arc<QuotaStore>,
+    process: Arc<ProcessScope>,
     runtime_log_filter: RuntimeLogFilter,
-) -> Result<PreparedRuntime, String> {
+    cancel: CancellationToken,
+) -> Result<PreparedRuntime, ReloadError> {
+    // Re-validate the candidate here as well as at the API edge: this is the
+    // last barrier before `active_runtime.swap`, and every other promotion path
+    // (startup, SIGHUP, PATCH) validates.
+    config
+        .validate()
+        .map_err(|error| ReloadError::ConfigInvalid(error.to_string()))?;
+
     let started_at_epoch_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let startup_tracker = Arc::new(StartupTracker::new(started_at_epoch_secs));
     let task_scope = RuntimeTaskScope::new();
-    let stats = Arc::new(Stats::with_quota_store(quota_store));
+    // Process-scoped start instant: a reload must not reset `telemt_uptime_seconds`.
+    let stats = Arc::new(Stats::with_quota_store(
+        process.quota_store(),
+        process.started_at(),
+    ));
     stats.apply_telemetry_policy(TelemetryPolicy::from_config(&config.general.telemetry));
 
     let upstream_manager = Arc::new(
@@ -60,7 +100,9 @@ pub(crate) async fn prepare_runtime(
             stats.clone(),
         )
         .with_dns_overrides(&config.network.dns_overrides)
-        .map_err(|error| format!("DNS override preparation failed: {}", error))?,
+        .map_err(|error| {
+            ReloadError::DnsOverrides(format!("DNS override preparation failed: {}", error))
+        })?,
     );
     let ip_tracker = Arc::new(UserIpTracker::new());
     ip_tracker
@@ -76,25 +118,35 @@ pub(crate) async fn prepare_runtime(
         )
         .await;
 
-    let hard_limit =
-        resolve_direct_buffer_hard_limit(config.general.direct_relay_buffer_budget_max_bytes).await;
-    let direct_buffer_budget = DirectBufferBudget::new(hard_limit);
+    // The Direct envelope and the buffer pool are process-scoped: a drain reload
+    // that minted its own would commit two full envelopes at once. Retune the
+    // ceiling here, off the cutover path, since resolving it reads system memory.
+    process.retune_direct_buffer_budget(&config).await;
     let proxy_shared =
-        ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone());
+        ProxySharedState::new_with_direct_buffer_budget(process.direct_buffer_budget());
+    proxy_shared.set_dns_overrides(
+        DnsOverrides::from_entries(&config.network.dns_overrides).map_err(|error| {
+            ReloadError::DnsOverrides(format!("DNS override preparation failed: {}", error))
+        })?,
+    );
     proxy_shared.apply_user_enabled_config(&config.access.user_enabled);
     proxy_shared.traffic_limiter.apply_policy(
         config.access.user_rate_limits.clone(),
         config.access.cidr_rate_limits.clone(),
     );
 
-    let probe = run_probe(
-        &config.network,
-        &config.upstreams,
-        config.general.middle_proxy_nat_probe,
-        config.general.stun_nat_probe_concurrency,
+    let probe = cancellable(
+        &cancel,
+        &task_scope,
+        run_probe(
+            &config.network,
+            &config.upstreams,
+            config.general.middle_proxy_nat_probe,
+            config.general.stun_nat_probe_concurrency,
+        ),
     )
-    .await
-    .map_err(|error| format!("network probe failed: {}", error))?;
+    .await?
+    .map_err(|error| ReloadError::Probe(format!("network probe failed: {}", error)))?;
     let decision =
         decide_network_capabilities(&config.network, &probe, config.general.middle_proxy_nat_ip);
     let prefer_ipv6 = decision.prefer_ipv6();
@@ -106,16 +158,20 @@ pub(crate) async fn prepare_runtime(
             tls_domains.push(domain.clone());
         }
     }
-    let tls_cache = tls_bootstrap::bootstrap_tls_front(
-        &config,
-        &tls_domains,
-        upstream_manager.clone(),
-        &startup_tracker,
-        task_scope.clone(),
-        tls_bootstrap::TlsBootstrapPolicy::RequireReady,
+    let tls_cache = cancellable(
+        &cancel,
+        &task_scope,
+        tls_bootstrap::bootstrap_tls_front(
+            &config,
+            &tls_domains,
+            upstream_manager.clone(),
+            &startup_tracker,
+            task_scope.clone(),
+            tls_bootstrap::TlsBootstrapPolicy::RequireReady,
+        ),
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await?
+    .map_err(|error| ReloadError::TlsBootstrap(error.to_string()))?;
 
     let beobachten = Arc::new(BeobachtenStore::new());
     let rng = Arc::new(SecureRandom::new());
@@ -131,20 +187,24 @@ pub(crate) async fn prepare_runtime(
     let me_pool = if direct_first_startup {
         None
     } else {
-        me_startup::initialize_me_pool(
-            config.general.use_middle_proxy,
-            &config,
-            &decision,
-            &probe,
-            &startup_tracker,
-            upstream_manager.clone(),
-            rng.clone(),
-            stats.clone(),
-            me_pool_runtime.clone(),
-            me_ready_tx.clone(),
-            task_scope.clone(),
+        cancellable(
+            &cancel,
+            &task_scope,
+            me_startup::initialize_me_pool(
+                config.general.use_middle_proxy,
+                &config,
+                &decision,
+                &probe,
+                &startup_tracker,
+                upstream_manager.clone(),
+                rng.clone(),
+                stats.clone(),
+                me_pool_runtime.clone(),
+                me_ready_tx.clone(),
+                task_scope.clone(),
+            ),
         )
-        .await
+        .await?
     };
     if strict_middle_proxy_unavailable(
         config.general.use_middle_proxy,
@@ -152,10 +212,14 @@ pub(crate) async fn prepare_runtime(
         me_pool.is_some(),
     ) {
         task_scope.stop().await;
-        return Err(
+        return Err(ReloadError::MiddleEndUnavailable(
             "Middle-End pool is required but did not become ready during reload preparation"
                 .to_string(),
-        );
+        ));
+    }
+    if cancel.is_cancelled() {
+        task_scope.stop().await;
+        return Err(ReloadError::Cancelled);
     }
 
     let config = Arc::new(config);
@@ -163,16 +227,12 @@ pub(crate) async fn prepare_runtime(
         config.access.replay_check_len,
         Duration::from_secs(config.access.replay_window_secs),
     ));
-    let buffer_pool = Arc::new(BufferPool::with_config(64 * 1024, 4096));
-    let max_connections_limit = if config.server.max_connections == 0 {
-        Semaphore::MAX_PERMITS
-    } else {
-        config.server.max_connections as usize
-    };
-    let max_connections = Arc::new(Semaphore::new(max_connections_limit));
+    let buffer_pool = process.buffer_pool();
+    let max_connections = process.connection_limiter().semaphore();
     let watches = runtime_tasks::spawn_runtime_tasks(
         &config,
         config_path,
+        config_snapshot_hash,
         &probe,
         prefer_ipv6,
         decision.ipv4_dc,
@@ -264,13 +324,6 @@ pub(crate) async fn prepare_runtime(
         proxy_shared.clone(),
         conntrack_scope.cancellation_token(),
     ));
-    task_scope.spawn(run_direct_buffer_budget_controller(
-        direct_buffer_budget,
-        buffer_pool.clone(),
-        stats.clone(),
-        proxy_shared.clone(),
-        config.server.max_connections,
-    ));
     let generation = RuntimeGeneration::new(
         generation_id,
         config_rx,
@@ -309,7 +362,18 @@ fn strict_middle_proxy_unavailable(
     use_middle_proxy && !direct_first_startup && !pool_available
 }
 
-pub(crate) fn deferred_process_fields(old: &ProxyConfig, new: &ProxyConfig) -> Vec<String> {
+/// Process-owned fields that differ between two configurations.
+///
+/// The baseline is always "the configuration this process is currently running"
+/// versus "the candidate". Callers must not substitute a different baseline
+/// (such as disk-before versus disk-after) — the field is reported under one
+/// name in `PATCH /v1/config` and in `GET /v1/system/reload/{id}`, and it has to
+/// answer the same question in both.
+pub(crate) fn deferred_process_fields(
+    running: &ProxyConfig,
+    candidate: &ProxyConfig,
+) -> Vec<String> {
+    let (old, new) = (running, candidate);
     let mut fields = Vec::new();
     if old.server.port != new.server.port
         || old.server.proxy_protocol != new.server.proxy_protocol
@@ -379,5 +443,61 @@ mod tests {
         assert!(!strict_middle_proxy_unavailable(true, false, true));
         assert!(!strict_middle_proxy_unavailable(true, true, false));
         assert!(!strict_middle_proxy_unavailable(false, false, false));
+    }
+
+    #[tokio::test]
+    async fn prepare_rejects_a_config_that_fails_validation() {
+        // Zero users is fatal at startup and rejected by SIGHUP; the reload path
+        // has to reject it too, before anything reaches the activation barrier.
+        let mut config = ProxyConfig::default();
+        config.access.users.clear();
+        let process = ProcessScope::new(&config).await;
+        let (_layer, handle) = tracing_subscriber::reload::Layer::<
+            tracing_subscriber::EnvFilter,
+            tracing_subscriber::Registry,
+        >::new(tracing_subscriber::EnvFilter::new("info"));
+
+        let error = prepare_runtime(
+            2,
+            config,
+            None,
+            Path::new("config.toml"),
+            process,
+            RuntimeLogFilter::new(handle),
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .expect("an invalid config must never reach the activation barrier");
+
+        assert_eq!(error.kind(), "config_invalid");
+        assert!(error.to_string().contains("No users configured"));
+    }
+
+    #[tokio::test]
+    async fn prepare_bails_out_immediately_when_already_cancelled() {
+        let config = ProxyConfig::default();
+        let process = ProcessScope::new(&config).await;
+        let (_layer, handle) = tracing_subscriber::reload::Layer::<
+            tracing_subscriber::EnvFilter,
+            tracing_subscriber::Registry,
+        >::new(tracing_subscriber::EnvFilter::new("info"));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let error = prepare_runtime(
+            2,
+            config,
+            None,
+            Path::new("config.toml"),
+            process,
+            RuntimeLogFilter::new(handle),
+            cancel,
+        )
+        .await
+        .err()
+        .expect("a cancelled preparation must not produce a candidate");
+
+        assert_eq!(error.kind(), "cancelled");
     }
 }

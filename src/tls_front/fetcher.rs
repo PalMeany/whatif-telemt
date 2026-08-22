@@ -30,7 +30,7 @@ use x509_parser::prelude::FromDer;
 
 use crate::config::TlsFetchProfile;
 use crate::crypto::{SecureRandom, sha256};
-use crate::network::dns_overrides::resolve_socket_addr;
+use crate::network::dns_overrides::DnsOverrides;
 use crate::protocol::constants::{
     TLS_RECORD_APPLICATION, TLS_RECORD_CHANGE_CIPHER, TLS_RECORD_HANDSHAKE,
 };
@@ -896,12 +896,18 @@ fn u24_bytes(value: usize) -> Option<[u8; 3]> {
     ])
 }
 
+/// Connects honouring the *generation's* DNS override table.
+///
+/// `dns_overrides` comes from the upstream manager the caller was built with, so
+/// a TLS-front refresh started by a retired generation keeps resolving through
+/// the overrides it was configured with instead of a newer generation's.
 async fn connect_with_dns_override(
     host: &str,
     port: u16,
     connect_timeout: Duration,
+    dns_overrides: &DnsOverrides,
 ) -> Result<TcpStream> {
-    if let Some(addr) = resolve_socket_addr(host, port) {
+    if let Some(addr) = dns_overrides.resolve_socket_addr(host, port) {
         return Ok(timeout(connect_timeout, TcpStream::connect(addr)).await??);
     }
     Ok(timeout(connect_timeout, TcpStream::connect((host, port))).await??)
@@ -915,6 +921,10 @@ async fn connect_tcp_with_upstream(
     scope: Option<&str>,
     strict_route: bool,
 ) -> Result<UpstreamStream> {
+    let dns_overrides = upstream
+        .as_ref()
+        .map(|manager| manager.dns_overrides())
+        .unwrap_or_default();
     if let Some(manager) = upstream {
         let resolved = match manager.resolve_hostname(host, port).await {
             Ok(addr) => Some(addr),
@@ -963,7 +973,7 @@ async fn connect_tcp_with_upstream(
         }
     }
     Ok(UpstreamStream::Tcp(
-        connect_with_dns_override(host, port, connect_timeout).await?,
+        connect_with_dns_override(host, port, connect_timeout, dns_overrides.as_ref()).await?,
     ))
 }
 

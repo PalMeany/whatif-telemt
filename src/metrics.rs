@@ -792,6 +792,21 @@ async fn render_metrics(
 
     let _ = writeln!(
         out,
+        "# HELP telemt_session_admission_closed_total Accepted connections dropped because the runtime generation stopped admitting sessions"
+    );
+    let _ = writeln!(out, "# TYPE telemt_session_admission_closed_total counter");
+    let _ = writeln!(
+        out,
+        "telemt_session_admission_closed_total {}",
+        if core_enabled {
+            stats.get_session_admission_closed_total()
+        } else {
+            0
+        }
+    );
+
+    let _ = writeln!(
+        out,
         "# HELP telemt_route_cutover_parked_current Sessions currently parked in route cutover stagger delay"
     );
     let _ = writeln!(out, "# TYPE telemt_route_cutover_parked_current gauge");

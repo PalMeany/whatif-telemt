@@ -86,7 +86,12 @@ async fn reload_conflict_and_closed_coordinator_map_to_http_contract() {
     assert_eq!(conflict.status, StatusCode::CONFLICT);
     assert_eq!(conflict.code, "reload_in_progress");
 
-    control.fail(1, "test cleanup").await;
+    control
+        .fail(
+            1,
+            crate::maestro::reload::ReloadError::Internal("test cleanup".to_string()),
+        )
+        .await;
     drop(commands);
     let unavailable = submit_reload_from_disk(
         &path,
@@ -107,9 +112,11 @@ fn reload_routes_expose_only_documented_methods_and_ids() {
         allowed_methods_for_path("/v1/system/reload"),
         Some(ALLOW_POST)
     );
+    // DELETE is the operator's escape hatch out of a long drain; without it a
+    // reload holds both submit paths at 409 for its whole duration.
     assert_eq!(
         allowed_methods_for_path("/v1/system/reload/42"),
-        Some(ALLOW_GET)
+        Some(ALLOW_GET_DELETE)
     );
     assert_eq!(reload_status_route_id("/v1/system/reload/42"), Some(42));
     assert_eq!(

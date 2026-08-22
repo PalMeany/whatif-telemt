@@ -56,6 +56,15 @@ impl QuotaStore {
         }
     }
 
+    /// Drops all quota accounting for a user that no longer exists.
+    ///
+    /// `QuotaStore` is process-scoped and outlives every runtime generation, so
+    /// without this a deleted username keeps its charged bytes forever: a
+    /// re-provisioned user of the same name would start pre-charged.
+    pub(crate) fn remove(&self, user: &str) {
+        self.users.remove(user);
+    }
+
     pub(crate) fn snapshot(&self) -> HashMap<String, UserQuotaSnapshot> {
         let mut out = HashMap::new();
         for entry in self.users.iter() {
@@ -133,13 +142,25 @@ mod tests {
     use crate::stats::Stats;
 
     #[test]
+    fn removing_a_user_clears_process_scoped_quota() {
+        let store = QuotaStore::default();
+        store.user("alice").charge(4096);
+        assert_eq!(store.used("alice"), 4096);
+
+        store.remove("alice");
+
+        assert_eq!(store.used("alice"), 0);
+        assert!(!store.snapshot().contains_key("alice"));
+    }
+
+    #[test]
     fn quota_counters_are_shared_across_stats_generations() {
         let store = Arc::new(QuotaStore::default());
-        let first = Stats::with_quota_store(store.clone());
+        let first = Stats::with_quota_store(store.clone(), std::time::Instant::now());
         store.user("alice").charge(512);
         assert_eq!(first.get_user_quota_used("alice"), 512);
 
-        let second = Stats::with_quota_store(store);
+        let second = Stats::with_quota_store(store, std::time::Instant::now());
         assert_eq!(second.get_user_quota_used("alice"), 512);
         second.reset_user_quota("alice");
         assert_eq!(first.get_user_quota_used("alice"), 0);

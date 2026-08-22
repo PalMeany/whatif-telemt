@@ -555,6 +555,10 @@ pub(super) async fn delete_user(
     drop(_guard);
     shared.ip_tracker.remove_user_limit(user).await;
     shared.ip_tracker.clear_user_ips(user).await;
+    // Quota lives in the process-scoped QuotaStore and outlives both this config
+    // edit and the current runtime generation, so it has to be dropped
+    // explicitly: otherwise re-creating the same username starts pre-charged.
+    shared.stats.forget_user(user);
 
     Ok((user.to_string(), revision))
 }

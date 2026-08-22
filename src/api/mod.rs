@@ -92,6 +92,7 @@ const ALLOW_POST: &str = "POST";
 const ALLOW_GET_POST: &str = "GET, POST";
 const ALLOW_GET_PATCH_DELETE: &str = "GET, PATCH, DELETE";
 const ALLOW_GET_PATCH: &str = "GET, PATCH";
+const ALLOW_GET_DELETE: &str = "GET, DELETE";
 
 pub(super) struct ApiRuntimeState {
     pub(super) process_started_at_epoch_secs: u64,
@@ -100,6 +101,32 @@ pub(super) struct ApiRuntimeState {
     pub(super) admission_open: AtomicBool,
 }
 
+/// Process-scoped API state.
+///
+/// Deliberately holds nothing that belongs to a runtime generation. The old
+/// shape stored generation 1's `stats`, `ip_tracker`, `me_pool`,
+/// `upstream_manager`, `route_runtime` and `proxy_shared` for the whole process
+/// and then discarded all of them per request via `for_runtime` — dead weight
+/// that the next handler author would read by accident and, after a reload,
+/// silently point at a retired generation.
+pub(super) struct ApiProcess {
+    pub(super) config_path: PathBuf,
+    pub(super) quota_state_path: PathBuf,
+    pub(super) detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
+    pub(super) mutation_lock: Arc<Mutex<()>>,
+    pub(super) minimal_cache: Arc<Mutex<Option<MinimalCacheEntry>>>,
+    pub(super) runtime_edge_connections_cache: Arc<Mutex<Option<EdgeConnectionsCacheEntry>>>,
+    pub(super) runtime_edge_recompute_lock: Arc<Mutex<()>>,
+    pub(super) cache_generation: Arc<AtomicU64>,
+    pub(super) runtime_events: Arc<ApiEventStore>,
+    pub(super) request_id: Arc<AtomicU64>,
+    pub(super) runtime_state: Arc<ApiRuntimeState>,
+    pub(super) startup_tracker: Arc<StartupTracker>,
+    pub(super) reload_control: ReloadControl,
+    pub(super) active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+}
+
+/// Per-request view: process state plus the generation serving this request.
 #[derive(Clone)]
 pub(super) struct ApiShared {
     pub(super) stats: Arc<Stats>,
@@ -113,7 +140,6 @@ pub(super) struct ApiShared {
     pub(super) minimal_cache: Arc<Mutex<Option<MinimalCacheEntry>>>,
     pub(super) runtime_edge_connections_cache: Arc<Mutex<Option<EdgeConnectionsCacheEntry>>>,
     pub(super) runtime_edge_recompute_lock: Arc<Mutex<()>>,
-    pub(super) cache_generation: Arc<AtomicU64>,
     pub(super) runtime_events: Arc<ApiEventStore>,
     pub(super) request_id: Arc<AtomicU64>,
     pub(super) runtime_state: Arc<ApiRuntimeState>,
@@ -124,21 +150,15 @@ pub(super) struct ApiShared {
     pub(super) active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
 }
 
-impl ApiShared {
-    fn next_request_id(&self) -> u64 {
-        self.request_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn detected_link_ips(&self) -> (Option<IpAddr>, Option<IpAddr>) {
-        *self.detected_ips_rx.borrow()
-    }
-
-    fn for_runtime(&self, runtime: &RuntimeGeneration) -> Self {
-        Self {
+impl ApiProcess {
+    fn for_runtime(&self, runtime: &RuntimeGeneration) -> ApiShared {
+        ApiShared {
             stats: runtime.stats.clone(),
             ip_tracker: runtime.ip_tracker.clone(),
             me_pool: runtime.me_pool_runtime.clone(),
             upstream_manager: runtime.upstream_manager.clone(),
+            route_runtime: runtime.route_runtime.clone(),
+            proxy_shared: runtime.proxy_shared.clone(),
             config_path: self.config_path.clone(),
             quota_state_path: self.quota_state_path.clone(),
             detected_ips_rx: self.detected_ips_rx.clone(),
@@ -146,16 +166,23 @@ impl ApiShared {
             minimal_cache: self.minimal_cache.clone(),
             runtime_edge_connections_cache: self.runtime_edge_connections_cache.clone(),
             runtime_edge_recompute_lock: self.runtime_edge_recompute_lock.clone(),
-            cache_generation: self.cache_generation.clone(),
             runtime_events: self.runtime_events.clone(),
             request_id: self.request_id.clone(),
             runtime_state: self.runtime_state.clone(),
             startup_tracker: self.startup_tracker.clone(),
-            route_runtime: runtime.route_runtime.clone(),
-            proxy_shared: runtime.proxy_shared.clone(),
             reload_control: self.reload_control.clone(),
             active_runtime: self.active_runtime.clone(),
         }
+    }
+}
+
+impl ApiShared {
+    fn next_request_id(&self) -> u64 {
+        self.request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn detected_link_ips(&self) -> (Option<IpAddr>, Option<IpAddr>) {
+        *self.detected_ips_rx.borrow()
     }
 }
 
@@ -184,6 +211,21 @@ fn reload_status_route_id(path: &str) -> Option<u64> {
         .and_then(|id| id.parse().ok())
 }
 
+fn reload_submit_failure(error: ReloadSubmitError) -> ApiFailure {
+    match error {
+        ReloadSubmitError::InProgress(reload_id) => ApiFailure::new(
+            StatusCode::CONFLICT,
+            "reload_in_progress",
+            format!("Reload {} is already in progress", reload_id),
+        ),
+        ReloadSubmitError::MaestroUnavailable => ApiFailure::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "maestro_unavailable",
+            "Maestro reload coordinator is unavailable",
+        ),
+    }
+}
+
 async fn submit_reload_from_disk(
     config_path: &std::path::Path,
     mutation_lock: &Mutex<()>,
@@ -194,22 +236,13 @@ async fn submit_reload_from_disk(
     let _guard = mutation_lock.lock().await;
     ensure_expected_revision(config_path, expected_revision).await?;
     let revision = current_revision(config_path).await?;
-    let config = Arc::new(load_config_for_reload(config_path).await?);
+    // Full validation, not just `ProxyConfig::load`: this is the only barrier
+    // between the request body and `active_runtime.swap`.
+    let (config, snapshot_hash) = load_config_for_reload(config_path).await?;
     let accepted = reload_control
-        .submit(config, revision.clone(), request)
+        .submit(Arc::new(config), snapshot_hash, revision.clone(), request)
         .await
-        .map_err(|error| match error {
-            ReloadSubmitError::InProgress(reload_id) => ApiFailure::new(
-                StatusCode::CONFLICT,
-                "reload_in_progress",
-                format!("Reload {} is already in progress", reload_id),
-            ),
-            ReloadSubmitError::MaestroUnavailable => ApiFailure::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "maestro_unavailable",
-                "Maestro reload coordinator is unavailable",
-            ),
-        })?;
+        .map_err(reload_submit_failure)?;
     Ok((accepted, revision))
 }
 
@@ -251,7 +284,7 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         _ if user_action_route_matches(path, "/rotate-secret") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/enable") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/disable") => Some(ALLOW_POST),
-        _ if reload_status_route_id(path).is_some() => Some(ALLOW_GET),
+        _ if reload_status_route_id(path).is_some() => Some(ALLOW_GET_DELETE),
         _ if path
             .strip_prefix("/v1/users/")
             .map(|user| !user.is_empty() && !user.contains('/'))
@@ -265,12 +298,6 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
 
 pub async fn serve(
     listen: SocketAddr,
-    stats: Arc<Stats>,
-    ip_tracker: Arc<UserIpTracker>,
-    me_pool: Arc<RwLock<Option<Arc<MePool>>>>,
-    route_runtime: Arc<RouteRuntimeController>,
-    proxy_shared: Arc<ProxySharedState>,
-    upstream_manager: Arc<UpstreamManager>,
     config_path: PathBuf,
     quota_state_path: PathBuf,
     detected_ips_rx: watch::Receiver<(Option<IpAddr>, Option<IpAddr>)>,
@@ -321,11 +348,7 @@ pub async fn serve(
         admission_open: AtomicBool::new(*admission_rx.borrow()),
     });
 
-    let shared = Arc::new(ApiShared {
-        stats,
-        ip_tracker,
-        me_pool,
-        upstream_manager,
+    let shared = Arc::new(ApiProcess {
         config_path,
         quota_state_path,
         detected_ips_rx,
@@ -340,8 +363,6 @@ pub async fn serve(
         request_id: Arc::new(AtomicU64::new(1)),
         runtime_state: runtime_state.clone(),
         startup_tracker,
-        route_runtime,
-        proxy_shared,
         reload_control,
         active_runtime,
     });
@@ -409,15 +430,15 @@ pub async fn serve(
 async fn handle(
     req: Request<Incoming>,
     peer: SocketAddr,
-    shared: Arc<ApiShared>,
+    process: Arc<ApiProcess>,
 ) -> Result<Response<Full<Bytes>>, IoError> {
-    let runtime = shared.active_runtime.load_full();
-    let previous_cache_generation = shared.cache_generation.swap(runtime.id, Ordering::AcqRel);
+    let runtime = process.active_runtime.load_full();
+    let previous_cache_generation = process.cache_generation.swap(runtime.id, Ordering::AcqRel);
     if previous_cache_generation != runtime.id {
-        *shared.minimal_cache.lock().await = None;
-        *shared.runtime_edge_connections_cache.lock().await = None;
+        *process.minimal_cache.lock().await = None;
+        *process.runtime_edge_connections_cache.lock().await = None;
     }
-    let shared = Arc::new(shared.for_runtime(runtime.as_ref()));
+    let shared = Arc::new(process.for_runtime(runtime.as_ref()));
     let config_rx = runtime.config_rx.clone();
     shared
         .runtime_state
@@ -834,6 +855,55 @@ async fn handle(
                                 )
                             })?;
                     return Ok(success_response(StatusCode::OK, status, revision));
+                }
+                if method == Method::DELETE
+                    && let Some(reload_id) = reload_status_route_id(normalized_path)
+                {
+                    if api_cfg.read_only {
+                        return Ok(error_response(
+                            request_id,
+                            ApiFailure::new(
+                                StatusCode::FORBIDDEN,
+                                "read_only",
+                                "API runs in read-only mode",
+                            ),
+                        ));
+                    }
+                    // Without this an operator has no way out of a long drain:
+                    // both submit paths answer 409 for the whole window.
+                    if !shared.reload_control.cancel(reload_id).await {
+                        let status = shared.reload_control.status(reload_id).await;
+                        return Err(match status {
+                            Some(_) => ApiFailure::new(
+                                StatusCode::CONFLICT,
+                                "reload_not_active",
+                                format!("Reload {} is not the active operation", reload_id),
+                            ),
+                            None => ApiFailure::new(
+                                StatusCode::NOT_FOUND,
+                                "reload_not_found",
+                                format!("Reload {} was not found", reload_id),
+                            ),
+                        });
+                    }
+                    shared.runtime_events.record(
+                        "api.system.reload.cancel",
+                        format!("reload_id={}", reload_id),
+                    );
+                    let revision = current_revision(&shared.config_path).await?;
+                    let status =
+                        shared
+                            .reload_control
+                            .status(reload_id)
+                            .await
+                            .ok_or_else(|| {
+                                ApiFailure::new(
+                                    StatusCode::NOT_FOUND,
+                                    "reload_not_found",
+                                    format!("Reload {} was not found", reload_id),
+                                )
+                            })?;
+                    return Ok(success_response(StatusCode::ACCEPTED, status, revision));
                 }
                 if method == Method::POST
                     && let Some(base_user) = normalized_path
