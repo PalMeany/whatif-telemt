@@ -1,5 +1,26 @@
 use super::*;
 
+fn test_listener(port: u16) -> crate::config::ListenerConfig {
+    crate::config::ListenerConfig {
+        ip: "127.0.0.1".parse().unwrap(),
+        port: Some(port),
+        client_mss: None,
+        synlimit: crate::config::SynLimitMode::Off,
+        synlimit_seconds: 60,
+        synlimit_hitcount: 48,
+        synlimit_burst: 24,
+        synlimit_ios_seconds: 1,
+        synlimit_ios_hitcount: 12,
+        synlimit_ios_burst: 24,
+        synlimit_hashlimit_expire_ms: 60_000,
+        synlimit_hashlimit_size: 32_768,
+        announce: None,
+        announce_ip: None,
+        proxy_protocol: None,
+        reuse_allow: false,
+    }
+}
+
 #[test]
 fn process_socket_and_logging_changes_are_deferred() {
     let old = ProxyConfig::default();
@@ -128,4 +149,36 @@ fn strict_middle_proxy_requires_a_prepared_pool() {
     assert!(!strict_middle_proxy_unavailable(true, false, true));
     assert!(!strict_middle_proxy_unavailable(true, true, false));
     assert!(!strict_middle_proxy_unavailable(false, false, false));
+}
+
+#[test]
+fn endpoint_only_listener_move_is_runtime_rebindable() {
+    let mut old = ProxyConfig::default();
+    old.server.listeners = vec![test_listener(443)];
+    let mut desired = old.clone();
+    desired.server.listeners[0].port = Some(8443);
+
+    let resolved = resolve_reload_config(&old, &desired);
+
+    assert!(resolved.deferred_process_fields.is_empty());
+    assert_eq!(resolved.effective.server.listeners[0].port, Some(8443));
+    assert!(resolved.runtime_changed);
+}
+
+#[test]
+fn synlimited_endpoint_move_remains_restart_only() {
+    let mut old = ProxyConfig::default();
+    old.server.listeners = vec![test_listener(443)];
+    old.server.listeners[0].synlimit = crate::config::SynLimitMode::Nftables;
+    let mut desired = old.clone();
+    desired.server.listeners[0].port = Some(8443);
+
+    let resolved = resolve_reload_config(&old, &desired);
+
+    assert_eq!(
+        resolved.deferred_process_fields,
+        vec!["server.listeners".to_string()]
+    );
+    assert_eq!(resolved.effective.server.listeners[0].port, Some(443));
+    assert!(!resolved.runtime_changed);
 }

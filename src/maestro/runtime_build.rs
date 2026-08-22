@@ -24,6 +24,7 @@ use crate::transport::middle_proxy::MePool;
 
 use super::admission;
 use super::generation::{RuntimeGeneration, RuntimeTaskScope};
+use super::listeners::listener_rebind_supported;
 use super::runtime_tasks::RuntimeLogFilter;
 use super::{me_startup, runtime_tasks, tls_bootstrap};
 
@@ -326,18 +327,19 @@ pub(crate) fn resolve_reload_config(
     let mut effective = desired.clone();
     let mut fields = Vec::new();
     let listener_identity_matches = listeners_have_same_bind_identity(&old.server, &desired.server);
-    let listener_process_fields_changed = !listener_identity_matches
-        || !listener_process_fields_equal(&old.server, &desired.server);
-    if old.server.port != desired.server.port
+    let global_listener_policy_changed = old.server.port != desired.server.port
         || old.server.listen_addr_ipv4 != desired.server.listen_addr_ipv4
         || old.server.listen_addr_ipv6 != desired.server.listen_addr_ipv6
         || old.server.listen_tcp != desired.server.listen_tcp
         || old.server.client_mss != desired.server.client_mss
         || old.server.client_mss_bulk != desired.server.client_mss_bulk
         || old.server.proxy_protocol != desired.server.proxy_protocol
-        || old.server.listen_backlog != desired.server.listen_backlog
-        || listener_process_fields_changed
-    {
+        || old.server.listen_backlog != desired.server.listen_backlog;
+    let listener_policy_changed =
+        listener_identity_matches && !listener_process_fields_equal(&old.server, &desired.server);
+    let unsupported_identity_change = !listener_identity_matches
+        && !listener_rebind_supported(old, desired);
+    if global_listener_policy_changed || listener_policy_changed || unsupported_identity_change {
         fields.push("server.listeners".to_string());
         effective.server.port = old.server.port;
         effective.server.listen_addr_ipv4 = old.server.listen_addr_ipv4.clone();

@@ -95,7 +95,7 @@ async fn perform_shutdown(
     let shutdown_started_at = Instant::now();
     info!(signal = %signal, "Received shutdown signal");
 
-    reload_supervisor.quiesce().await;
+    let listener_manager = reload_supervisor.quiesce().await;
     let runtime = active_runtime.load_full();
     let stats = runtime.stats.as_ref();
 
@@ -107,6 +107,10 @@ async fn perform_shutdown(
     info!("Shutting down...");
     let uptime_secs = process_started_at.elapsed().as_secs();
     info!("Uptime: {}", format_uptime(uptime_secs));
+
+    if let Err(error) = listener_manager.lock().await.shutdown().await {
+        warn!(error = %error, "Failed to stop one or more listener tasks cleanly");
+    }
 
     // Graceful ME pool shutdown
     runtime.stop_sessions().await;

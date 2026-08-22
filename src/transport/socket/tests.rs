@@ -249,7 +249,34 @@ async fn test_chunked_send_preserves_stream_and_configured_mss() {
     );
     assert_eq!(
         mss_after, mss_before,
-        "chunked send must not change the configured socket MSS"
+        "chunked send must restore the configured socket MSS"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_chunked_send_restores_mss_after_send_error() {
+    use std::os::fd::AsRawFd;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let _client = TcpStream::connect(addr).await.unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    let mss_before = socket2::SockRef::from(&server).tcp_mss().unwrap();
+    let shutdown_result = unsafe { libc::shutdown(server.as_raw_fd(), libc::SHUT_WR) };
+    assert_eq!(shutdown_result, 0);
+
+    let error = send_tcp_fragmented_fd(server.as_raw_fd(), &[0xA5; 4096], 92)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::NotConnected
+    ));
+    assert_eq!(
+        socket2::SockRef::from(&server).tcp_mss().unwrap(),
+        mss_before
     );
 }
 
@@ -279,17 +306,24 @@ async fn test_chunked_send_has_no_fd_growth_after_success_and_cancellation_stres
     use std::sync::Arc;
 
     let baseline_fds = std::fs::read_dir("/proc/self/fd").unwrap().count();
-
-    let blocked_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let blocked_addr = blocked_listener.local_addr().unwrap();
-    let _blocked_client = TcpStream::connect(blocked_addr).await.unwrap();
-    let (blocked_server, _) = blocked_listener.accept().await.unwrap();
-    socket2::SockRef::from(&blocked_server)
-        .set_send_buffer_size(4 * 1024)
-        .unwrap();
-    let blocked_fd = blocked_server.as_raw_fd();
     let payload = Arc::new(vec![0xA5; 1024 * 1024]);
+
+    let options = ListenOptions {
+        reuse_port: false,
+        client_mss: Some(1400),
+        ..Default::default()
+    };
+    let blocked_socket = create_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
+    let blocked_listener = TcpListener::from_std(blocked_socket.into()).unwrap();
+    let blocked_addr = blocked_listener.local_addr().unwrap();
     for _ in 0..5_000 {
+        let blocked_client = TcpStream::connect(blocked_addr).await.unwrap();
+        let (blocked_server, _) = blocked_listener.accept().await.unwrap();
+        let blocked_mss_before = socket2::SockRef::from(&blocked_server).tcp_mss().unwrap();
+        socket2::SockRef::from(&blocked_server)
+            .set_send_buffer_size(4 * 1024)
+            .unwrap();
+        let blocked_fd = blocked_server.as_raw_fd();
         let payload = payload.clone();
         let sender = tokio::spawn(async move {
             send_tcp_fragmented_fd(blocked_fd, payload.as_slice(), 92).await
@@ -297,29 +331,43 @@ async fn test_chunked_send_has_no_fd_growth_after_success_and_cancellation_stres
         tokio::task::yield_now().await;
         sender.abort();
         let _ = sender.await;
+        assert_eq!(
+            socket2::SockRef::from(&blocked_server).tcp_mss().unwrap(),
+            blocked_mss_before,
+            "cancellation must restore the accepted socket MSS"
+        );
+        drop(blocked_server);
+        drop(blocked_client);
     }
 
-    let success_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let success_socket = create_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
+    let success_listener = TcpListener::from_std(success_socket.into()).unwrap();
     let success_addr = success_listener.local_addr().unwrap();
-    let mut success_client = TcpStream::connect(success_addr).await.unwrap();
-    let (success_server, _) = success_listener.accept().await.unwrap();
-    let success_fd = success_server.as_raw_fd();
-    let reader = tokio::spawn(async move {
-        let mut received = vec![0_u8; 5_000];
-        success_client.read_exact(&mut received).await.unwrap();
-        received
-    });
-    for _ in 0..5_000 {
+    for iteration in 0..5_000 {
+        let mut success_client = TcpStream::connect(success_addr).await.unwrap();
+        let (success_server, _) = success_listener.accept().await.unwrap();
+        let success_mss_before = socket2::SockRef::from(&success_server).tcp_mss().unwrap();
+        let success_fd = success_server.as_raw_fd();
         send_tcp_fragmented_fd(success_fd, &[0x5A], 92)
             .await
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!(
+                    "success cycle {iteration} failed with MSS {success_mss_before}: {error}"
+                )
+            });
+        let mut received = [0_u8; 1];
+        success_client.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, [0x5A]);
+        assert_eq!(
+            socket2::SockRef::from(&success_server).tcp_mss().unwrap(),
+            success_mss_before,
+            "successful send must restore the accepted socket MSS"
+        );
+        drop(success_server);
+        drop(success_client);
     }
-    assert!(reader.await.unwrap().iter().all(|byte| *byte == 0x5A));
 
-    drop(success_server);
     drop(success_listener);
-    drop(blocked_server);
-    drop(_blocked_client);
     drop(blocked_listener);
 
     let final_fds = std::fs::read_dir("/proc/self/fd").unwrap().count();

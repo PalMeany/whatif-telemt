@@ -125,3 +125,7 @@ mod tests {
         assert!(!is_pf_anchor_hook_line("anchor \"other\" all"));
     }
 }
+
+#[cfg(test)]
+#[path = "pf_runtime_tests.rs"]
+mod runtime_tests;

@@ -278,7 +278,7 @@ pub fn normalize_ip(addr: SocketAddr) -> SocketAddr {
 }
 
 /// Socket options for server listening
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenOptions {
     /// Enable SO_REUSEADDR
     pub reuse_addr: bool,
@@ -304,8 +304,8 @@ impl Default for ListenOptions {
     }
 }
 
-/// Create a listening socket with the specified options
-pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Socket> {
+/// Binds a server socket without making it externally accepting.
+pub(crate) fn bind_listener_socket(addr: SocketAddr, options: &ListenOptions) -> Result<Socket> {
     let domain = if addr.is_ipv4() {
         Domain::IPV4
     } else {
@@ -342,7 +342,21 @@ pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Sock
 
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
-    socket.listen(options.backlog as i32)?;
+
+    debug!(addr = %addr, "Bound server socket");
+
+    Ok(socket)
+}
+
+/// Activates a previously bound server socket with the configured backlog.
+pub(crate) fn activate_listener_socket(socket: &Socket, backlog: u32) -> Result<()> {
+    socket.listen(backlog as i32)
+}
+
+/// Create a listening socket with the specified options
+pub fn create_listener(addr: SocketAddr, options: &ListenOptions) -> Result<Socket> {
+    let socket = bind_listener_socket(addr, options)?;
+    activate_listener_socket(&socket, options.backlog)?;
 
     debug!(addr = %addr, "Created listening socket");
 
