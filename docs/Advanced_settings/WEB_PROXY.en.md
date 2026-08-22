@@ -84,22 +84,27 @@ URL        = https://<hostname>/?bridge=<capability>
 ```
 
 With `derive_user_profiles = true` every user in `[access.users]` can use the
-WEB transport with the secret they already have. The capability is derived for
-every form that secret can take in a proxy link — bare, `dd`-prefixed, and
-`ee`-prefixed both with and without each fronted domain from
-`censorship.tls_domain`/`tls_domains` — so a user may paste whichever secret
-their link contains. New users become usable within one refresh interval (30 s)
-of a configuration reload; no restart is needed.
+WEB transport with the secret they already have, in either form a WEB client
+accepts: the plain 32-hex secret or its `dd` random-padding form. New users
+become usable within one refresh interval (30 s) of a configuration reload; no
+restart is needed.
 
-**Hand out the secret whose mode is enabled.** The bridge capability and the
-MTProto handshake are separate checks: a bare secret derives a capability that
-reaches the bridge, but the stream it opens then speaks the classic transform,
-and `[general.modes] classic = false` refuses it and masks the connection. The
-result looks exactly like a working carrier that passes no data. With the usual
-TLS-only telemt configuration, give users the **EE-TLS** secret
-(`ee<secret><domain-hex>`) from the printed proxy link. telemt logs the accepted
-forms at start-up and warns when a mode a distributed secret would need is
-disabled.
+**`ee` fake-TLS secrets do not work over this transport**, and a WEB-capable
+client refuses to accept one in its proxy settings. The carrier is a raw relay:
+it does not add the inner TLS-emulation record that an `ee` secret implies.
+
+**So enable a mode a WEB client can actually speak.** The bridge capability and
+the MTProto handshake are separate checks: the capability gets the client to the
+bridge, but the stream it opens then speaks the plain (classic) or `dd` (secure)
+transform. If neither `[general.modes] classic` nor `secure` is enabled, every
+stream is refused and masked while the carrier itself stays healthy — sessions
+are created, streams open, and no data flows. `general.modes.tls` does not help
+here; it governs the fake-TLS transform that WEB clients never offer.
+
+A deployment serving both direct and WEB clients typically enables `secure` for
+WEB (hand out the `dd…` secret) and `tls` for direct clients (hand out the
+`ee…` link). telemt logs the accepted forms at start-up and warns when no mode
+a WEB client can use is enabled.
 
 ### Explicit profiles
 

@@ -130,7 +130,10 @@ log_level = "normal"
 
 [general.modes]
 classic = false
-secure = false
+# secure carries the WEB transport: a WEB client can only use a plain or dd
+# secret, and dd keeps the padded transform.
+secure = true
+# tls serves direct fake-TLS clients on 8443; WEB clients never use it.
 tls = true
 
 [general.links]
@@ -315,13 +318,12 @@ A WEB-capable client needs **only two values** and derives the capability
 itself; the secret never reaches the page:
 
 - host: `proxy.example.com`
-- secret: **the EE-TLS secret from the proxy link**, `ee<secret><domain-hex>`
+- secret: the user's **`dd`-prefixed** secret, `dd<32-hex>`
 
-Give users the secret whose mode is enabled. This runbook enables `tls` only,
-so the bare 32-hex secret must not be distributed: it derives a capability that
-reaches the bridge, but the stream it opens speaks the classic transform, which
-`[general.modes] classic = false` refuses and masks — a carrier that looks
-healthy and passes no data. telemt prints the accepted forms at start-up:
+A WEB client accepts only a plain or `dd` secret and refuses `ee` fake-TLS
+secrets outright, so hand out the `dd…` form and keep `secure = true`. The
+plain 32-hex secret works too, but only with `classic = true`. Confirm what the
+running config accepts:
 
 ```bash
 journalctl -u telemt --no-pager | grep -i "secret form"
@@ -356,7 +358,8 @@ The same series appear on telemt's own metrics endpoint prefixed
 | Caddy fails to start | telemt already holds 443 | see step 0: the front proxy owns 443 |
 | Every request returns 404, including `/` | `Host` seen by telemt ≠ `web.hostname` | make the front proxy preserve `Host` |
 | Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and the exact secret string the client uses |
-| Client connects, carrier looks healthy, no data ever flows | the distributed secret's mode is disabled (bare secret with `classic = false`) | hand out the EE-TLS secret; check the start-up warning and `telemt_connects_bad` by class |
+| Client connects, carrier looks healthy, no data ever flows | no mode a WEB client can speak is enabled | set `secure = true` and hand out the `dd…` secret; the reject shows as `direct_modes_disabled` in the bad-connect classes |
+| Client rejects the secret in its proxy settings | an `ee` fake-TLS secret was handed out | WEB clients accept only plain and `dd` secrets |
 | `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `web.listen` |
 | Caddy exits with `permission denied` on a log file | `/var/log/caddy` missing or not writable by `caddy` | drop the `log` block, or `mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy` |
 | Caddy warns `Unnecessary header_up X-Forwarded-For` | Caddy already sets the header | remove the directive |
