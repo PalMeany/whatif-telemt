@@ -377,7 +377,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## proxy_secret_url
   - **Constraints / validation**: `String`. When omitted, the `"https://core.telegram.org/getProxySecret"` is used.
-  - **Description**: Optional URL to obtain `proxy-secret` file used by ME handshake/RPC auth. Telemt always tries a fresh download from this URL first (with fallback to `https://core.telegram.org/getProxySecret` if absent). 
+  - **Description**: Optional URL to obtain `proxy-secret` file used by ME handshake/RPC auth. Telemt always tries a fresh download from this URL first (with fallback to `https://core.telegram.org/getProxySecret` if absent).
   - **Example**:
 
     ```toml
@@ -1971,7 +1971,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## client_mss
   - **Constraints / validation**: `String`. Empty or omitted means do not change kernel MSS. Presets: `"extreme-low"` = `88`, `"tspu"` = `92`, `"2in8"` = `256`. Custom decimal strings must be within `88..=4096`.
-  - **Description**: Controls the segment size used for client connections. By default, this value is applied to the TCP listener and remains active for the whole connection. When `client_mss_bulk` is also set on Linux, `client_mss` is used only as the maximum chunk size for the initial authenticated FakeTLS response (`ServerHello`). This setting does not affect API, metrics, Unix sockets, Telegram upstreams, ME sockets, or mask backend connections. Changes require a listener restart/rebind.
+  - **Description**: Controls the segment size used for client connections. By default, this value is applied to the TCP listener and remains active for the whole connection. When `client_mss_bulk` is also set on Linux, the accepted socket is temporarily clamped to `client_mss` while Telemt sends the initial authenticated FakeTLS response (`ServerHello`), then restored to the connection's bulk MSS on success, write error, or cancellation. This setting does not affect API, metrics, Unix sockets, Telegram upstreams, ME sockets, or mask backend connections. Changes require a listener restart/rebind.
   - **Operator note**: The two-tier `synlimit` profile does not require Telemt to disable MSS automatically. Operators that follow external host-tuning recipes should decide explicitly whether to leave MSS shaping enabled for handshake fragmentation or disable it for higher media throughput.
   - **Performance note**: Low MSS increases packet count predictably. Approximate segment multiplier is `ceil(1460 / client_mss)`.
   - **Example**:
@@ -1982,7 +1982,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## client_mss_bulk
   - **Constraints / validation**: Linux-only `String`. Same grammar as [`client_mss`](#client_mss) (empty/omitted, presets `"extreme-low"`/`"tspu"`/`"2in8"`, or a decimal in `88..=4096`). A non-empty value requires at least one listener with an effective `client_mss`, and it must be greater than every participating listener's handshake value. A listener may use `client_mss = ""` as an explicit opt-out.
-  - **Description**: Enables an experimental two-size profile. The listener uses `client_mss_bulk` from the start of the connection, including when the client sends `ClientHello`. Telemt sends the initial authenticated FakeTLS response (`ServerHello`) with best-effort userspace writes no larger than `client_mss`; normal MTProto writes then continue without the low chunk size. TCP is a byte stream: `MSG_EOR`, TCP offloads, loss, and retransmission provide no guarantee that write boundaries remain packet, SKB, or retransmitted-segment boundaries. When this option is empty or omitted, `client_mss` remains the kernel MSS for the whole connection and is the only strong segment upper-bound contract. Changes require listener restart/rebind.
+  - **Description**: Enables an experimental two-size profile. The listener uses `client_mss_bulk` from the start of the connection, including when the client sends `ClientHello`. Telemt temporarily clamps the accepted socket's `TCP_MAXSEG` to `client_mss` and sends the initial authenticated FakeTLS response (`ServerHello`) in writes no larger than that value, then restores the prior socket MSS before normal MTProto traffic. Restoration is attempted on success, write error, and task cancellation. TCP is a byte stream: `MSG_EOR`, TCP offloads, loss, and retransmission can still change observable capture boundaries, so the release packet-capture gate remains authoritative. When this option is empty or omitted, `client_mss` remains the kernel MSS for the whole connection. Changes require listener restart/rebind.
   - **Example**:
 
     ```toml
@@ -2011,7 +2011,7 @@ This document lists all configuration keys accepted by `config.toml`.
     ```
 ## proxy_protocol_trusted_cidrs
   - **Constraints / validation**: `IpNetwork[]`.
-    - If omitted, defaults to trust-all CIDRs (`0.0.0.0/0` and `::/0`). 
+    - If omitted, defaults to trust-all CIDRs (`0.0.0.0/0` and `::/0`).
       > In production behind HAProxy/nginx, prefer setting explicit trusted CIDRs instead of relying on this fallback.
     - If explicitly set to an empty array, all PROXY headers are rejected.
   - **Description**: Trusted source CIDRs allowed to provide PROXY protocol headers (security control).
@@ -2391,7 +2391,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 ## synlimit_hitcount (server.listeners)
   - **Constraints / validation**: `u32`, must be `> 0`. Default is `48`.
-  - **Description**: Generic SYN-fix token-bucket rate amount. Together with `synlimit_seconds`, it defines the allowed source-IP SYN rate before excess SYN packets receive TCP RST.
+  - **Description**: Generic SYN-fix token-bucket rate amount. Together with `synlimit_seconds`, it defines the allowed source-IP SYN rate. Linux netfilter rejects excess SYN packets with TCP RST; PF silently drops excess state-creating packets.
   - **Example**:
 
     ```toml
@@ -2666,7 +2666,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 
 ## tls_domain
   - **Constraints / validation**: Must be a non-empty domain name. Must not contain spaces or `/`.
-  - **Description**: Primary domain used for Fake-TLS masking / fronting profile and as the default SNI domain presented to clients. 
+  - **Description**: Primary domain used for Fake-TLS masking / fronting profile and as the default SNI domain presented to clients.
     This value becomes part of generated `ee` links, and changing it invalidates previously generated links.
   - **Example**:
 

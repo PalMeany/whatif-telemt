@@ -1462,7 +1462,7 @@ Without a `reload` query parameter, the endpoint writes the patch and the file w
 - `revision` — SHA-256 hex of the canonical source manifest after the write, including every recursive include path and its raw bytes.
 - `restart_required` — legacy file-watcher classification retained for compatibility.
 - `runtime_reload_required` — reports whether a full Maestro generation reload is needed for runtime effect.
-- `process_restart_required` and `deferred_process_fields` — report process-owned sockets or paths that remain unchanged by an in-process reload.
+- `process_restart_required` and `deferred_process_fields` — report socket policies or process-owned paths that remain unchanged by an in-process reload. A pure listener endpoint move is reloadable only when every retained endpoint keeps identical bind policy and neither the active nor desired listener set uses SYN limiting; same-address MSS, PROXY protocol, backlog, reuse, or SYN-limit changes remain deferred.
 - `changed` — list of top-level section names that differed.
 - `reload` — accepted operation metadata; omitted without a reload query and for process-only patches that cannot change the active generation.
 
@@ -1516,7 +1516,7 @@ The endpoint returns `202` with `ReloadAccepted`. A concurrent non-terminal relo
 
 Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activating`, `draining`, `succeeded`, `rolled_back`, or `failed`. Terminal statuses include `finished_at_epoch_secs`; failures include `error`. Successful activation may include `warnings` for old-generation cleanup failures and `deferred_process_fields` for process-owned settings.
 
-Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. API, metrics, client TCP/Unix listeners, listener MSS profiles, PID ownership, and logging remain process-scoped. Desired changes to those fields are reported as deferred and are overlaid with the active values before runtime preparation, so the published generation remains an effective-state view. Maestro does not invoke systemd, containerd, or another process supervisor.
+Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. A process-owned listener manager can prepare new endpoint sockets without calling `listen(2)`, stop removed acceptors before the runtime swap, and start new acceptors only after the swap. Inbound listener planning depends on normalized config and explicit IPv4/IPv6 policy, never transient outbound connectivity-probe results. Retained endpoints are not rebound, and unsupported same-address policy changes are overlaid with active values and reported as deferred. API, metrics, Unix listeners, PID ownership, and logging remain process-scoped. Maestro does not invoke systemd, containerd, or another process supervisor.
 
 Reload preparation requires every configured TLS-front domain to have a non-default cached profile and requires a ready Middle-End pool when direct fallback is disabled. A candidate that does not satisfy either readiness condition fails without replacing the active generation.
 

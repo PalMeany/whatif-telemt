@@ -1971,7 +1971,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```
 ## client_mss
   - **Einschränkungen / Validierung**: `String`. Leer oder ausgelassen bedeutet: Kernel-MSS nicht verändern. Presets: `"extreme-low"` = `88`, `"tspu"` = `92`, `"2in8"` = `256`. Benutzerdefinierte Dezimalwerte müssen im Bereich `88..=4096` liegen.
-  - **Beschreibung**: Client-facing TCP-MSS, das vor `listen(2)` auf TCP-Listener-Sockets gesetzt wird, damit Linux den Wert im SYN/ACK annoncieren kann. Betrifft nur die clientseitigen Proxy-TCP-Listener, nicht API, Metriken, Unix-Sockets, Telegram-Upstreams, ME-Sockets oder Mask-Backend-Verbindungen. Änderungen erfordern Listener-Neustart/Rebind.
+  - **Beschreibung**: Steuert die Segmentgröße für Client-Verbindungen. Standardmäßig wird der Wert auf den TCP-Listener angewendet und bleibt für die gesamte Verbindung aktiv. Wenn unter Linux zusätzlich `client_mss_bulk` gesetzt ist, begrenzt Telemt `TCP_MAXSEG` des akzeptierten Sockets während der ersten authentifizierten FakeTLS-Antwort (`ServerHello`) vorübergehend auf `client_mss` und stellt danach bei Erfolg, Schreibfehler oder Task-Abbruch die Bulk-MSS wieder her. Die Einstellung betrifft weder API, Metriken, Unix-Sockets, Telegram-Upstreams, ME-Sockets noch Mask-Backend-Verbindungen. Änderungen erfordern Listener-Neustart/Rebind.
   - **Betreiberhinweis**: Das zweistufige `synlimit`-Profil verlangt nicht, dass Telemt MSS automatisch deaktiviert. Betreiber, die externe Host-Tuning-Rezepte übernehmen, sollten bewusst entscheiden, ob MSS-Shaping für Handshake-Fragmentierung aktiv bleibt oder zugunsten höheren Medien-Durchsatzes deaktiviert wird.
   - **Performance-Hinweis**: Niedriges MSS erhöht die Paketanzahl vorhersehbar. Der ungefähre Segmentmultiplikator ist `ceil(1460 / client_mss)`.
   - **Beispiel**:
@@ -1981,8 +1981,8 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     client_mss = "tspu"
     ```
 ## client_mss_bulk
-  - **Einschränkungen / Validierung**: `String`. Gleiche Grammatik wie [`client_mss`](#client_mss): leer/ausgelassen, Presets `"extreme-low"`/`"tspu"`/`"2in8"` oder ein Dezimalwert in `88..=4096`.
-  - **Beschreibung**: Optionale MSS für die Bulk-Phase. Wenn gesetzt, gilt das niedrige `client_mss` nur während der TLS-Handshake gesendet wird, einschließlich des von DPI inspizierten ServerHello. Sobald die Verbindung in den Relay-Betrieb wechselt, wird das MSS des Client-Sockets für die Bulk-Datenphase auf `client_mss_bulk` erhöht. So bleibt die Anti-DPI-Handshake-Fragmentierung erhalten, während Payload wieder in normal großen Paketen läuft; die ausgehende Paketanzahl sinkt ungefähr um den `client_mss`-Segmentmultiplikator (z. B. ~10x mit `"tspu"`). Nützlich auf Hosts, deren Abuse-Erkennung Pakete pro Sekunde statt Bandbreite zählt. Leer/ausgelassen bedeutet: Handshake-MSS für die gesamte Verbindung beibehalten (bisheriges Verhalten). Nur Linux; auf anderen Plattformen ein No-Op.
+  - **Einschränkungen / Validierung**: Nur Linux, Typ `String`. Gleiche Grammatik wie [`client_mss`](#client_mss): leer/ausgelassen, Presets `"extreme-low"`/`"tspu"`/`"2in8"` oder ein Dezimalwert in `88..=4096`. Ein nicht leerer Wert erfordert mindestens einen Listener mit effektivem `client_mss` und muss größer als der Handshake-Wert jedes teilnehmenden Listeners sein. Ein Listener kann mit `client_mss = ""` ausdrücklich aus dem Profil ausgenommen werden.
+  - **Beschreibung**: Aktiviert ein experimentelles Profil mit zwei Größen. Der Listener verwendet `client_mss_bulk` ab dem Beginn der Verbindung, einschließlich des Empfangs von `ClientHello`. Während der ersten authentifizierten FakeTLS-Antwort (`ServerHello`) begrenzt Telemt `TCP_MAXSEG` des akzeptierten Sockets vorübergehend auf `client_mss` und verwendet Schreibvorgänge, die nicht größer als dieser Wert sind; vor normalem MTProto-Verkehr wird die vorherige MSS wiederhergestellt. Die Wiederherstellung wird bei Erfolg, Schreibfehler und Task-Abbruch versucht. TCP ist ein Bytestrom: `MSG_EOR`, TCP-Offloads, Verluste und Neuübertragungen können beobachtete Capture-Grenzen verändern; deshalb bleibt das Packet-Capture-Release-Gate maßgeblich. Wenn die Option leer ist oder fehlt, bleibt `client_mss` die Kernel-MSS für die gesamte Verbindung. Änderungen erfordern Listener-Neustart/Rebind.
   - **Beispiel**:
 
     ```toml
@@ -2011,7 +2011,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
     ```
 ## proxy_protocol_trusted_cidrs
   - **Einschränkungen / Validierung**: `IpNetwork[]`.
- – Wenn ausgelassen, werden standardmäßig „All Trust-CIDRs“ (`0.0.0.0/0` und `::/0`) verwendet. 
+ – Wenn ausgelassen, werden standardmäßig „All Trust-CIDRs“ (`0.0.0.0/0` und `::/0`) verwendet.
  > In der Produktion hinter HAProxy/nginx sollten Sie lieber explizite vertrauenswürdige CIDRs festlegen, anstatt sich auf diesen Fallback zu verlassen.
  – Wenn explizit auf ein leeres Array festgelegt, werden alle PROXY-Header abgelehnt.
   - **Beschreibung**: Vertrauenswürdige Quell-CIDRs dürfen PROXY Protokollheader bereitstellen (Sicherheitskontrolle).
@@ -2311,15 +2311,15 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
 | [`ip`](#ip) | `IpAddr` | — | `✘` |
 | [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`client_mss`](#client_mss-serverlisteners) | `String` | `[server].client_mss` | `✘` |
-| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"` oder `"nftables"` | `false` | `✔` |
-| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✔` |
-| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✔` |
-| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `24` | `✔` |
-| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✔` |
-| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✔` |
-| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✔` |
-| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✔` |
+| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"`, `"nftables"` oder `"pf"` | `false` | `✘` |
+| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✘` |
+| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✘` |
+| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `24` | `✘` |
+| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✘` |
+| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✘` |
+| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✘` |
+| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✘` |
+| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✘` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2356,8 +2356,8 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     client_mss = "256"
     ```
 ## synlimit (server.listeners)
-  - **Einschränkungen / Validierung**: `false`, `"iptables"` oder `"nftables"`. Ausgelassen oder `false` deaktiviert SYN-Limiting für diesen Listener.
-  - **Beschreibung**: Installiert pro Listener zweistufige Linux-netfilter-SYN-Fix-Regeln für den Listener-Port. `"iptables"` nutzt `iptables`/`ip6tables`-Filterregeln mit `hashlimit`, `length` und TTL/hop-limit Matches. `"nftables"` nutzt Telemt-eigene Tabellen mit per-source `meter`-Regeln und äquivalenten IPv4/IPv6-Classifieren. Die Regeln werden früh in `INPUT` eingefügt, akzeptieren SYN-Pakete unterhalb des Limits und lehnen SYN-Pakete oberhalb des Limits mit TCP RST ab, damit Clients zügig retryen statt auf ein stilles DROP-Timeout zu warten. Der generische Bucket wird über `synlimit_seconds`, `synlimit_hitcount` und `synlimit_burst` gesteuert; der iOS-ähnliche TTL/length-Bucket über `synlimit_ios_*`. Regeln werden zur Runtime reconciled und beim graceful Telemt-Shutdown entfernt; nach `SIGKILL` kann der Prozess sie nicht mehr bereinigen. Erfordert CAP_NET_ADMIN. `synlimit*` ist für vorhandene Listener-Endpunkte hot-reloadfähig; Änderungen an Listener-`ip` oder `port` erfordern weiterhin Restart/Rebind.
+  - **Einschränkungen / Validierung**: `false`, `"iptables"`, `"nftables"` oder `"pf"`. Fehlt der Wert oder ist er `false`, ist die SYN-Begrenzung für diesen Listener deaktiviert.
+  - **Beschreibung**: Installiert beim Start prozessverwaltete Firewall-Regeln pro Listener-Port. Linux akzeptiert nur `"iptables"` oder `"nftables"`, FreeBSD nur `"pf"`; andere Plattformen akzeptieren nur `false`. Linux-Netfilter akzeptiert SYN-Pakete unterhalb des Limits und weist überschüssige Pakete mit TCP RST ab. PF erzeugt getrennte `inet`-/`inet6`-Regeln und verwendet das native `max-src-conn-rate`; überschüssige zustandserzeugende Pakete werden still verworfen. Bei fehlenden Berechtigungen, fehlgeschlagener Backend-Validierung, Bereinigung veralteter Kandidaten oder Regelanwendung bricht der Start vor den Accept-Schleifen ab. Jede Änderung an `synlimit*` erfordert einen Prozessneustart. Die Kombination aktivierter SYN-Begrenzung mit `--run-as-user` oder `--run-as-group` wird abgelehnt, bis ein separater privilegierter Firewall-Helfer vorhanden ist. Die Regeln werden beim geordneten Herunterfahren entfernt; nach `SIGKILL` kann der Prozess sie nicht bereinigen. Linux benötigt CAP_NET_ADMIN. FreeBSD benötigt root und einen Hook im PF-Hauptregelsatz, z. B. `anchor "telemt_synlimit/*"`.
   - **Betreiberhinweis**: Telemt persistiert keine Regeln mit `iptables-persistent`, schreibt nicht nach `/etc/sysctl.d`, ändert keine systemd-Limits und modifiziert `client_mss` nicht. Host-Level-Tuning muss manuell angewendet werden, falls die Deployment-Policy es verlangt.
   - **Beispiel**:
 
@@ -2371,10 +2371,15 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     ip = "::"
     port = 443
     synlimit = "nftables"
+
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "pf"
     ```
 ## synlimit_seconds (server.listeners)
   - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `60`.
-  - **Beschreibung**: Generisches SYN-Fix-Token-Bucket-Intervall. Die Rate beträgt `synlimit_hitcount / synlimit_seconds` und wird in native netfilter-Rateneinheiten (`second`, `minute`, `hour` oder `day` gerendert. Dieser Bucket verarbeitet SYN-Pakete, die nicht mit dem iOS-ähnlichen Klassifizierer TTL/length übereinstimmen.
+  - **Beschreibung**: Generisches SYN-Fix-Token-Bucket-Intervall. Unter Linux beträgt die Rate `synlimit_hitcount / synlimit_seconds` und wird in native Netfilter-Rateneinheiten (`second`, `minute`, `hour` oder `day`) gerendert. Dieser Bucket verarbeitet SYN-Pakete, die nicht mit dem iOS-ähnlichen TTL-/Length-Klassifizierer übereinstimmen. PF rendert dasselbe Paar als `max-src-conn-rate hitcount/seconds`.
   - **Beispiel**:
 
     ```toml
@@ -2386,7 +2391,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     ```
 ## synlimit_hitcount (server.listeners)
   - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `48`.
-  - **Beschreibung**: Generischer SYN-Fix-Token-Bucket-Ratenbetrag. Zusammen mit `synlimit_seconds` definiert es die zulässige Source-IP-SYN-Rate, bevor überschüssige SYN-Pakete TCP RST empfangen.
+  - **Beschreibung**: Generischer SYN-Fix-Token-Bucket-Ratenbetrag. Zusammen mit `synlimit_seconds` definiert er die zulässige Source-IP-SYN-Rate. Linux-Netfilter weist Überschreitungen mit TCP RST ab; PF verwirft überschüssige zustandserzeugende Pakete still.
   - **Beispiel**:
 
     ```toml
@@ -2446,7 +2451,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     ```
 ## synlimit_hashlimit_expire_ms (server.listeners)
   - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `60000`.
-  - **Beschreibung**: Eintragsablauf in Millisekunden für iptables/ip6tables Hashlimit-Buckets. nftables-Messgeräte verwenden den vom Kernel verwalteten Zustand und machen diesen genauen Knopf nicht verfügbar.
+  - **Beschreibung**: Eintragsablauf in Millisekunden für iptables/ip6tables Hashlimit-Buckets. nftables-Meter und PF-Source-Tracking verwenden kernelverwalteten Zustand und stellen diesen genauen Parameter nicht bereit.
   - **Beispiel**:
 
     ```toml
@@ -2458,7 +2463,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     ```
 ## synlimit_hashlimit_size (server.listeners)
   - **Einschränkungen / Validierung**: `u32`, muss `> 0` sein. Der Default ist `32768`.
-  - **Beschreibung**: Hash-Tabellengröße für iptables/ip6tables Hashlimit-Buckets. nftables-Messgeräte verwenden den vom Kernel verwalteten Zustand und machen diesen genauen Knopf nicht verfügbar.
+  - **Beschreibung**: Hash-Tabellengröße für iptables/ip6tables Hashlimit-Buckets. nftables-Meter und PF-Source-Tracking verwenden kernelverwalteten Zustand und stellen diesen genauen Parameter nicht bereit.
   - **Beispiel**:
 
     ```toml
