@@ -31,6 +31,12 @@ proxy.example.com {
 # exactly what telemt's `web.trusted_proxies` expects. Do not add
 # `header_up X-Forwarded-For` — Caddy warns that it is unnecessary.
 #
+# If a CDN fronts Caddy, telemt still matches the Host header against
+# web.hostname, which must be the name clients type into their app. When the CDN
+# rewrites Host to the origin name, normalise it back inside the site block:
+#
+#   header_up Host cdn.example.com
+#
 # Configuring Caddy's own `trusted_proxies` (only correct when something else
 # already fronts Caddy) makes it forward inbound values and append its own, so
 # the header becomes a list. telemt then accounts the request against the last

@@ -356,7 +356,8 @@ The same series appear on telemt's own metrics endpoint prefixed
 | `Failed to bind WEB proxy listener` at start-up | 8080/8081 already used | change `web.listen` / `web.admin_listen` |
 | telemt exits with `No listeners. Exiting.` | no usable `[[server.listeners]]` | check the listener block and that the port is free |
 | Caddy fails to start | telemt already holds 443 | see step 0: the front proxy owns 443 |
-| Every request returns 404, including `/` | `Host` seen by telemt ≠ `web.hostname` | make the front proxy preserve `Host` |
+| Every request returns 404, including `/` | `Host` seen by telemt ≠ `web.hostname` | `journalctl -u telemt \| grep "Host does not match"` names both; make the front proxy preserve `Host`, or rewrite it with `header_up Host <hostname>` |
+| Every request returns 404 behind a CDN | the CDN forwards its own origin hostname, and `web.hostname` must be the name clients type | set `web.hostname` to the client-facing name and normalise `Host` at the origin proxy |
 | Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and the exact secret string the client uses |
 | Client connects, carrier looks healthy, no data ever flows | no mode a WEB client can speak is enabled | set `secure = true` and hand out the `dd…` secret; the reject shows as `direct_modes_disabled` in the bad-connect classes |
 | Client rejects the secret in its proxy settings | an `ee` fake-TLS secret was handed out | WEB clients accept only plain and `dd` secrets |

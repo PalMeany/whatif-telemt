@@ -50,6 +50,41 @@ path for an unauthenticated prober to compare with the public site: only
 `GET /?bridge=<valid capability>` reveals the bridge, and every other request
 is answered by the operator's own site.
 
+### Behind a CDN or a second proxy layer
+
+`web.hostname` must be **the hostname clients type into their app**, because the
+bridge capability is `HMAC(secret, "…\n" + hostname)` — the relay and the client
+must derive it over the same name. It is not the origin's own hostname.
+
+telemt then checks the `Host` header against that name and answers everything
+else with the site's 404. Case, a trailing dot, and any port are normalised
+away, but a CDN that forwards its own origin hostname still fails the check. Two
+ways out:
+
+- point clients and the CDN at the same name (`hostname = "cdn.example.com"`)
+  and let the CDN preserve `Host`; or
+- normalise it at the origin front proxy, which is the reliable option when the
+  CDN insists on rewriting:
+
+```caddy
+cdn.example.com, origin.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up Host cdn.example.com
+	}
+}
+```
+
+A rejected request logs the received and expected names at debug level:
+
+```bash
+journalctl -u telemt | grep "Host does not match"
+```
+
+Two further caveats apply behind a CDN: it terminates TLS, so it sees the bridge
+page, the bearer tokens, and the carrier's request pattern in the clear; and
+`X-Forwarded-For` then ends with the CDN's edge address, so per-IP limits and IP
+tracking account every user to that address.
+
 ## Configuration
 
 ```toml

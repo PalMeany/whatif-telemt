@@ -32,6 +32,7 @@ pub(crate) mod headers;
 pub(crate) mod ws;
 
 use headers::{client_ip, header, host_matches};
+use tracing::debug;
 
 /// Response body used across the relay surface.
 pub(crate) type WebBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -69,6 +70,14 @@ impl Relay {
         peer: SocketAddr,
     ) -> Response<WebBody> {
         if !host_matches(request.headers(), &self.hostname) {
+            // Without this the symptom is a blanket 404 with no explanation,
+            // which is indistinguishable from a broken site configuration.
+            debug!(
+                peer = %peer,
+                received = headers::request_host(request.headers()).unwrap_or("<absent>"),
+                expected = %self.hostname,
+                "WEB request rejected: Host does not match web.hostname"
+            );
             return self.serve_wrong_host(&request);
         }
         if TRANSPORT_PATHS.contains(&request.uri().path()) {

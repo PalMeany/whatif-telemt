@@ -76,11 +76,26 @@ pub(crate) fn client_ip(
 }
 
 /// True when the `Host` header names the configured public hostname.
+///
+/// Host names are case-insensitive, may carry a trailing dot, and may carry any
+/// port when a front proxy or CDN reaches the origin on a non-standard one. All
+/// three are normalised away, because rejecting them produces a blanket 404
+/// that looks exactly like a misconfigured site.
 pub(crate) fn host_matches(headers: &HeaderMap<HeaderValue>, hostname: &str) -> bool {
-    let Some(host) = header(headers, "host") else {
-        return false;
+    request_host(headers).is_some_and(|host| host.eq_ignore_ascii_case(hostname))
+}
+
+/// Returns the `Host` header without its port or trailing dot.
+pub(crate) fn request_host(headers: &HeaderMap<HeaderValue>) -> Option<&str> {
+    let host = header(headers, "host")?;
+    // An IPv6 literal keeps its colons inside brackets; the configured
+    // hostname can never be an address, so such a value simply will not match.
+    let without_port = match host.rfind(':') {
+        Some(index) if !host.starts_with('[') => &host[..index],
+        _ => host,
     };
-    host == hostname || host.len() == hostname.len() + 4 && host == format!("{hostname}:443")
+    let trimmed = without_port.strip_suffix('.').unwrap_or(without_port);
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 #[cfg(test)]
@@ -117,6 +132,38 @@ mod tests {
         )));
         assert!(!binary_content_type(Some("text/plain")));
         assert!(!binary_content_type(None));
+    }
+
+    #[test]
+    fn host_matching_normalises_case_port_and_trailing_dot() {
+        let mut headers = HeaderMap::new();
+        for value in [
+            "proxy.example.com",
+            "PROXY.Example.CoM",
+            "proxy.example.com:443",
+            "proxy.example.com:8443",
+            "proxy.example.com.",
+            "proxy.example.com.:443",
+        ] {
+            headers.insert("host", HeaderValue::from_str(value).expect("header"));
+            assert!(
+                host_matches(&headers, "proxy.example.com"),
+                "expected {value} to match"
+            );
+        }
+        for value in [
+            "other.example.com",
+            "proxy.example.com.evil.net",
+            ":443",
+            "",
+        ] {
+            headers.insert("host", HeaderValue::from_str(value).expect("header"));
+            assert!(
+                !host_matches(&headers, "proxy.example.com"),
+                "expected {value} to be refused"
+            );
+        }
+        assert!(!host_matches(&HeaderMap::new(), "proxy.example.com"));
     }
 
     #[test]
