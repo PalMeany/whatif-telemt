@@ -47,20 +47,33 @@ pub(crate) enum WsMessage {
 }
 
 /// Reads client frames from the upgraded connection.
+///
+/// Fragment assembly lives in the reader rather than in `read_message`, because
+/// RFC 6455 §5.4 lets a control frame be injected between the fragments of a
+/// message. Returning that control frame has to leave the partial message
+/// intact, otherwise the relay answers its own liveness ping and then rejects
+/// the client's continuation as unexpected.
 pub(crate) struct WsReader<R> {
     inner: R,
     limit: usize,
+    /// Fragments of the message currently being reassembled.
+    assembled: Vec<u8>,
+    /// Set between a non-final data frame and its final continuation.
+    assembling: bool,
 }
 
 impl<R: AsyncRead + Unpin> WsReader<R> {
     pub(crate) fn new(inner: R, limit: usize) -> Self {
-        Self { inner, limit }
+        Self {
+            inner,
+            limit,
+            assembled: Vec::new(),
+            assembling: false,
+        }
     }
 
     /// Reads one complete message, transparently joining fragments.
     pub(crate) async fn read_message(&mut self) -> io::Result<WsMessage> {
-        let mut assembled: Vec<u8> = Vec::new();
-        let mut assembling = false;
         loop {
             let frame = self.read_frame().await?;
             if frame.opcode >= 0x8 {
@@ -77,25 +90,26 @@ impl<R: AsyncRead + Unpin> WsReader<R> {
             match frame.opcode {
                 OPCODE_TEXT => return Err(protocol_error("text messages are rejected")),
                 OPCODE_BINARY => {
-                    if assembling {
+                    if self.assembling {
                         return Err(protocol_error("interleaved data frame"));
                     }
                     if frame.fin {
                         return Ok(WsMessage::Binary(frame.payload));
                     }
-                    assembling = true;
-                    assembled = frame.payload;
+                    self.assembling = true;
+                    self.assembled = frame.payload;
                 }
                 OPCODE_CONTINUATION => {
-                    if !assembling {
+                    if !self.assembling {
                         return Err(protocol_error("unexpected continuation frame"));
                     }
-                    if assembled.len() + frame.payload.len() > self.limit {
+                    if self.assembled.len() + frame.payload.len() > self.limit {
                         return Err(protocol_error("message exceeds read limit"));
                     }
-                    assembled.extend_from_slice(&frame.payload);
+                    self.assembled.extend_from_slice(&frame.payload);
                     if frame.fin {
-                        return Ok(WsMessage::Binary(std::mem::take(&mut assembled)));
+                        self.assembling = false;
+                        return Ok(WsMessage::Binary(std::mem::take(&mut self.assembled)));
                     }
                 }
                 _ => return Err(protocol_error("unknown data opcode")),
@@ -250,6 +264,22 @@ mod tests {
         match reader.read_message().await.expect("second") {
             WsMessage::Binary(payload) => assert_eq!(payload, b"abcd"),
             _ => panic!("expected binary"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_control_frame_between_fragments_keeps_the_partial_message() {
+        let mut input = masked_frame(OPCODE_BINARY, false, b"ab");
+        input.extend_from_slice(&masked_frame(OPCODE_PING, true, b"probe"));
+        input.extend_from_slice(&masked_frame(OPCODE_CONTINUATION, true, b"cd"));
+        let mut reader = WsReader::new(input.as_slice(), 1024);
+        match reader.read_message().await.expect("ping") {
+            WsMessage::Ping(payload) => assert_eq!(payload, b"probe"),
+            _ => panic!("expected the interleaved ping"),
+        }
+        match reader.read_message().await.expect("binary") {
+            WsMessage::Binary(payload) => assert_eq!(payload, b"abcd"),
+            _ => panic!("expected the reassembled message"),
         }
     }
 

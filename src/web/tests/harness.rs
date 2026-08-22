@@ -5,15 +5,21 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{
     CarrierMode, ProxyConfig, WebBackend, WebLimits, WebProfileLimits, WebTimeouts,
 };
+use crate::crypto::SecureRandom;
 use crate::maestro::generation::test_runtime_generation;
 use crate::web::capability::derive_capability;
 use crate::web::frame::{self, FrameType};
+use crate::web::http::Relay;
+use crate::web::listener;
 use crate::web::manager::{Manager, WebProfile};
 use crate::web::runtime::WebRuntime;
+use crate::web::site::StaticSite;
+use crate::web::upstream::UpstreamProxy;
 
 /// Hostname used by every fixture.
 pub(super) const TEST_HOST: &str = "proxy.example.com";
@@ -56,31 +62,46 @@ pub(super) fn build_manager(
     carrier: CarrierMode,
     limits: WebLimits,
 ) -> Arc<Manager> {
+    build_manager_with_timeouts(backend, carrier, limits, WebTimeouts::default())
+}
+
+/// Builds a manager with caller-chosen timeouts.
+///
+/// The reaper, the bootstrap eviction, and the closed-token window are all
+/// driven by `WebTimeouts`, and their production values are minutes long, so a
+/// test that never overrides them cannot reach any of that code.
+pub(super) fn build_manager_with_timeouts(
+    backend: WebBackend,
+    carrier: CarrierMode,
+    limits: WebLimits,
+    timeouts: WebTimeouts,
+) -> Arc<Manager> {
     let mut config = ProxyConfig::default();
     config
         .access
         .users
         .insert("tester".to_string(), hex::encode(TEST_SECRET));
-    build_manager_with_config(config, backend, carrier, limits)
-}
-
-/// Builds a manager over a caller-supplied proxy configuration.
-pub(super) fn build_manager_with_config(
-    config: ProxyConfig,
-    backend: WebBackend,
-    carrier: CarrierMode,
-    limits: WebLimits,
-) -> Arc<Manager> {
-    build_manager_with_stats(config, backend, carrier, limits).0
+    let (manager, _) = build_manager_parts(config, backend, carrier, limits, timeouts);
+    manager
 }
 
 /// Builds a manager and hands back the runtime statistics it feeds, so a test
 /// can tell an accepted handshake from a rejected one.
 pub(super) fn build_manager_with_stats(
+    config: ProxyConfig,
+    backend: WebBackend,
+    carrier: CarrierMode,
+    limits: WebLimits,
+) -> (Arc<Manager>, Arc<crate::stats::Stats>) {
+    build_manager_parts(config, backend, carrier, limits, WebTimeouts::default())
+}
+
+fn build_manager_parts(
     mut config: ProxyConfig,
     backend: WebBackend,
     carrier: CarrierMode,
     limits: WebLimits,
+    timeouts: WebTimeouts,
 ) -> (Arc<Manager>, Arc<crate::stats::Stats>) {
     config
         .rebuild_runtime_user_auth()
@@ -95,9 +116,76 @@ pub(super) fn build_manager_with_stats(
         capabilities: vec![derive_capability(TEST_HOST, &TEST_SECRET)],
         limits: WebProfileLimits::default().with_defaults(&limits),
     });
-    let manager =
-        Manager::new(limits, WebTimeouts::default(), vec![profile], runtime).expect("manager");
+    let manager = Manager::new(limits, timeouts, vec![profile], runtime).expect("manager");
     (manager, stats)
+}
+
+/// Where a relay under test gets its public site from.
+pub(super) enum PublicSite {
+    /// A temporary directory with an index and a 404 body.
+    Directory,
+    /// A loopback application, exactly like `web.public_upstream`.
+    Upstream(SocketAddr),
+}
+
+/// A relay listening on a real port, torn down when the fixture is dropped.
+pub(super) struct RelayFixture {
+    pub(super) address: SocketAddr,
+    pub(super) manager: Arc<Manager>,
+    pub(super) shutdown: CancellationToken,
+    _site: Option<tempfile::TempDir>,
+}
+
+impl Drop for RelayFixture {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
+}
+
+/// Starts one relay over a real listener with the given public site.
+pub(super) async fn start_relay(
+    manager: Arc<Manager>,
+    public: PublicSite,
+    limits: WebLimits,
+    timeouts: WebTimeouts,
+) -> RelayFixture {
+    let (site, upstream, directory) = match public {
+        PublicSite::Directory => {
+            let directory = tempfile::tempdir().expect("tempdir");
+            std::fs::write(directory.path().join("index.html"), b"<h1>site</h1>").expect("index");
+            std::fs::write(directory.path().join("404.html"), b"<h1>missing</h1>").expect("404");
+            let site = StaticSite::load(directory.path()).expect("site");
+            (Some(site), None, Some(directory))
+        }
+        PublicSite::Upstream(address) => (
+            None,
+            Some(UpstreamProxy::new(
+                address,
+                std::time::Duration::from_millis(timeouts.body_read_ms),
+            )),
+            None,
+        ),
+    };
+    let relay = Arc::new(Relay {
+        hostname: TEST_HOST.to_string(),
+        manager: manager.clone(),
+        limits,
+        timeouts,
+        site,
+        upstream,
+        trusted_proxies: vec!["127.0.0.0/8".parse().expect("cidr")],
+        rng: Arc::new(SecureRandom::new()),
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+    let address = listener.local_addr().expect("relay addr");
+    let shutdown = CancellationToken::new();
+    tokio::spawn(listener::serve_carrier(listener, relay, shutdown.clone()));
+    RelayFixture {
+        address,
+        manager,
+        shutdown,
+        _site: directory,
+    }
 }
 
 /// Encodes one frame batch.

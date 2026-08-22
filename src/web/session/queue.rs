@@ -3,13 +3,19 @@
 use crate::web::frame::{self, FrameType, HEADER_SIZE};
 
 use super::Session;
-use super::state::{PendingClass, QUEUE_ITEM_COST, QueuedFrame, SessionState};
+use super::state::{PendingCharge, PendingClass, QUEUE_ITEM_COST, QueuedFrame, SessionState};
 
 impl Session {
     /// Reserves session and process budget for one queued item.
     ///
     /// Mirrors the reference relay: a reservation must fit its class partition
     /// *and* the process-wide pool, and no partial charge is ever left behind.
+    ///
+    /// The control class is measured against its own running subtotal rather
+    /// than the session-wide one, because the whole point of the reserve is
+    /// that a saturated data partition must not block a CLOSE or a WINDOW.
+    /// The data classes stay measured against the session-wide total, which is
+    /// conservative and keeps `data + control` inside the session pool.
     pub(crate) fn reserve_pending_locked(
         &self,
         state: &mut SessionState,
@@ -18,11 +24,25 @@ impl Session {
         class: PendingClass,
     ) -> bool {
         let (cost_limit, item_limit) = self.budget.for_class(class);
+        let (used_cost, used_items) = match class {
+            PendingClass::Control => (state.control_cost, state.control_items),
+            _ => (state.pending_cost, state.pending_items),
+        };
         if cost == 0
             || cost > cost_limit
             || items > item_limit
-            || state.pending_cost > cost_limit - cost
-            || state.pending_items > item_limit - items
+            || used_cost > cost_limit - cost
+            || used_items > item_limit - items
+        {
+            return false;
+        }
+        // Each class partition already fits inside the session pool, so this
+        // can only fire if the partitions are ever resized apart. It is checked
+        // rather than assumed, because the process-wide split into
+        // `control_reserve * max_sessions_global` plus the rest is built on the
+        // session pool being an actual ceiling.
+        if state.pending_cost > self.budget.session_cost.saturating_sub(cost)
+            || state.pending_items > self.budget.session_items.saturating_sub(items)
         {
             return false;
         }
@@ -34,25 +54,30 @@ impl Session {
         }
         state.pending_cost += cost;
         state.pending_items += items;
+        if class == PendingClass::Control {
+            state.control_cost += cost;
+            state.control_items += items;
+        }
         true
     }
 
     /// Returns budget to the session and process pools and wakes backends that
     /// were parked waiting for downlink headroom.
-    pub(crate) fn release_pending_locked(
-        &self,
-        state: &mut SessionState,
-        cost: usize,
-        items: usize,
-    ) {
-        if cost == 0 && items == 0 {
+    pub(crate) fn release_pending_locked(&self, state: &mut SessionState, charge: PendingCharge) {
+        if charge.is_empty() {
             return;
         }
-        debug_assert!(cost <= state.pending_cost && items <= state.pending_items);
-        state.pending_cost = state.pending_cost.saturating_sub(cost);
-        state.pending_items = state.pending_items.saturating_sub(items);
+        debug_assert!(charge.cost <= state.pending_cost && charge.items <= state.pending_items);
+        debug_assert!(
+            charge.control_cost <= state.control_cost
+                && charge.control_items <= state.control_items
+        );
+        state.pending_cost = state.pending_cost.saturating_sub(charge.cost);
+        state.pending_items = state.pending_items.saturating_sub(charge.items);
+        state.control_cost = state.control_cost.saturating_sub(charge.control_cost);
+        state.control_items = state.control_items.saturating_sub(charge.control_items);
         if let Some(manager) = self.manager.upgrade() {
-            manager.release_pending_budget(cost, items);
+            manager.release_pending_budget(charge.cost, charge.items);
         }
         for stream in state.streams.values_mut() {
             stream.wake_writer();
@@ -152,11 +177,7 @@ impl Session {
 
         let encoded = frame::encode(kind, id, payload);
         let cost = encoded.len() + QUEUE_ITEM_COST;
-        let class = if kind == FrameType::DATA {
-            PendingClass::Downlink
-        } else {
-            PendingClass::Control
-        };
+        let class = PendingClass::of_frame(kind);
         if !self.reserve_pending_locked(state, cost, 1, class) {
             return false;
         }

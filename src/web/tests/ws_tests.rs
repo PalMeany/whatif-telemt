@@ -1,50 +1,33 @@
 //! End-to-end tests for the WebSocket carriers.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::config::{CarrierMode, WebBackend, WebLimits, WebTimeouts};
-use crate::crypto::SecureRandom;
 use crate::web::capability::{derive_capability, encode_token};
 use crate::web::frame::{self, FrameType};
-use crate::web::http::Relay;
-use crate::web::listener;
-use crate::web::site::StaticSite;
 
 use super::harness::{
-    TEST_HOST, TEST_SECRET, batch, build_manager, data_payloads, header_value, http_request,
-    start_echo_backend,
+    PublicSite, RelayFixture, TEST_HOST, TEST_SECRET, batch, build_manager, data_payloads,
+    header_value, http_request, start_echo_backend, start_relay,
 };
 
 /// Client key from the RFC example; the accept value is checked against it.
 const CLIENT_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
-async fn start_relay(carrier: CarrierMode) -> (SocketAddr, tempfile::TempDir) {
+async fn start_fixture(carrier: CarrierMode) -> RelayFixture {
     let backend = start_echo_backend().await;
     let manager = build_manager(WebBackend::Loopback(backend), carrier, WebLimits::default());
-    let directory = tempfile::tempdir().expect("tempdir");
-    std::fs::write(directory.path().join("index.html"), b"site").expect("index");
-    let site = StaticSite::load(directory.path()).expect("site");
-    let relay = Arc::new(Relay {
-        hostname: TEST_HOST.to_string(),
+    start_relay(
         manager,
-        limits: WebLimits::default(),
-        timeouts: WebTimeouts::default(),
-        site: Some(site),
-        upstream: None,
-        trusted_proxies: vec!["127.0.0.0/8".parse().expect("cidr")],
-        rng: Arc::new(SecureRandom::new()),
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind relay");
-    let address = listener.local_addr().expect("addr");
-    tokio::spawn(listener::serve_carrier(listener, relay));
-    (address, directory)
+        PublicSite::Directory,
+        WebLimits::default(),
+        WebTimeouts::default(),
+    )
+    .await
 }
 
 /// Creates a session over HTTP and returns its bearer.
@@ -96,10 +79,10 @@ async fn open_socket(address: SocketAddr, protocol: &str) -> TcpStream {
     stream
 }
 
-/// Sends one masked binary message.
-async fn send_binary(stream: &mut TcpStream, payload: &[u8]) {
+/// Sends one masked frame with the given opcode and fin bit.
+async fn send_frame(stream: &mut TcpStream, opcode: u8, fin: bool, payload: &[u8]) {
     let mask = [0x11u8, 0x22, 0x33, 0x44];
-    let mut out = vec![0x82u8];
+    let mut out = vec![if fin { 0x80 | opcode } else { opcode }];
     if payload.len() < 126 {
         out.push(0x80 | payload.len() as u8);
     } else {
@@ -113,35 +96,58 @@ async fn send_binary(stream: &mut TcpStream, payload: &[u8]) {
     stream.write_all(&out).await.expect("write frame");
 }
 
+/// Sends one masked binary message.
+async fn send_binary(stream: &mut TcpStream, payload: &[u8]) {
+    send_frame(stream, 0x2, true, payload).await;
+}
+
+/// Reads server frames until a pong arrives, returning its payload.
+async fn read_pong(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    for _ in 0..40 {
+        let (opcode, payload) = read_frame(stream).await?;
+        match opcode {
+            0xA => return Some(payload),
+            0x8 => return None,
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Reads one server frame, returning its opcode and unmasked payload.
+async fn read_frame(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    let mut header = [0u8; 2];
+    if tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut header))
+        .await
+        .is_err()
+    {
+        return None;
+    }
+    let opcode = header[0] & 0x0F;
+    let length = match header[1] & 0x7F {
+        126 => {
+            let mut extended = [0u8; 2];
+            stream.read_exact(&mut extended).await.ok()?;
+            u16::from_be_bytes(extended) as usize
+        }
+        127 => {
+            let mut extended = [0u8; 8];
+            stream.read_exact(&mut extended).await.ok()?;
+            u64::from_be_bytes(extended) as usize
+        }
+        small => small as usize,
+    };
+    let mut payload = vec![0u8; length];
+    if length != 0 {
+        stream.read_exact(&mut payload).await.ok()?;
+    }
+    Some((opcode, payload))
+}
+
 /// Reads server frames until a binary message arrives, ignoring pings.
 async fn read_binary(stream: &mut TcpStream) -> Option<Vec<u8>> {
     for _ in 0..40 {
-        let mut header = [0u8; 2];
-        let deadline = Duration::from_secs(2);
-        if tokio::time::timeout(deadline, stream.read_exact(&mut header))
-            .await
-            .is_err()
-        {
-            return None;
-        }
-        let opcode = header[0] & 0x0F;
-        let length = match header[1] & 0x7F {
-            126 => {
-                let mut extended = [0u8; 2];
-                stream.read_exact(&mut extended).await.ok()?;
-                u16::from_be_bytes(extended) as usize
-            }
-            127 => {
-                let mut extended = [0u8; 8];
-                stream.read_exact(&mut extended).await.ok()?;
-                u64::from_be_bytes(extended) as usize
-            }
-            small => small as usize,
-        };
-        let mut payload = vec![0u8; length];
-        if length != 0 {
-            stream.read_exact(&mut payload).await.ok()?;
-        }
+        let (opcode, payload) = read_frame(stream).await?;
         match opcode {
             0x2 => return Some(payload),
             0x8 => return None,
@@ -153,7 +159,8 @@ async fn read_binary(stream: &mut TcpStream) -> Option<Vec<u8>> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiplexed_websocket_carrier_round_trip() {
-    let (address, _site) = start_relay(CarrierMode::Websocket).await;
+    let fixture = start_fixture(CarrierMode::Websocket).await;
+    let address = fixture.address;
     let token = create_session(address).await;
     let mut socket = open_socket(address, &format!("tproxy-v1.{token}")).await;
 
@@ -176,7 +183,8 @@ async fn multiplexed_websocket_carrier_round_trip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_lanes_carry_one_stream_each() {
-    let (address, _site) = start_relay(CarrierMode::WebsocketLanes).await;
+    let fixture = start_fixture(CarrierMode::WebsocketLanes).await;
+    let address = fixture.address;
     let token = create_session(address).await;
 
     let mut first = open_socket(address, &format!("tproxy-lane-v1.{token}.1")).await;
@@ -216,11 +224,111 @@ async fn websocket_lanes_carry_one_stream_each() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_rejects_a_carrier_mode_mismatch() {
-    let (address, _site) = start_relay(CarrierMode::Websocket).await;
+    let fixture = start_fixture(CarrierMode::Websocket).await;
+    let address = fixture.address;
     let token = create_session(address).await;
     let request = format!(
         "GET /api/v1/ws HTTP/1.1\r\nHost: {TEST_HOST}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {CLIENT_KEY}\r\nSec-WebSocket-Protocol: tproxy-lane-v1.{token}.1\r\nConnection: close\r\n\r\n"
     );
     let (status, _, _) = http_request(address, request.as_bytes()).await;
     assert_eq!(status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_ping_is_echoed_and_the_carrier_survives() {
+    let fixture = start_fixture(CarrierMode::Websocket).await;
+    let address = fixture.address;
+    let token = create_session(address).await;
+    let mut socket = open_socket(address, &format!("tproxy-v1.{token}")).await;
+
+    send_frame(&mut socket, 0x9, true, b"liveness").await;
+    assert_eq!(
+        read_pong(&mut socket).await.as_deref(),
+        Some(b"liveness".as_ref()),
+        "a ping must be answered with the same payload"
+    );
+
+    // The carrier has to keep working after the echo, which is the part the
+    // untimed pong write used to be able to wedge.
+    let payload = b"after-ping".to_vec();
+    send_binary(
+        &mut socket,
+        &batch(&[
+            (FrameType::OPEN, 1, Vec::new()),
+            (FrameType::DATA, 1, payload.clone()),
+        ]),
+    )
+    .await;
+    let mut echoed = Vec::new();
+    while echoed.len() < payload.len() {
+        let Some(message) = read_binary(&mut socket).await else {
+            break;
+        };
+        echoed.extend_from_slice(&data_payloads(&message, 1));
+    }
+    assert_eq!(echoed, payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_ping_between_fragments_does_not_lose_the_message() {
+    let fixture = start_fixture(CarrierMode::Websocket).await;
+    let address = fixture.address;
+    let token = create_session(address).await;
+    let mut socket = open_socket(address, &format!("tproxy-v1.{token}")).await;
+
+    // RFC 6455 §5.4 permits a control frame between the fragments of a message,
+    // and the relay pings on every idle poll, so its own client can produce
+    // exactly this interleaving.
+    let payload = b"fragmented-payload".to_vec();
+    let uplink = batch(&[
+        (FrameType::OPEN, 1, Vec::new()),
+        (FrameType::DATA, 1, payload.clone()),
+    ]);
+    let split = uplink.len() / 2;
+    send_frame(&mut socket, 0x2, false, &uplink[..split]).await;
+    send_frame(&mut socket, 0x9, true, b"mid").await;
+    send_frame(&mut socket, 0x0, true, &uplink[split..]).await;
+
+    assert_eq!(
+        read_pong(&mut socket).await.as_deref(),
+        Some(b"mid".as_ref())
+    );
+    let mut echoed = Vec::new();
+    while echoed.len() < payload.len() {
+        let Some(message) = read_binary(&mut socket).await else {
+            break;
+        };
+        echoed.extend_from_slice(&data_payloads(&message, 1));
+    }
+    assert_eq!(
+        echoed, payload,
+        "the fragments around the ping must still reassemble"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_binary_message_does_not_tear_down_the_carrier() {
+    let fixture = start_fixture(CarrierMode::Websocket).await;
+    let address = fixture.address;
+    let token = create_session(address).await;
+    let mut socket = open_socket(address, &format!("tproxy-v1.{token}")).await;
+
+    send_binary(&mut socket, b"").await;
+    let payload = b"still-here".to_vec();
+    send_binary(
+        &mut socket,
+        &batch(&[
+            (FrameType::OPEN, 1, Vec::new()),
+            (FrameType::DATA, 1, payload.clone()),
+        ]),
+    )
+    .await;
+    let mut echoed = Vec::new();
+    while echoed.len() < payload.len() {
+        let Some(message) = read_binary(&mut socket).await else {
+            break;
+        };
+        echoed.extend_from_slice(&data_payloads(&message, 1));
+    }
+    assert_eq!(echoed, payload);
 }

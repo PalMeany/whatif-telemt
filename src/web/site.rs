@@ -87,27 +87,72 @@ impl StaticSite {
         truncated <= since
     }
 
-    /// Resolves a request path exactly as the reference front proxy did.
+    /// Resolves a request path the way an ordinary static server does.
     ///
-    /// Exact match first, then `/favicon.ico` to `favicon.svg`, then
-    /// `{path}.html` for an extensionless request. It never falls back to the
-    /// index for arbitrary paths.
+    /// The path is percent-decoded first, then matched exactly, then as a
+    /// directory index, then `/favicon.ico` to `favicon.svg`, then `{path}.html`
+    /// for an extensionless request. It never falls back to the index for
+    /// arbitrary paths.
+    ///
+    /// Decoding and directory indexes are not conveniences here. Every real
+    /// static server serves `/%69ndex.html` and `/blog/`, so answering 404 to
+    /// either is a difference between this origin and every other one, which is
+    /// exactly what an active prober compares.
     pub(crate) fn resolve(&self, request_path: &str) -> Option<&Arc<StaticEntry>> {
-        if !request_path.starts_with('/') || !is_clean_path(request_path) {
+        let decoded = percent_decode(request_path)?;
+        let path = decoded.as_str();
+        if !path.starts_with('/') || !is_clean_path(path) {
             return None;
         }
-        if let Some(entry) = self.entries.get(request_path) {
+        if let Some(entry) = self.entries.get(path) {
             return Some(entry);
         }
-        if request_path == "/favicon.ico" {
+        if path.ends_with('/') {
+            let candidate = format!("{path}index.html");
+            return self.entries.get(&candidate);
+        }
+        if path == "/favicon.ico" {
             return self.entries.get("/favicon.svg");
         }
-        if extension_of(request_path).is_none() {
-            let candidate = format!("{request_path}.html");
+        if extension_of(path).is_none() {
+            let candidate = format!("{path}.html");
             return self.entries.get(&candidate);
         }
         None
     }
+}
+
+/// Percent-decodes a request path, refusing anything a server would not serve.
+///
+/// A decoded byte that is not valid UTF-8, a NUL, or any other control
+/// character is refused outright rather than normalised, so the decoded form
+/// can be matched against the site map without a second escaping rule.
+fn percent_decode(value: &str) -> Option<String> {
+    if !value.contains('%') {
+        return Some(value.to_string());
+    }
+    let raw = value.as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut index = 0usize;
+    while index < raw.len() {
+        if raw[index] != b'%' {
+            out.push(raw[index]);
+            index += 1;
+            continue;
+        }
+        if index + 2 >= raw.len() {
+            return None;
+        }
+        let high = (raw[index + 1] as char).to_digit(16)?;
+        let low = (raw[index + 2] as char).to_digit(16)?;
+        let byte = (high * 16 + low) as u8;
+        if byte < 0x20 || byte == 0x7f {
+            return None;
+        }
+        out.push(byte);
+        index += 3;
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Cache policy shared by every entry, independent of the bridge capability.
@@ -130,11 +175,12 @@ fn truncate_to_seconds(value: SystemTime) -> SystemTime {
 }
 
 /// Rejects any path a canonicalizing cleaner would rewrite.
+///
+/// A single trailing slash is allowed, because it is the directory-index form
+/// `resolve` handles; `//` and the `.`/`..` segments are still refused, which
+/// is what keeps a percent-encoded traversal from reaching the site map.
 fn is_clean_path(value: &str) -> bool {
     if value.contains('\\') || value.contains("//") {
-        return false;
-    }
-    if value.len() > 1 && value.ends_with('/') {
         return false;
     }
     !value
@@ -275,6 +321,24 @@ mod tests {
         assert!(site.resolve("//index.html").is_none());
         assert!(site.resolve("/./index.html").is_none());
         assert!(site.resolve("index.html").is_none());
+        // Traversal survives decoding, so it is refused after decoding too.
+        assert!(site.resolve("/%2e%2e/index.html").is_none());
+        assert!(site.resolve("/assets%2f..%2findex.html").is_none());
+        assert!(site.resolve("/index.html%00").is_none());
+        assert!(site.resolve("/index.html%zz").is_none());
+        assert!(site.resolve("/index.html%2").is_none());
+    }
+
+    #[test]
+    fn resolves_percent_encoded_and_directory_paths() {
+        let dir = write_site();
+        std::fs::create_dir(dir.path().join("blog")).expect("blog");
+        std::fs::write(dir.path().join("blog/index.html"), b"posts").expect("blog index");
+        let site = StaticSite::load(dir.path()).expect("load");
+        assert_eq!(site.resolve("/%69ndex.html").map(|e| e.body.len()), Some(5));
+        assert_eq!(site.resolve("/blog/").map(|e| e.body.len()), Some(5));
+        assert_eq!(site.resolve("/").map(|e| e.body.len()), Some(5));
+        assert!(site.resolve("/nothing/").is_none());
     }
 
     #[test]

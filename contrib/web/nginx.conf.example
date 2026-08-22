@@ -34,9 +34,22 @@ server {
     # One uplink batch is bounded by web.limits.max_body_bytes (2 MiB).
     client_max_body_size 4m;
 
-    # The session bearer travels in a request header on the WebSocket
-    # upgrade. Never enable header logging for this server block.
-    access_log /var/log/nginx/proxy.example.com.log;
+    # The bridge capability travels in the query string and the session bearer
+    # in a request header on the WebSocket upgrade, so the default `combined`
+    # format would write both to disk: it logs $request, which includes the
+    # query. This format logs the path only and no headers. Never replace it
+    # with `combined`, and never enable header logging for this server block.
+    #
+    # Define the format once, in the http { } block:
+    #
+    #   log_format telemt_web '$remote_addr - [$time_local] '
+    #                         '"$request_method $uri $server_protocol" '
+    #                         '$status $body_bytes_sent';
+    #
+    # If you would rather log nothing at all for this site, use:
+    #
+    #   access_log off;
+    access_log /var/log/nginx/proxy.example.com.log telemt_web;
 
     # Every path goes to the relay: the bridge, the transport endpoints, and
     # the operator's own site are all served by telemt through one origin.

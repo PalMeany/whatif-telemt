@@ -16,7 +16,7 @@ use crate::web::frame::MAX_STREAM_ID;
 use crate::web::session::Session;
 use crate::web::websocket::{WsMessage, WsReader, WsWriter, accept_key};
 
-use super::headers::{canonical_uint, header};
+use super::headers::{canonical_uint, client_ip, header};
 use super::{Relay, RequestHead, WebBody, full, insert};
 
 /// Subprotocol prefix of the multiplexed carrier.
@@ -39,23 +39,33 @@ impl Relay {
         head: RequestHead,
         peer: SocketAddr,
     ) -> Response<WebBody> {
+        // A refused upgrade still owns its request, so the body is discarded
+        // through the same path every other reserved endpoint uses: a client
+        // that declares one must not be able to tell this path apart from an
+        // ordinary path of the operator's site by how the connection ends.
+        if head.uri.query().is_some() {
+            return self.reject_upgrade(request, &head, peer).await;
+        }
         if head.method != Method::GET || head.headers.contains_key("authorization") {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
+        }
+        if client_ip(peer, &head.headers, &self.trusted_proxies).is_none() {
+            return self.reject_upgrade(request, &head, peer).await;
         }
         if !upgrade_requested(&head) || !bodyless(&head) {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
         }
         let Some(key) = header(&head.headers, "sec-websocket-key").map(str::to_owned) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
         };
         let Some(protocol) = single_subprotocol(&head) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
         };
         let Some(credentials) = WsCredentials::parse(&protocol) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
         };
         let Some(session) = self.session_for(&credentials.token) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
         };
         let expected = if credentials.lanes {
             CarrierMode::WebsocketLanes
@@ -63,7 +73,7 @@ impl Relay {
             CarrierMode::Websocket
         };
         if session.carrier_mode() != expected {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
         }
         let acquired = if credentials.lanes {
             session.acquire_websocket_lane(credentials.lane_id)
@@ -71,7 +81,7 @@ impl Relay {
             session.acquire_websocket()
         };
         if !acquired {
-            return self.transport_not_found(&head, peer).await;
+            return self.reject_upgrade(request, &head, peer).await;
         }
 
         let upgrade = hyper::upgrade::on(&mut request);
@@ -102,6 +112,17 @@ impl Relay {
         insert(response_headers, "sec-websocket-accept", &accept_key(&key));
         insert(response_headers, "sec-websocket-protocol", &protocol);
         response
+    }
+
+    /// Refuses one upgrade request, discarding whatever body it declared.
+    async fn reject_upgrade(
+        self: &Arc<Self>,
+        request: Request<Incoming>,
+        head: &RequestHead,
+        peer: SocketAddr,
+    ) -> Response<WebBody> {
+        self.transport_not_found_draining(head, request.into_body(), peer)
+            .await
     }
 }
 
@@ -166,8 +187,24 @@ async fn run_carrier<S>(
         _ = read_task => {}
         _ = write_task => {}
     }
-    let mut writer = writer.lock().await;
-    let _ = tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_close()).await;
+    if let Some(mut writer) = lock_writer(&writer).await {
+        let _ = tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_close()).await;
+    }
+}
+
+/// Takes the shared writer under the carrier write deadline.
+///
+/// Every write on this socket is bounded, so the guard itself must be too: a
+/// peer that stops reading makes the current writer block on a full send
+/// buffer, and an untimed `lock().await` would then pin this task, its file
+/// descriptor, and the whole session behind it for as long as the peer cares
+/// to hold the socket open.
+async fn lock_writer<W>(
+    writer: &Arc<Mutex<WsWriter<W>>>,
+) -> Option<tokio::sync::MutexGuard<'_, WsWriter<W>>> {
+    tokio::time::timeout(WS_WRITE_TIMEOUT, writer.lock())
+        .await
+        .ok()
 }
 
 /// Applies client messages as uplink batches with bounded backpressure waits.
@@ -190,15 +227,21 @@ async fn read_loop<R, W>(
         };
         let payload = match message {
             WsMessage::Binary(payload) if !payload.is_empty() => payload,
+            // An empty binary message carries no frame at all. The reference
+            // client never sends one, but tearing the carrier down over it
+            // would turn a harmless keepalive into a session loss.
+            WsMessage::Binary(_) => continue,
             WsMessage::Ping(payload) => {
-                let mut writer = writer.lock().await;
-                if writer.write_pong(&payload).await.is_err() {
+                let Some(mut writer) = lock_writer(&writer).await else {
                     return;
+                };
+                match tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_pong(&payload)).await {
+                    Ok(Ok(())) => continue,
+                    _ => return,
                 }
-                continue;
             }
             WsMessage::Pong => continue,
-            _ => return,
+            WsMessage::Close => return,
         };
         let deadline = tokio::time::Instant::now() + WS_WRITE_TIMEOUT;
         loop {
@@ -249,7 +292,9 @@ async fn write_loop<W>(
         if lane_closed {
             return;
         }
-        let mut writer = writer.lock().await;
+        let Some(mut writer) = lock_writer(&writer).await else {
+            return;
+        };
         if payload.is_empty() {
             match tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_ping()).await {
                 Ok(Ok(())) => continue,

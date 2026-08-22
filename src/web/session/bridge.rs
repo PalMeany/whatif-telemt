@@ -6,23 +6,36 @@
 //! session's uplink queue and writes queue DATA frames straight into the
 //! downlink queue, with WINDOW credit and pending budget accounted in place.
 
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::Sleep;
+use tracing::debug;
 
 use crate::web::frame::{self, FrameType};
 
 use super::Session;
-use super::state::QUEUE_ITEM_COST;
+use super::state::{PendingCharge, QUEUE_ITEM_COST, SessionState};
+
+/// Retry delay used when the process-wide pool, not this session, is full.
+///
+/// Session-local headroom wakes the parked writer through
+/// `release_pending_locked`, but a pool exhausted by *other* sessions produces
+/// no such wake-up, so the writer arms its own timer instead of stalling.
+const GLOBAL_BACKPRESSURE_RETRY: Duration = Duration::from_millis(25);
 
 /// One logical stream presented as a byte-oriented duplex endpoint.
 pub(crate) struct StreamBridge {
     session: Arc<Session>,
     id: u32,
     finished: bool,
+    /// Armed while the process-wide pending pool refuses this stream's DATA.
+    backoff: Option<Pin<Box<Sleep>>>,
 }
 
 impl StreamBridge {
@@ -31,6 +44,7 @@ impl StreamBridge {
             session,
             id,
             finished: false,
+            backoff: None,
         }
     }
 
@@ -114,7 +128,7 @@ impl AsyncRead for StreamBridge {
         }
         let release_cost = copied + completed * QUEUE_ITEM_COST;
         this.session
-            .release_pending_locked(&mut state, release_cost, completed);
+            .release_pending_locked(&mut state, PendingCharge::data(release_cost, completed));
         let queued = this.session.queue_frame_locked(
             &mut state,
             FrameType::WINDOW,
@@ -122,7 +136,7 @@ impl AsyncRead for StreamBridge {
             &frame::window_payload(grant),
         );
         if !queued {
-            this.session.close_locked(&mut state);
+            this.session.control_budget_exhausted(&mut state, this.id);
         }
         Poll::Ready(Ok(()))
     }
@@ -140,6 +154,14 @@ impl AsyncWrite for StreamBridge {
         }
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
+        }
+        // A previous poll found the process-wide pool full; wait out its timer
+        // before charging the session lock again.
+        if let Some(backoff) = this.backoff.as_mut() {
+            if backoff.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            this.backoff = None;
         }
         let mut state = this.session.state.lock();
         if state.closed {
@@ -162,9 +184,9 @@ impl AsyncWrite for StreamBridge {
             }
             return Poll::Pending;
         }
-        if let Some(stream) = state.streams.get_mut(&this.id) {
-            stream.send_credit -= allowance as u64;
-        }
+        // Credit is spent only once the frame is actually queued. Deducting
+        // first and then failing would bleed the window on every retry, and
+        // the client only ever grants credit for bytes it received.
         let queued = this.session.queue_frame_locked(
             &mut state,
             FrameType::DATA,
@@ -172,7 +194,23 @@ impl AsyncWrite for StreamBridge {
             &buf[..allowance],
         );
         if !queued {
-            return Poll::Ready(Err(io::Error::from(io::ErrorKind::WouldBlock)));
+            if let Some(stream) = state.streams.get_mut(&this.id) {
+                stream.write_waker = Some(cx.waker().clone());
+            }
+            drop(state);
+            // `AsyncWrite` has no retryable error, so `WouldBlock` here would
+            // kill a live stream over transient backpressure. Park instead.
+            let mut backoff = Box::pin(tokio::time::sleep(GLOBAL_BACKPRESSURE_RETRY));
+            let armed = backoff.as_mut().poll(cx).is_pending();
+            if armed {
+                this.backoff = Some(backoff);
+            } else {
+                cx.waker().wake_by_ref();
+            }
+            return Poll::Pending;
+        }
+        if let Some(stream) = state.streams.get_mut(&this.id) {
+            stream.send_credit -= allowance as u64;
         }
         Poll::Ready(Ok(allowance))
     }
@@ -201,7 +239,8 @@ impl Session {
         let Some(mut stream) = state.streams.remove(&id) else {
             return;
         };
-        let released = (stream.pending_write_cost, stream.pending_write_items);
+        let mut released =
+            PendingCharge::data(stream.pending_write_cost, stream.pending_write_items);
         stream.pending_write_bytes = 0;
         stream.pending_write_cost = 0;
         stream.pending_write_items = 0;
@@ -209,10 +248,27 @@ impl Session {
         stream.write_offset = 0;
         stream.aborted = true;
         stream.cancel.cancel();
-        let evicted = state.remember_closed(id, self.limits.max_closed_stream_ids);
-        self.release_pending_locked(&mut state, released.0 + evicted.0, released.1 + evicted.1);
+        released.add(state.remember_closed(id, self.limits.max_closed_stream_ids));
+        self.release_pending_locked(&mut state, released);
         if !self.queue_frame_locked(&mut state, FrameType::CLOSE, id, &[]) {
-            self.close_locked(&mut state);
+            self.control_budget_exhausted(&mut state, id);
         }
+    }
+
+    /// Closes the session after a control frame could not be queued.
+    ///
+    /// The control reserve is sized for one WINDOW and one CLOSE per live
+    /// stream. Exceeding it means the peer stopped draining its downlink while
+    /// still driving streams, and there is no way to tell it about a stream it
+    /// will never hear about again, so the session ends here rather than
+    /// silently diverging from the client's view.
+    pub(crate) fn control_budget_exhausted(&self, state: &mut SessionState, id: u32) {
+        debug!(
+            session = self.id,
+            stream = id,
+            profile = %self.profile.name,
+            "WEB session closed: control reserve exhausted"
+        );
+        self.close_locked(state);
     }
 }

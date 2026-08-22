@@ -15,9 +15,10 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::web::http::{Relay, WebBody};
+use crate::web::http::{Relay, WebBody, request_timeout_response};
 use crate::web::manager::Manager;
 use crate::web::runtime::WebRuntime;
 
@@ -30,17 +31,33 @@ const MAX_ADMIN_CONNECTIONS: usize = 64;
 /// Smallest read buffer hyper accepts.
 const MIN_HTTP_BUFFER: usize = 8 * 1024;
 
-/// Accepts carrier connections until the process shuts down.
-pub(crate) async fn serve_carrier(listener: TcpListener, relay: Arc<Relay>) {
+/// Accepts carrier connections until the relay is cancelled.
+pub(crate) async fn serve_carrier(
+    listener: TcpListener,
+    relay: Arc<Relay>,
+    shutdown: CancellationToken,
+) {
     let permits = Arc::new(Semaphore::new(MAX_CARRIER_CONNECTIONS));
     // Hyper covers both the request-head deadline and the keep-alive idle wait
     // with one timer, so the larger of the two configured bounds is used: a
     // shorter one would close idle carrier connections the client still owns.
     let header_timeout =
         Duration::from_millis(relay.timeouts.read_header_ms.max(relay.timeouts.idle_ms));
+    // Everything after the head has to be bounded here. Hyper disarms its own
+    // deadline once the head parses, and a long poll is the only request that
+    // legitimately takes a long time, so it sets the floor.
+    let request_timeout = relay.request_deadline();
     let buffer = relay.limits.max_header_bytes.max(MIN_HTTP_BUFFER);
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                info!("WEB carrier listener stopped accepting");
+                return;
+            }
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, peer) = match accepted {
             Ok(accepted) => accepted,
             Err(error) => {
                 warn!(error = %error, "WEB carrier accept error");
@@ -50,15 +67,29 @@ pub(crate) async fn serve_carrier(listener: TcpListener, relay: Arc<Relay>) {
         };
         let Ok(permit) = permits.clone().try_acquire_owned() else {
             debug!(peer = %peer, "Dropping WEB carrier connection: budget exhausted");
+            relay.manager.count_carrier_connection_dropped();
             continue;
         };
         let _ = stream.set_nodelay(true);
         let relay = relay.clone();
+        let shutdown = shutdown.clone();
         tokio::spawn(async move {
             let _permit = permit;
             let service = service_fn(move |request: Request<Incoming>| {
                 let relay = relay.clone();
-                async move { Ok::<Response<WebBody>, Infallible>(relay.handle(request, peer).await) }
+                async move {
+                    let served =
+                        tokio::time::timeout(request_timeout, relay.handle(request, peer)).await;
+                    let response = match served {
+                        Ok(response) => response,
+                        Err(_) => {
+                            debug!(peer = %peer, "WEB carrier request exceeded its deadline");
+                            relay.manager.count_request_timeout();
+                            request_timeout_response()
+                        }
+                    };
+                    Ok::<Response<WebBody>, Infallible>(response)
+                }
             });
             let mut builder = http1::Builder::new();
             builder
@@ -70,22 +101,42 @@ pub(crate) async fn serve_carrier(listener: TcpListener, relay: Arc<Relay>) {
             let connection = builder
                 .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
                 .with_upgrades();
-            if let Err(error) = connection.await {
+            tokio::pin!(connection);
+            let result = tokio::select! {
+                result = &mut connection => result,
+                _ = shutdown.cancelled() => {
+                    // A carrier connection may be an upgraded WebSocket, which
+                    // never completes on its own; the shutdown sequence closes
+                    // the sessions behind it right after cancelling.
+                    connection.as_mut().graceful_shutdown();
+                    connection.await
+                }
+            };
+            if let Err(error) = result {
                 debug!(peer = %peer, error = %error, "WEB carrier connection ended");
             }
         });
     }
 }
 
-/// Accepts admin connections until the process shuts down.
+/// Accepts admin connections until the relay is cancelled.
 pub(crate) async fn serve_admin(
     listener: TcpListener,
     manager: Arc<Manager>,
     runtime: Arc<WebRuntime>,
+    shutdown: CancellationToken,
 ) {
     let permits = Arc::new(Semaphore::new(MAX_ADMIN_CONNECTIONS));
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let accepted = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                info!("WEB admin listener stopped accepting");
+                return;
+            }
+            accepted = listener.accept() => accepted,
+        };
+        let (stream, peer) = match accepted {
             Ok(accepted) => accepted,
             Err(error) => {
                 warn!(error = %error, "WEB admin accept error");

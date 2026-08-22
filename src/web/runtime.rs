@@ -5,12 +5,14 @@
 //! stream never leaves the process, so the reference deployment's loopback
 //! MTProxy hop — two syscalls and two kernel copies per chunk — disappears.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use parking_lot::Mutex;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -28,27 +30,73 @@ const SYNTHETIC_PORT_BASE: u32 = 1024;
 /// Number of synthetic source ports cycled through.
 const SYNTHETIC_PORT_SPAN: u32 = 65535 - SYNTHETIC_PORT_BASE;
 
+/// Allocator of the synthetic source ports in-process WEB streams are given.
+///
+/// Middle-End key derivation binds the client `ip:port` pair, so two live
+/// streams sharing a port silently break the MTProto handshake of whichever
+/// arrives second. A counter modulo the span guarantees uniqueness only until
+/// it wraps, and the wrap is remotely reachable by churning streams, so the
+/// ports actually in use are tracked and a port is handed out only while free.
+struct PortPool {
+    /// Ports currently held by a live stream.
+    used: Mutex<HashSet<u16>>,
+    /// Rotating starting point, so successive streams rarely collide.
+    cursor: AtomicU32,
+}
+
+impl PortPool {
+    fn new() -> Self {
+        Self {
+            used: Mutex::new(HashSet::new()),
+            cursor: AtomicU32::new(0),
+        }
+    }
+
+    /// Leases one free synthetic port, or nothing when the span is full.
+    fn lease(self: &Arc<Self>) -> Option<PortLease> {
+        let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+        let mut used = self.used.lock();
+        if used.len() >= SYNTHETIC_PORT_SPAN as usize {
+            return None;
+        }
+        for offset in 0..SYNTHETIC_PORT_SPAN {
+            let port =
+                (SYNTHETIC_PORT_BASE + start.wrapping_add(offset) % SYNTHETIC_PORT_SPAN) as u16;
+            if used.insert(port) {
+                return Some(PortLease {
+                    pool: self.clone(),
+                    port,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// A synthetic source port held for the lifetime of one WEB stream.
+struct PortLease {
+    pool: Arc<PortPool>,
+    port: u16,
+}
+
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        self.pool.used.lock().remove(&self.port);
+    }
+}
+
 /// Handle to the live telemt runtime generation used by WEB streams.
 pub(crate) struct WebRuntime {
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
-    port_counter: AtomicU32,
+    ports: Arc<PortPool>,
 }
 
 impl WebRuntime {
     pub(crate) fn new(active_runtime: Arc<ArcSwap<RuntimeGeneration>>) -> Arc<Self> {
         Arc::new(Self {
             active_runtime,
-            port_counter: AtomicU32::new(0),
+            ports: Arc::new(PortPool::new()),
         })
-    }
-
-    /// Assigns a distinct synthetic source port per stream.
-    ///
-    /// The Middle-End key derivation binds the client `ip:port` pair, so two
-    /// concurrent streams of one WEB session must not share a port.
-    fn next_port(&self) -> u16 {
-        let ticket = self.port_counter.fetch_add(1, Ordering::Relaxed);
-        (SYNTHETIC_PORT_BASE + ticket % SYNTHETIC_PORT_SPAN) as u16
     }
 
     /// Runs one stream through telemt's own client pipeline.
@@ -69,7 +117,11 @@ impl WebRuntime {
         let Ok(connection_permit) = runtime.max_connections.clone().try_acquire_owned() else {
             return false;
         };
-        let peer = SocketAddr::new(client_ip, self.next_port());
+        let Some(port) = self.ports.lease() else {
+            debug!("WEB stream refused: no free synthetic source port");
+            return false;
+        };
+        let peer = SocketAddr::new(client_ip, port.port);
         let config = runtime.config();
         let stats = runtime.stats.clone();
         let upstream_manager = runtime.upstream_manager.clone();
@@ -87,6 +139,9 @@ impl WebRuntime {
         permit.dial_finished(false);
         runtime.spawn_session(async move {
             let _connection_permit = connection_permit;
+            // The port stays reserved for as long as the stream lives, so no
+            // other stream can derive a Middle-End key from the same pair.
+            let _port = port;
             let _permit = permit;
             let handler = crate::proxy::client::handle_client_stream_with_shared_and_pool_runtime(
                 bridge,

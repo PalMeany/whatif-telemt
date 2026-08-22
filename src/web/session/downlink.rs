@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 use crate::web::error::WebError;
 
 use super::Session;
-use super::state::{LaneQueue, SessionState};
+use super::state::{LaneQueue, PendingCharge, SessionState};
 
 /// Clears the parked-poll marker if this poll still owns it.
 ///
@@ -100,7 +100,7 @@ impl Session {
             mine: mine.clone(),
         };
 
-        let deadline = tokio::time::sleep(Duration::from_millis(self.timeouts.long_poll_ms));
+        let deadline = tokio::time::sleep(self.long_poll_delay());
         tokio::pin!(deadline);
         loop {
             // Registration happens before the state check so a batch queued
@@ -163,6 +163,24 @@ impl Session {
         }
     }
 
+    /// Long-poll parking period with a per-poll jitter applied.
+    ///
+    /// An idle carrier otherwise emits a byte-identical request and response
+    /// pair on an exact period forever, which is a timing signature no amount
+    /// of payload shaping hides. The jitter only ever shortens the park, so a
+    /// client's own deadline is never overrun.
+    fn long_poll_delay(&self) -> Duration {
+        let configured = self.timeouts.long_poll_ms;
+        let span = configured / 8;
+        if span == 0 {
+            return Duration::from_millis(configured);
+        }
+        let mut sample = [0u8; 8];
+        self.rng.fill(&mut sample);
+        let jitter = u64::from_be_bytes(sample) % span;
+        Duration::from_millis(configured - jitter)
+    }
+
     /// Applies the client cursor to the queue's replay window.
     fn acknowledge_locked(
         &self,
@@ -178,22 +196,19 @@ impl Session {
                 if cursor != queue.down_cursor {
                     return Acknowledged::Protocol;
                 }
-                (0, 0)
+                PendingCharge::default()
             } else if cursor == queue.unacked_base {
                 return Acknowledged::Replay(queue.unacked.clone(), queue.down_cursor);
             } else if cursor != queue.down_cursor {
                 return Acknowledged::Protocol;
             } else {
-                let charged = (queue.unacked_cost, queue.unacked_items);
+                let charged = queue.unacked_charge;
                 queue.unacked = Bytes::new();
-                queue.unacked_cost = 0;
-                queue.unacked_items = 0;
+                queue.unacked_charge = PendingCharge::default();
                 charged
             }
         };
-        if charged != (0, 0) {
-            self.release_pending_locked(state, charged.0, charged.1);
-        }
+        self.release_pending_locked(state, charged);
         Acknowledged::Continue
     }
 
@@ -225,8 +240,7 @@ impl Session {
             queue.down_cursor += 1;
             queue.unacked_base = cursor;
             queue.unacked = body.clone();
-            queue.unacked_cost = batch.cost;
-            queue.unacked_items = batch.items;
+            queue.unacked_charge = batch.charge;
             queue.down_active = false;
             queue.superseded = None;
             let next = queue.down_cursor;

@@ -5,13 +5,14 @@
 //! - `sessions`: bootstrap issuance, session creation, and stream accounting
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use subtle::ConstantTimeEq;
+use tracing::{debug, info};
 
 use crate::config::{CarrierMode, WebBackend, WebLimits, WebProfileLimits, WebTimeouts};
 use crate::crypto::SecureRandom;
@@ -159,12 +160,33 @@ impl Manager {
 
     /// Installs a rebuilt profile set after a configuration reload.
     ///
-    /// Live sessions keep the profile object they were created with, and all
-    /// per-profile accounting is keyed by name, so an in-flight session is
-    /// unaffected by the swap.
+    /// Per-profile accounting is keyed by name, so an in-flight session whose
+    /// profile survived the reload is unaffected by the swap. A session whose
+    /// profile lost the capability it was created from is closed: rotating a
+    /// leaked secret has to end the sessions that secret opened, otherwise the
+    /// holder keeps relaying forever because every uplink refreshes the idle
+    /// timer the reaper watches.
     pub(crate) fn replace_profiles(&self, profiles: Vec<Arc<WebProfile>>) -> Result<()> {
         let set = Arc::new(ProfileSet::new(profiles)?);
+        let revoked = {
+            let guard = self.state.lock();
+            guard
+                .sessions
+                .values()
+                .filter(|session| !profile_survives(&set, &session.profile))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         self.profiles.store(set);
+        if !revoked.is_empty() {
+            info!(
+                sessions = revoked.len(),
+                "WEB proxy closing sessions whose capability was revoked"
+            );
+        }
+        for session in revoked {
+            session.close();
+        }
         Ok(())
     }
     /// Charges the process-wide pending pool.
@@ -176,6 +198,12 @@ impl Manager {
     ) -> bool {
         let allowed = self.pending.lock().reserve(cost, items, class);
         if !allowed {
+            debug!(
+                cost,
+                items,
+                class = ?class,
+                "WEB relay refused a queue reservation: process pool exhausted"
+            );
             self.count_limit_hit();
         }
         allowed
@@ -205,6 +233,27 @@ impl Manager {
         self.metrics
             .bytes_down
             .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Counts a carrier connection refused by the accept-loop budget.
+    pub(crate) fn count_carrier_connection_dropped(&self) {
+        self.metrics
+            .carrier_connections_dropped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Counts a request that overran the relay's own deadline.
+    pub(crate) fn count_request_timeout(&self) {
+        self.metrics
+            .request_timeouts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Counts one retryable answer handed back to a carrier.
+    pub(crate) fn count_retry_later(&self) {
+        self.metrics
+            .retry_later_responses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(super) fn count_limit_hit(&self) {
@@ -327,6 +376,33 @@ pub(super) fn decrement_ip(counters: &mut HashMap<IpAddr, usize>, ip: IpAddr) {
         *count = count.saturating_sub(1);
         if *count == 0 {
             counters.remove(&ip);
+        }
+    }
+}
+
+/// True when a reloaded profile set still grants the session's capability.
+///
+/// A profile is matched by name *and* by its full capability list, so rotating
+/// a secret revokes the sessions it opened even though the profile name and
+/// its per-profile accounting survive the reload.
+fn profile_survives(set: &ProfileSet, profile: &Arc<WebProfile>) -> bool {
+    set.profiles.iter().any(|candidate| {
+        candidate.name == profile.name && candidate.capabilities == profile.capabilities
+    })
+}
+
+/// Collapses a client address into the bucket the per-IP ceilings count.
+///
+/// An IPv4 address is its own bucket. A single IPv6 client is routinely handed
+/// a whole /64, so counting exact addresses there would let one subscriber walk
+/// 2^64 keys past every per-IP ceiling.
+pub(super) fn ip_bucket(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(value) => {
+            let mut octets = value.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(octets))
         }
     }
 }

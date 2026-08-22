@@ -36,6 +36,78 @@ pub(crate) enum PendingClass {
     Control,
 }
 
+impl PendingClass {
+    /// Classifies one queued frame by the partition it is charged to.
+    pub(crate) fn of_frame(kind: FrameType) -> Self {
+        if kind == FrameType::DATA {
+            PendingClass::Downlink
+        } else {
+            PendingClass::Control
+        }
+    }
+}
+
+/// One pending-budget charge together with its control-class part.
+///
+/// A queue holds frames of both classes, so releasing it has to hand each part
+/// back to the partition it came from. Carrying the split with the charge is
+/// what keeps the control reserve from drifting: every release site is forced
+/// to say how much of it was control.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PendingCharge {
+    /// Total queued bytes charged.
+    pub(crate) cost: usize,
+    /// Total queued items charged.
+    pub(crate) items: usize,
+    /// Part of `cost` charged to the control partition.
+    pub(crate) control_cost: usize,
+    /// Part of `items` charged to the control partition.
+    pub(crate) control_items: usize,
+}
+
+impl PendingCharge {
+    /// A charge that belongs entirely to an uplink or downlink partition.
+    pub(crate) fn data(cost: usize, items: usize) -> Self {
+        Self {
+            cost,
+            items,
+            control_cost: 0,
+            control_items: 0,
+        }
+    }
+
+    /// A charge that belongs entirely to the control reserve.
+    pub(crate) fn control(cost: usize, items: usize) -> Self {
+        Self {
+            cost,
+            items,
+            control_cost: cost,
+            control_items: items,
+        }
+    }
+
+    /// A charge classified by the frame type that produced it.
+    pub(crate) fn of_frame(kind: FrameType, cost: usize, items: usize) -> Self {
+        match PendingClass::of_frame(kind) {
+            PendingClass::Control => Self::control(cost, items),
+            _ => Self::data(cost, items),
+        }
+    }
+
+    /// Accumulates another charge into this one.
+    pub(crate) fn add(&mut self, other: Self) {
+        self.cost += other.cost;
+        self.items += other.items;
+        self.control_cost += other.control_cost;
+        self.control_items += other.control_items;
+    }
+
+    /// True when nothing is charged at all.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.cost == 0 && self.items == 0
+    }
+}
+
 /// One encoded frame waiting in a carrier queue.
 pub(crate) struct QueuedFrame {
     pub(crate) encoded: Vec<u8>,
@@ -47,8 +119,7 @@ pub(crate) struct QueuedFrame {
 /// A downlink batch handed to one carrier response.
 pub(crate) struct DownBatch {
     pub(crate) body: Vec<u8>,
-    pub(crate) cost: usize,
-    pub(crate) items: usize,
+    pub(crate) charge: PendingCharge,
 }
 
 /// Carrier queue plus its uplink replay and downlink acknowledgement state.
@@ -60,8 +131,8 @@ pub(crate) struct LaneQueue {
     pub(crate) pending_frames: Vec<QueuedFrame>,
     pub(crate) pending_windows: HashMap<u32, usize>,
     pub(crate) unacked: Bytes,
-    pub(crate) unacked_cost: usize,
-    pub(crate) unacked_items: usize,
+    /// Budget still charged for the unacknowledged batch, split by class.
+    pub(crate) unacked_charge: PendingCharge,
     pub(crate) unacked_base: u64,
     pub(crate) down_cursor: u64,
     pub(crate) down_active: bool,
@@ -81,8 +152,7 @@ impl LaneQueue {
             pending_frames: Vec::new(),
             pending_windows: HashMap::new(),
             unacked: Bytes::new(),
-            unacked_cost: 0,
-            unacked_items: 0,
+            unacked_charge: PendingCharge::default(),
             unacked_base: 0,
             down_cursor: 0,
             down_active: false,
@@ -92,14 +162,12 @@ impl LaneQueue {
     }
 
     /// Total budget still charged to this queue, used when a lane is evicted.
-    pub(crate) fn charged(&self) -> (usize, usize) {
-        let mut cost = self.unacked_cost;
-        let mut items = self.unacked_items;
+    pub(crate) fn charged(&self) -> PendingCharge {
+        let mut charge = self.unacked_charge;
         for queued in &self.pending_frames {
-            cost += queued.cost;
-            items += 1;
+            charge.add(PendingCharge::of_frame(queued.kind, queued.cost, 1));
         }
-        (cost, items)
+        charge
     }
 
     /// Drops every queued and unacknowledged byte without releasing budget.
@@ -111,15 +179,13 @@ impl LaneQueue {
         self.pending_frames = Vec::new();
         self.pending_windows = HashMap::new();
         self.unacked = Bytes::new();
-        self.unacked_cost = 0;
-        self.unacked_items = 0;
+        self.unacked_charge = PendingCharge::default();
         self.notify.notify_waiters();
     }
 
     /// Moves the head of the queue into one replayable downlink batch.
     pub(crate) fn take_down_batch(&mut self, batch_bytes: usize) -> DownBatch {
         let mut size = 0usize;
-        let mut cost = 0usize;
         let mut count = 0usize;
         while count < self.pending_frames.len() && count < frame::MAX_BATCH_FRAMES {
             let next = self.pending_frames[count].encoded.len();
@@ -127,26 +193,23 @@ impl LaneQueue {
                 break;
             }
             size += next;
-            cost += self.pending_frames[count].cost;
             count += 1;
         }
         let mut body = Vec::with_capacity(size);
+        let mut charge = PendingCharge::default();
         for (index, queued) in self.pending_frames.drain(..count).enumerate() {
             if queued.kind == FrameType::WINDOW
                 && self.pending_windows.get(&queued.stream_id) == Some(&index)
             {
                 self.pending_windows.remove(&queued.stream_id);
             }
+            charge.add(PendingCharge::of_frame(queued.kind, queued.cost, 1));
             body.extend_from_slice(&queued.encoded);
         }
         for index in self.pending_windows.values_mut() {
             *index -= count;
         }
-        DownBatch {
-            body,
-            cost,
-            items: count,
-        }
+        DownBatch { body, charge }
     }
 }
 
@@ -217,6 +280,10 @@ pub(crate) struct SessionState {
     pub(crate) lanes: HashMap<u32, LaneQueue>,
     pub(crate) pending_cost: usize,
     pub(crate) pending_items: usize,
+    /// Part of `pending_cost` charged to the control reserve.
+    pub(crate) control_cost: usize,
+    /// Part of `pending_items` charged to the control reserve.
+    pub(crate) control_items: usize,
     pub(crate) closed: bool,
     pub(crate) last_activity: Instant,
 }
@@ -237,6 +304,8 @@ impl SessionState {
             lanes,
             pending_cost: 0,
             pending_items: 0,
+            control_cost: 0,
+            control_items: 0,
             closed: false,
             last_activity: Instant::now(),
         }
@@ -246,11 +315,11 @@ impl SessionState {
     ///
     /// Returns the budget released by an evicted lane so the caller can hand
     /// it back to the global pool outside this borrow.
-    pub(crate) fn remember_closed(&mut self, id: u32, max_closed: usize) -> (usize, usize) {
+    pub(crate) fn remember_closed(&mut self, id: u32, max_closed: usize) -> PendingCharge {
         if !self.closed_streams.insert(id) {
-            return (0, 0);
+            return PendingCharge::default();
         }
-        let mut released = (0usize, 0usize);
+        let mut released = PendingCharge::default();
         if self.closed_order.len() < max_closed {
             self.closed_order.push(id);
         } else {
@@ -268,6 +337,28 @@ impl SessionState {
         }
         released
     }
+
+    /// Frees the oldest lane whose stream is already gone.
+    ///
+    /// Lane carriers keep one queue per stream id, and a closed lane survives
+    /// until its tombstone is evicted, which is thousands of closes away. A
+    /// client that opens and abandons lanes faster than it drains them would
+    /// otherwise hold one queue per id it ever used. Only tombstoned lanes are
+    /// eligible, so a live stream never loses its carrier queue.
+    pub(crate) fn evict_closed_lane(&mut self) -> Option<PendingCharge> {
+        let count = self.closed_order.len();
+        for offset in 0..count {
+            let id = self.closed_order[(self.closed_start + offset) % count];
+            if id == 0 || self.streams.contains_key(&id) || !self.lanes.contains_key(&id) {
+                continue;
+            }
+            let mut lane = self.lanes.remove(&id).expect("lane presence checked");
+            let released = lane.charged();
+            lane.clear();
+            return Some(released);
+        }
+        None
+    }
 }
 
 /// Per-session budget partitions derived from the effective limits.
@@ -275,6 +366,8 @@ impl SessionState {
 pub(crate) struct BudgetLimits {
     pub(crate) session_cost: usize,
     pub(crate) session_items: usize,
+    pub(crate) control_cost: usize,
+    pub(crate) control_items: usize,
     pub(crate) uplink_cost: usize,
     pub(crate) uplink_items: usize,
     pub(crate) downlink_cost: usize,
@@ -297,6 +390,8 @@ impl BudgetLimits {
         Self {
             session_cost: limits.max_pending_per_session,
             session_items: limits.max_pending_items_per_session,
+            control_cost: reserve_cost,
+            control_items: reserve_items,
             uplink_cost,
             uplink_items,
             downlink_cost,
@@ -305,9 +400,16 @@ impl BudgetLimits {
     }
 
     /// Returns the cost and item ceiling for one reservation class.
+    ///
+    /// The control class is bounded by the reserve, not by the whole session
+    /// pool. The process-wide pool is partitioned as `control_reserve *
+    /// max_sessions_global` plus everything else, and that split is only sound
+    /// while no single session can charge more control budget than its own
+    /// reserve. The data classes are checked against the session-wide running
+    /// total, which is conservative, so the two partitions never overlap.
     pub(crate) fn for_class(&self, class: PendingClass) -> (usize, usize) {
         match class {
-            PendingClass::Control => (self.session_cost, self.session_items),
+            PendingClass::Control => (self.control_cost, self.control_items),
             PendingClass::Uplink => (self.uplink_cost, self.uplink_items),
             PendingClass::Downlink => (self.downlink_cost, self.downlink_items),
         }
@@ -388,7 +490,8 @@ mod tests {
         lane.pending_frames
             .push(queued(FrameType::DATA, 1, &vec![0u8; 4096]));
         let batch = lane.take_down_batch(1024);
-        assert_eq!(batch.items, 1);
+        assert_eq!(batch.charge.items, 1);
+        assert_eq!(batch.charge.control_items, 0);
         assert_eq!(batch.body.len(), HEADER_SIZE + 4096);
         assert_eq!(lane.pending_frames.len(), 1);
     }
@@ -401,8 +504,39 @@ mod tests {
             .push(queued(FrameType::WINDOW, 2, &[0, 0, 0, 1]));
         lane.pending_windows.insert(2, 1);
         let batch = lane.take_down_batch(HEADER_SIZE + 1);
-        assert_eq!(batch.items, 1);
+        assert_eq!(batch.charge.items, 1);
         assert_eq!(lane.pending_windows.get(&2), Some(&0));
+    }
+
+    #[test]
+    fn down_batch_splits_the_control_part_of_its_charge() {
+        let mut lane = LaneQueue::new();
+        lane.pending_frames.push(queued(FrameType::DATA, 1, b"ab"));
+        lane.pending_frames.push(queued(FrameType::CLOSE, 1, &[]));
+        let batch = lane.take_down_batch(usize::MAX);
+        assert_eq!(batch.charge.items, 2);
+        assert_eq!(batch.charge.control_items, 1);
+        assert_eq!(batch.charge.control_cost, HEADER_SIZE + QUEUE_ITEM_COST);
+        assert_eq!(
+            batch.charge.cost,
+            batch.charge.control_cost + HEADER_SIZE + 2 + QUEUE_ITEM_COST
+        );
+    }
+
+    #[test]
+    fn closed_lanes_are_evicted_before_live_ones() {
+        let mut state = SessionState::new(true, false);
+        state.lanes.insert(1, LaneQueue::new());
+        state.lanes.insert(2, LaneQueue::new());
+        state
+            .streams
+            .insert(1, StreamState::new(CancellationToken::new()));
+        state.remember_closed(2, 16);
+        assert!(state.evict_closed_lane().is_some());
+        assert!(!state.lanes.contains_key(&2));
+        assert!(state.lanes.contains_key(&1));
+        // Nothing else is tombstoned, so a live lane is never taken.
+        assert!(state.evict_closed_lane().is_none());
     }
 
     #[test]
@@ -423,5 +557,20 @@ mod tests {
         assert!(budget.downlink_cost < budget.uplink_cost);
         assert!(budget.uplink_cost < budget.session_cost);
         assert!(budget.downlink_items < budget.uplink_items);
+    }
+
+    #[test]
+    fn control_class_is_capped_by_the_reserve_not_the_session_pool() {
+        let limits = WebLimits::default();
+        let budget = BudgetLimits::new(&limits);
+        let (reserve_cost, reserve_items) = control_reserve(&limits);
+        assert_eq!(
+            budget.for_class(PendingClass::Control),
+            (reserve_cost, reserve_items)
+        );
+        // The data partitions plus the reserve must fit the session pool, or
+        // the process-wide split into `reserve * sessions` is unsound.
+        assert!(budget.uplink_cost + reserve_cost <= budget.session_cost);
+        assert!(budget.uplink_items + reserve_items <= budget.session_items);
     }
 }

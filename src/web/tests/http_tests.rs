@@ -1,55 +1,26 @@
 //! End-to-end HTTP tests driving the relay over a real TCP listener.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use tempfile::TempDir;
-
 use crate::config::{CarrierMode, WebBackend, WebLimits, WebTimeouts};
-use crate::crypto::SecureRandom;
 use crate::web::capability::{derive_capability, encode_token};
 use crate::web::frame::{self, FrameType};
-use crate::web::http::Relay;
-use crate::web::listener;
-use crate::web::site::StaticSite;
 
 use super::harness::{
-    TEST_HOST, TEST_SECRET, batch, build_manager, data_payloads, header_value, http_request,
-    start_echo_backend,
+    PublicSite, RelayFixture, TEST_HOST, TEST_SECRET, batch, build_manager, data_payloads,
+    header_value, http_request, start_echo_backend, start_relay,
 };
 
-struct Fixture {
-    address: SocketAddr,
-    _site: TempDir,
-}
-
-async fn start_relay(carrier: CarrierMode) -> Fixture {
+async fn start_fixture(carrier: CarrierMode) -> RelayFixture {
     let backend = start_echo_backend().await;
     let manager = build_manager(WebBackend::Loopback(backend), carrier, WebLimits::default());
-    let directory = tempfile::tempdir().expect("tempdir");
-    std::fs::write(directory.path().join("index.html"), b"<h1>site</h1>").expect("index");
-    std::fs::write(directory.path().join("404.html"), b"<h1>missing</h1>").expect("404");
-    let site = StaticSite::load(directory.path()).expect("site");
-    let relay = Arc::new(Relay {
-        hostname: TEST_HOST.to_string(),
+    start_relay(
         manager,
-        limits: WebLimits::default(),
-        timeouts: WebTimeouts::default(),
-        site: Some(site),
-        upstream: None,
-        trusted_proxies: vec!["127.0.0.0/8".parse().expect("cidr")],
-        rng: Arc::new(SecureRandom::new()),
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind relay");
-    let address = listener.local_addr().expect("relay addr");
-    tokio::spawn(listener::serve_carrier(listener, relay));
-    Fixture {
-        address,
-        _site: directory,
-    }
+        PublicSite::Directory,
+        WebLimits::default(),
+        WebTimeouts::default(),
+    )
+    .await
 }
 
 fn get(path: &str) -> Vec<u8> {
@@ -85,7 +56,7 @@ fn bootstrap_from_page(body: &[u8]) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_paths_and_plain_root_serve_the_public_site() {
-    let fixture = start_relay(CarrierMode::Https).await;
+    let fixture = start_fixture(CarrierMode::Https).await;
     let (status, headers, body) = http_request(fixture.address, &get("/")).await;
     assert_eq!(status, 200);
     assert_eq!(body, b"<h1>site</h1>");
@@ -123,7 +94,7 @@ async fn unknown_paths_and_plain_root_serve_the_public_site() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn valid_capability_serves_a_one_shot_bridge_page() {
-    let fixture = start_relay(CarrierMode::WebsocketLanes).await;
+    let fixture = start_fixture(CarrierMode::WebsocketLanes).await;
     let (status, headers, body) = http_request(fixture.address, &get(&bridge_url())).await;
     assert_eq!(status, 200);
     assert_eq!(
@@ -145,7 +116,7 @@ async fn valid_capability_serves_a_one_shot_bridge_page() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_https_carrier_round_trip() {
-    let fixture = start_relay(CarrierMode::Https).await;
+    let fixture = start_fixture(CarrierMode::Https).await;
     let (_, _, page) = http_request(fixture.address, &get(&bridge_url())).await;
     let bootstrap = bootstrap_from_page(&page);
 
@@ -225,11 +196,13 @@ async fn full_https_carrier_round_trip() {
     );
     let (status, _, _) = http_request(fixture.address, delete.as_bytes()).await;
     assert_eq!(status, 204);
+    assert_eq!(fixture.manager.capacity().sessions, 0);
+    assert_eq!(fixture.manager.capacity().pending_bytes, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wrong_host_and_bad_sequences_are_refused() {
-    let fixture = start_relay(CarrierMode::Https).await;
+    let fixture = start_fixture(CarrierMode::Https).await;
     let wrong_host =
         b"GET / HTTP/1.1\r\nHost: other.example.com\r\nConnection: close\r\n\r\n".to_vec();
     let (status, _, body) = http_request(fixture.address, &wrong_host).await;

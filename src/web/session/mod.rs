@@ -16,8 +16,10 @@ use std::time::Instant;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use crate::config::{CarrierMode, WebLimits, WebTimeouts};
+use crate::crypto::SecureRandom;
 use crate::web::manager::{Manager, WebProfile};
 use crate::web::runtime::WebRuntime;
 
@@ -28,7 +30,7 @@ pub(crate) mod queue;
 pub(crate) mod state;
 pub(crate) mod uplink;
 
-use state::{BudgetLimits, SessionState};
+use state::{BudgetLimits, PendingCharge, SessionState};
 
 /// Everything a session needs that is fixed for its whole lifetime.
 pub(crate) struct SessionOptions {
@@ -40,6 +42,7 @@ pub(crate) struct SessionOptions {
     pub(crate) timeouts: WebTimeouts,
     pub(crate) manager: Weak<Manager>,
     pub(crate) runtime: Arc<WebRuntime>,
+    pub(crate) rng: Arc<SecureRandom>,
 }
 
 /// One authenticated relay session multiplexing logical streams over a carrier.
@@ -56,6 +59,8 @@ pub(crate) struct Session {
     carrier: CarrierMode,
     pub(crate) manager: Weak<Manager>,
     pub(crate) runtime: Arc<WebRuntime>,
+    /// Jitter source for the long-poll deadline.
+    pub(crate) rng: Arc<SecureRandom>,
     pub(crate) state: Mutex<SessionState>,
     /// Cancelled once the session closes, tearing down every backend.
     pub(crate) done: CancellationToken,
@@ -78,6 +83,7 @@ impl Session {
             carrier,
             manager: options.manager,
             runtime: options.runtime,
+            rng: options.rng,
             state: Mutex::new(SessionState::new(
                 carrier.uses_lanes(),
                 carrier == CarrierMode::HttpsLanes,
@@ -114,6 +120,21 @@ impl Session {
         self.close_locked(&mut state);
     }
 
+    /// Carrier lanes one session may hold at once.
+    ///
+    /// Every lane is either live, drained but not yet reclaimed, or lane zero
+    /// of `https-lanes`. Budgeting one drained lane per live stream keeps a
+    /// client that churns stream ids from holding one queue per id it ever
+    /// used, while never refusing a lane a live stream still needs.
+    pub(crate) fn max_lanes(&self) -> usize {
+        let live = self.limits.max_streams_per_session;
+        let reclaimable = live.saturating_mul(2);
+        match self.carrier {
+            CarrierMode::HttpsLanes => reclaimable.saturating_add(1),
+            _ => reclaimable,
+        }
+    }
+
     /// Acquires the single multiplexed WebSocket of a `websocket` session.
     pub(crate) fn acquire_websocket(&self) -> bool {
         let mut state = self.state.lock();
@@ -125,6 +146,14 @@ impl Session {
     }
 
     /// Releases the multiplexed WebSocket and closes the session with it.
+    ///
+    /// `reconnect_grace_ms` deliberately does not apply here. The `https`
+    /// carriers survive a dropped request because every uplink carries its
+    /// sequence and every downlink its cursor, so a replacement request
+    /// resumes exactly where the last one stopped. The v1 WebSocket
+    /// subprotocol carries only the bearer, so a replacement socket has no way
+    /// to state where it left off; keeping the session alive would leave a
+    /// carrier that can accept a socket but never agree on a cursor with it.
     pub(crate) fn release_websocket(&self) {
         {
             let mut state = self.state.lock();
@@ -152,8 +181,17 @@ impl Session {
                 lane.websocket_active = true;
             }
             None => {
-                if state.lanes.len() >= self.limits.max_streams_per_session {
-                    return false;
+                if state.lanes.len() >= self.max_lanes() {
+                    let Some(released) = state.evict_closed_lane() else {
+                        debug!(
+                            session = self.id,
+                            lane = lane_id,
+                            profile = %self.profile.name,
+                            "WEB lane refused: per-session lane ceiling reached"
+                        );
+                        return false;
+                    };
+                    self.release_pending_locked(&mut state, released);
                 }
                 let mut lane = state::LaneQueue::new();
                 lane.websocket_active = true;
@@ -166,7 +204,7 @@ impl Session {
 
     /// Detaches a lane socket and aborts only that lane's logical stream.
     pub(crate) fn release_websocket_lane(&self, lane_id: u32) {
-        let mut released = (0usize, 0usize);
+        let mut released = PendingCharge::default();
         {
             let mut state = self.state.lock();
             if self.carrier != CarrierMode::WebsocketLanes {
@@ -177,7 +215,8 @@ impl Session {
             };
             lane.websocket_active = false;
             if let Some(mut stream) = state.streams.remove(&lane_id) {
-                let (cost, items) = (stream.pending_write_cost, stream.pending_write_items);
+                released =
+                    PendingCharge::data(stream.pending_write_cost, stream.pending_write_items);
                 stream.pending_write_bytes = 0;
                 stream.pending_write_cost = 0;
                 stream.pending_write_items = 0;
@@ -187,21 +226,14 @@ impl Session {
                 stream.cancel.cancel();
                 stream.wake_reader();
                 stream.wake_writer();
-                released = (cost, items);
-                let evicted = state.remember_closed(lane_id, self.limits.max_closed_stream_ids);
-                released.0 += evicted.0;
-                released.1 += evicted.1;
+                released.add(state.remember_closed(lane_id, self.limits.max_closed_stream_ids));
             }
             if let Some(mut lane) = state.lanes.remove(&lane_id) {
-                let charged = lane.charged();
-                released.0 += charged.0;
-                released.1 += charged.1;
+                released.add(lane.charged());
                 lane.clear();
             }
             state.last_activity = Instant::now();
-            if released != (0, 0) {
-                self.release_pending_locked(&mut state, released.0, released.1);
-            }
+            self.release_pending_locked(&mut state, released);
         }
     }
 
@@ -228,6 +260,8 @@ impl Session {
         }
         state.pending_cost = 0;
         state.pending_items = 0;
+        state.control_cost = 0;
+        state.control_items = 0;
         if let Some(manager) = self.manager.upgrade() {
             if released_cost != 0 || released_items != 0 {
                 manager.release_pending_budget(released_cost, released_items);
@@ -254,12 +288,24 @@ impl Session {
 
     /// Closes the session after a protocol violation on the shared carrier.
     pub(crate) fn protocol_failure(&self) {
+        debug!(
+            session = self.id,
+            profile = %self.profile.name,
+            carrier = self.carrier.as_str(),
+            "WEB session closed: carrier protocol violation"
+        );
         self.close();
     }
 
     /// Closes only the offending lane when the carrier isolates lanes.
     pub(crate) fn lane_protocol_failure(&self, lane_id: u32) {
         if self.carrier == CarrierMode::WebsocketLanes {
+            debug!(
+                session = self.id,
+                lane = lane_id,
+                profile = %self.profile.name,
+                "WEB lane closed: carrier protocol violation"
+            );
             self.release_websocket_lane(lane_id);
         } else {
             self.protocol_failure();

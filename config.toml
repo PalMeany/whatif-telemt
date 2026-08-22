@@ -68,7 +68,7 @@ hello = "00000000000000000000000000000000"
 # [web]
 # enabled = true
 # hostname = "proxy.example.com"    # must match the front proxy certificate
-# listen = "127.0.0.1:8080"         # carrier listener, keep it on loopback
+# listen = "127.0.0.1:8080"         # carrier listener: plaintext, keep it on loopback
 # admin_listen = "127.0.0.1:8081"   # /healthz, /readyz, /metrics ("" disables)
 # public_dir = "site"               # operator-owned static site (needs index.html)
 # public_upstream = "http://127.0.0.1:3000"  # or a private site application

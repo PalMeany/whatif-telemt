@@ -142,21 +142,32 @@ pub(crate) fn parse_all(input: &[u8], max_payload: usize) -> Result<Vec<Frame<'_
     Ok(frames)
 }
 
-/// Validates that a session-creation body is exactly one canonical HELLO.
-pub(crate) fn parse_hello(input: &[u8]) -> Result<(), FrameError> {
+/// Protocol version this relay implements.
+pub(crate) const PROTOCOL_VERSION: u8 = 1;
+
+/// Reads the protocol version out of a session-creation body.
+///
+/// The body must be exactly one HELLO on stream zero whose first payload byte
+/// is the client's protocol version. Bytes past the version are accepted and
+/// ignored, and so is a version this relay does not implement: the relay then
+/// answers with its own v1 WELCOME, which is the only downgrade signal a later
+/// client can get. Rejecting either would produce the same deliberately
+/// indistinguishable 404 an unrelated host returns, leaving a future client no
+/// way to tell "relay speaking an older version" from "not a relay".
+pub(crate) fn parse_hello(input: &[u8]) -> Result<u8, FrameError> {
     let frames = parse_all(input, MAX_PAYLOAD)?;
     if frames.len() != 1 {
         return Err(FrameError::Shape);
     }
     let value = frames[0];
-    if value.kind != FrameType::HELLO
-        || value.stream_id != 0
-        || value.payload.len() != 1
-        || value.payload[0] != 1
-    {
+    if value.kind != FrameType::HELLO || value.stream_id != 0 || value.payload.is_empty() {
         return Err(FrameError::Shape);
     }
-    Ok(())
+    let version = value.payload[0];
+    if version == 0 {
+        return Err(FrameError::Shape);
+    }
+    Ok(version)
 }
 
 /// Decodes a WINDOW payload into its nonzero credit delta.
@@ -242,9 +253,14 @@ mod tests {
     }
 
     #[test]
-    fn hello_must_be_canonical() {
-        assert!(parse_hello(&encode(FrameType::HELLO, 0, &[1])).is_ok());
-        assert!(parse_hello(&encode(FrameType::HELLO, 0, &[2])).is_err());
+    fn hello_reports_the_client_protocol_version() {
+        assert_eq!(parse_hello(&encode(FrameType::HELLO, 0, &[1])), Ok(1));
+        // A newer client is admitted and answered with the v1 WELCOME, which is
+        // how it learns to downgrade instead of seeing an opaque 404.
+        assert_eq!(parse_hello(&encode(FrameType::HELLO, 0, &[2])), Ok(2));
+        assert_eq!(parse_hello(&encode(FrameType::HELLO, 0, &[2, 9])), Ok(2));
+        assert!(parse_hello(&encode(FrameType::HELLO, 0, &[0])).is_err());
+        assert!(parse_hello(&encode(FrameType::HELLO, 0, &[])).is_err());
         assert!(parse_hello(&encode(FrameType::HELLO, 1, &[1])).is_err());
     }
 

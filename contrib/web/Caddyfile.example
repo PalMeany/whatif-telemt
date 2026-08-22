@@ -17,6 +17,13 @@ proxy.example.com {
 		# Long polls park for the configured web.timeouts.long_poll_ms
 		# (25s by default) and WebSocket carriers stay open for the whole
 		# session, so no read timeout may be shorter than that.
+		#
+		# Unbounded here is safe because telemt bounds the hop itself: it
+		# applies its own per-request deadline derived from long_poll_ms
+		# and body_read_ms, and its own connect and response deadlines for
+		# web.public_upstream. Do not add a timeout shorter than
+		# long_poll_ms in an attempt to bound it here — that only breaks
+		# the downlink poll.
 		transport http {
 			read_timeout 0s
 			write_timeout 0s

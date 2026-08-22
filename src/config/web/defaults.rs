@@ -65,6 +65,10 @@ pub(super) fn default_max_pending_items_global() -> usize {
     256 * 1024
 }
 
+pub(super) fn default_max_sessions_per_ip() -> usize {
+    16
+}
+
 pub(super) fn default_max_sessions_global() -> usize {
     128
 }
@@ -91,6 +95,10 @@ pub(super) fn default_new_streams_per_minute() -> usize {
 
 pub(super) fn default_new_streams_burst() -> usize {
     512
+}
+
+pub(super) fn default_max_bootstraps_per_ip() -> usize {
+    32
 }
 
 pub(super) fn default_max_bootstraps_global() -> usize {

@@ -188,13 +188,13 @@ and `[web.timeouts]`, with the same names and defaults:
 | `max_pending_global` | `536870912` | Queued bytes across the process |
 | `max_pending_items_per_session` | `16384` | Queued items per session |
 | `max_pending_items_global` | `262144` | Queued items across the process |
-| `max_sessions_per_ip` | `0` (off) | Sessions one client address may hold |
+| `max_sessions_per_ip` | `16` | Sessions one client address may hold (`0` disables it) |
 | `max_sessions_global` | `128` | Live sessions |
 | `max_streams_global` | `4096` | Live streams |
 | `max_backend_dials_in_flight` | `256` | Backend connections establishing at once |
 | `new_sessions_per_minute` / `new_sessions_burst` | `600` / `128` | Session creation rate |
 | `new_streams_per_minute` / `new_streams_burst` | `6000` / `512` | Stream creation rate |
-| `max_bootstraps_per_ip` | `0` (off) | Unconsumed bootstraps per address |
+| `max_bootstraps_per_ip` | `32` | Unconsumed bootstraps per address (`0` disables it) |
 | `max_bootstraps_global` | `512` | Unconsumed bootstraps |
 | `new_bootstraps_per_minute` / `new_bootstraps_burst` | `1200` / `256` | Bootstrap issuance rate |
 | `max_profiles` | `32` | Explicit profile entries |
@@ -211,6 +211,19 @@ and `[web.timeouts]`, with the same names and defaults:
 
 Per-profile overrides live under `[web.profiles.limits]` and may only lower the
 process-wide ceiling they refine.
+
+The two per-address ceilings count an IPv6 client per `/64`, not per address: a
+single subscriber is routinely handed a whole `/64`, so counting exact addresses
+would let one client walk past either ceiling one address at a time. They apply
+to the address telemt resolves through `trusted_proxies`, so behind a front
+proxy they count the real client rather than the proxy.
+
+`[web.limits]` and `[web.timeouts]` are read once, at start-up. The process-wide
+pending pools, the per-session budget partitions, and the accept loops are all
+built from them, so a reload cannot change them in place. Reloading a
+configuration whose ceilings differ logs a warning and keeps the running values;
+`[access.users]` and `[[web.profiles]]` still reload normally. Rotating a
+profile's secret closes the live sessions that secret opened.
 
 ## Observability
 
@@ -230,16 +243,35 @@ The same counters appear on telemt's main metrics endpoint under the
 `backend_dials_in_flight`, `pending_bytes`, `pending_items`,
 `sessions_created_total`, `sessions_closed_total`, `streams_opened_total`,
 `streams_rejected_total`, `backend_dial_failures_total`, `bytes_up_total`,
-`bytes_down_total`, and `limit_hits_total`.
+`bytes_down_total`, `limit_hits_total`, `carrier_connections_dropped_total`,
+`request_timeouts_total`, and `retry_later_responses_total`.
+
+The last three are the ones worth alerting on: every other failure is answered
+with the site's ordinary 404 by design, so they are the only externally visible
+signal that the relay is refusing work.
+`carrier_connections_dropped_total` rises when the accept-loop budget is full,
+`request_timeouts_total` when a request overran the relay's own deadline, and
+`retry_later_responses_total` when a queue budget or a capacity ceiling handed a
+client a 503. Protocol, authentication, and budget refusals are logged at
+`debug` level with the session id and profile name.
 
 Because the session bearer travels in a request header on the WebSocket
 upgrade, never enable header logging on the front proxy or on telemt.
 
 ## Operational notes
 
-- `hostname`, `listen`, `admin_listen`, `public_dir`, and `public_upstream` are
-  read once at start-up; changing them requires a restart. Capability profiles
-  (`[access.users]` and `[[web.profiles]]`) are re-derived after a reload.
+- `hostname`, `listen`, `admin_listen`, `public_dir`, `public_upstream`,
+  `[web.limits]`, and `[web.timeouts]` are read once at start-up; changing them
+  requires a restart, and a reload that changes them logs a warning and keeps
+  the running values. Capability profiles (`[access.users]` and
+  `[[web.profiles]]`) are re-derived after a reload, and a profile whose secret
+  changed loses its live sessions with it.
+- The `websocket` carrier ties the session to its socket. The `https` carriers
+  survive a dropped request because each uplink carries its sequence and each
+  downlink its cursor, so `reconnect_grace_ms` covers them; the v1 WebSocket
+  subprotocol carries only the bearer, so a replacement socket has no way to
+  state where it left off and the session ends with the socket. Prefer an
+  `https` mode where middleboxes cut long-lived connections.
 - Each demultiplexed stream is a normal telemt session: it consumes a slot from
   `server.max_connections` and is drained by the usual shutdown sequence.
 - `X-Forwarded-For` is honoured only from `trusted_proxies`. A request from an
@@ -247,4 +279,9 @@ upgrade, never enable header logging on the front proxy or on telemt.
   header is ignored. When the header carries a list, the last entry is used:
   every proxy appends its own observation, so that entry is the one a client
   cannot inject.
-- Do not expose `listen` or `admin_listen` on a public interface.
+- Do not expose `listen` or `admin_listen` on a public interface. The carrier
+  listener is plaintext HTTP by design — TLS belongs to the front proxy — so
+  anything that can reach it reads the bridge capability and the session bearer.
+  telemt warns at start-up when `listen` is not a loopback address; it is not
+  refused only because a container deployment reaches the relay from a sibling
+  container.

@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::{ProxyConfig, WebBackend, WebConfig, WebProfileConfig, WebProfileLimits};
@@ -60,14 +61,27 @@ use runtime::WebRuntime;
 use site::StaticSite;
 use upstream::UpstreamProxy;
 
-/// The running relay manager, used by the process shutdown sequence.
-static ACTIVE_MANAGER: Mutex<Option<Arc<Manager>>> = Mutex::new(None);
+/// Everything the process shutdown sequence needs to stop the relay.
+struct ActiveRelay {
+    manager: Arc<Manager>,
+    /// Stops both accept loops before the sessions are closed.
+    shutdown: CancellationToken,
+}
 
-/// Closes every relay session during process shutdown.
+/// The running relay, published only once its listener is actually bound.
+static ACTIVE_RELAY: Mutex<Option<ActiveRelay>> = Mutex::new(None);
+
+/// Stops the relay listeners and closes every relay session.
+///
+/// The listeners are cancelled first, for the same reason the proxy unbinds its
+/// own sockets first: an accept loop that keeps running through the drain window
+/// creates sessions the drain has already passed.
 pub(crate) fn shutdown() {
-    let manager = ACTIVE_MANAGER.lock().take();
-    if let Some(manager) = manager {
-        manager.shutdown();
+    let active = ACTIVE_RELAY.lock().take();
+    if let Some(active) = active {
+        active.shutdown.cancel();
+        active.manager.shutdown();
+        metrics::clear_metrics_source();
     }
 }
 
@@ -108,6 +122,7 @@ async fn build(
         }
         None => None,
     };
+    let relay_timeouts = web.timeouts.clone();
     let upstream = match web
         .public_upstream
         .as_deref()
@@ -118,10 +133,15 @@ async fn build(
                 .trim_start_matches("http://")
                 .parse()
                 .map_err(|_| ProxyError::Config("web.public_upstream must be ip:port".into()))?;
-            Some(UpstreamProxy::new(address))
+            Some(UpstreamProxy::new(
+                address,
+                Duration::from_millis(relay_timeouts.body_read_ms),
+            ))
         }
         None => None,
     };
+
+    warn_on_public_listener(carrier_address);
 
     let runtime = WebRuntime::new(active_runtime);
     let manager = Manager::new(
@@ -130,8 +150,6 @@ async fn build(
         profiles,
         runtime.clone(),
     )?;
-    metrics::register_metrics_source(manager.clone());
-    *ACTIVE_MANAGER.lock() = Some(manager.clone());
 
     let relay = Arc::new(Relay {
         hostname: web.hostname.clone(),
@@ -144,12 +162,27 @@ async fn build(
         rng: Arc::new(SecureRandom::new()),
     });
 
+    // Nothing is published before the carrier listener is bound: a manager and
+    // a metrics source registered by a start-up that then fails would leave the
+    // process reporting a relay it does not run.
     let Some(carrier_listener) = listener::bind(carrier_address, "carrier").await else {
         return Err(ProxyError::Config(format!(
             "web.listen {carrier_address} could not be bound"
         )));
     };
-    tokio::spawn(listener::serve_carrier(carrier_listener, relay));
+
+    let shutdown = CancellationToken::new();
+    metrics::register_metrics_source(manager.clone());
+    *ACTIVE_RELAY.lock() = Some(ActiveRelay {
+        manager: manager.clone(),
+        shutdown: shutdown.clone(),
+    });
+
+    tokio::spawn(listener::serve_carrier(
+        carrier_listener,
+        relay,
+        shutdown.clone(),
+    ));
 
     if !web.admin_listen.is_empty()
         && let Ok(admin_address) = web.admin_listen.parse::<SocketAddr>()
@@ -159,6 +192,7 @@ async fn build(
             admin_listener,
             manager.clone(),
             runtime.clone(),
+            shutdown.clone(),
         ));
     }
 
@@ -195,6 +229,7 @@ async fn watch_profiles(
     initial_fingerprint: u64,
 ) {
     let mut fingerprint = initial_fingerprint;
+    let mut warned_about_limits = false;
     let mut ticker = tokio::time::interval(PROFILE_REFRESH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -202,11 +237,29 @@ async fn watch_profiles(
         let config = runtime.config();
         // A reloaded configuration that disables the relay or changes its
         // hostname cannot be applied in place; keep serving the current set.
-        let web = if config.web.enabled && config.web.hostname == initial_web.hostname {
+        let reloaded = if config.web.enabled && config.web.hostname == initial_web.hostname {
             &config.web
         } else {
             &initial_web
         };
+        // Per-profile ceilings are always resolved against the ceilings that
+        // are actually in force. The process-wide pools, the session budget
+        // partitions, and every timeout are built once at start-up, so taking
+        // per-profile values from reloaded ceilings would apply half of an
+        // operator's change and silently discard the other half.
+        let mut effective = reloaded.clone();
+        effective.limits = initial_web.limits.clone();
+        effective.timeouts = initial_web.timeouts.clone();
+        if !warned_about_limits
+            && (reloaded.limits != initial_web.limits || reloaded.timeouts != initial_web.timeouts)
+        {
+            warned_about_limits = true;
+            warn!(
+                "WEB proxy kept the running web.limits and web.timeouts: they are fixed for the \
+                 process lifetime. Restart telemt to apply the reloaded values."
+            );
+        }
+        let web = &effective;
         let next = profile_fingerprint(web, &config.access.users);
         if next == fingerprint {
             continue;
@@ -249,8 +302,51 @@ fn profile_fingerprint(web: &WebConfig, users: &HashMap<String, String>) -> u64 
         profile.secret.hash(&mut hasher);
         profile.backend.hash(&mut hasher);
         web.profile_carrier_mode(profile).as_str().hash(&mut hasher);
+        hash_profile_limits(&profile.limits, &mut hasher);
     }
     hasher.finish()
+}
+
+/// Folds the per-profile ceilings into the capability fingerprint.
+///
+/// They are rebuilt with the profile set, so a reload that only changes a
+/// profile's ceilings has to be noticed here or it is never applied.
+fn hash_profile_limits(limits: &WebProfileLimits, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    for value in [
+        limits.max_sessions,
+        limits.max_streams,
+        limits.max_backend_dials_in_flight,
+        limits.new_sessions_per_minute,
+        limits.new_sessions_burst,
+        limits.new_streams_per_minute,
+        limits.new_streams_burst,
+        limits.max_streams_per_session,
+        limits.max_pending_per_session,
+    ] {
+        value.hash(hasher);
+    }
+}
+
+/// Warns when the carrier listener is reachable from outside the host.
+///
+/// The carrier speaks plaintext HTTP/1.1 on purpose: TLS, ACME, and the
+/// publicly trusted certificate belong to the front proxy. Binding it to a
+/// public interface therefore puts the bridge capability and the session bearer
+/// on the wire in the clear. It is not refused outright, because a container
+/// deployment reaches the relay from a sibling container and must bind
+/// `0.0.0.0` to do so — but that is a decision an operator has to make on
+/// purpose, not one they discover from a cheerful "listener bound" line.
+fn warn_on_public_listener(address: SocketAddr) {
+    if address.ip().is_loopback() {
+        return;
+    }
+    warn!(
+        %address,
+        "web.listen is not a loopback address. The carrier is plaintext HTTP: anything that can \
+         reach this address reads the bridge capability and the session bearer. Bind it to \
+         127.0.0.1 unless the front proxy is on another host inside a private network."
+    );
 }
 
 /// Builds the profile set from explicit entries and, optionally, from users.

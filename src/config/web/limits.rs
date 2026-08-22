@@ -8,7 +8,11 @@ use super::defaults::*;
 use super::{CarrierMode, MAX_CARRIER_BATCH_BYTES};
 
 /// Process-wide resource ceilings for the WEB relay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` is derived because the relay compares the reloaded ceilings with
+/// the running ones: the pending pools and the accept loops are built once at
+/// start-up, so a reload that changes them can only be reported, not applied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebLimits {
     /// Largest accepted request header block.
     #[serde(default = "default_max_header_bytes")]
@@ -51,7 +55,11 @@ pub struct WebLimits {
     pub max_pending_items_global: usize,
 
     /// Sessions one client address may hold; `0` disables the per-IP ceiling.
-    #[serde(default)]
+    ///
+    /// An IPv6 client is counted per `/64`, because a single subscriber is
+    /// routinely handed a whole one and could otherwise walk past this ceiling
+    /// one address at a time.
+    #[serde(default = "default_max_sessions_per_ip")]
     pub max_sessions_per_ip: usize,
 
     /// Live sessions across the process.
@@ -83,7 +91,9 @@ pub struct WebLimits {
     pub new_streams_burst: usize,
 
     /// Unconsumed bootstraps one client address may hold; `0` disables it.
-    #[serde(default)]
+    ///
+    /// Counted per `/64` for IPv6, exactly like `max_sessions_per_ip`.
+    #[serde(default = "default_max_bootstraps_per_ip")]
     pub max_bootstraps_per_ip: usize,
 
     /// Unconsumed bootstraps across the process.
@@ -104,7 +114,7 @@ pub struct WebLimits {
 }
 
 /// Per-profile overrides of the process-wide ceilings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebProfileLimits {
     /// Live sessions for this profile.
     #[serde(default)]
@@ -202,7 +212,7 @@ pub struct WebProfileConfig {
 }
 
 /// Timeouts controlling carrier liveness and session lifetime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebTimeouts {
     /// Deadline for connecting a loopback backend.
     #[serde(default = "default_backend_dial_ms")]
@@ -392,7 +402,7 @@ impl Default for WebLimits {
             max_pending_global: default_max_pending_global(),
             max_pending_items_per_session: default_max_pending_items_per_session(),
             max_pending_items_global: default_max_pending_items_global(),
-            max_sessions_per_ip: 0,
+            max_sessions_per_ip: default_max_sessions_per_ip(),
             max_sessions_global: default_max_sessions_global(),
             max_streams_global: default_max_streams_global(),
             max_backend_dials_in_flight: default_max_backend_dials_in_flight(),
@@ -400,7 +410,7 @@ impl Default for WebLimits {
             new_sessions_burst: default_new_sessions_burst(),
             new_streams_per_minute: default_new_streams_per_minute(),
             new_streams_burst: default_new_streams_burst(),
-            max_bootstraps_per_ip: 0,
+            max_bootstraps_per_ip: default_max_bootstraps_per_ip(),
             max_bootstraps_global: default_max_bootstraps_global(),
             new_bootstraps_per_minute: default_new_bootstraps_per_minute(),
             new_bootstraps_burst: default_new_bootstraps_burst(),

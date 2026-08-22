@@ -46,12 +46,14 @@ pub(crate) fn render(
         .replace("__ORIGIN__", &origin)
         .replace("__BOOTSTRAP__", &token)
         .replace("__CARRIER_MODE__", &mode)
-        .replace("__BATCH_LIMIT__", &batch_bytes.to_string());
+        .replace("__BATCH_LIMIT__", &batch_bytes.to_string())
+        .replace("__PADDING__", &padding(rng));
     if body.contains("__NONCE__")
         || body.contains("__ORIGIN__")
         || body.contains("__BOOTSTRAP__")
         || body.contains("__CARRIER_MODE__")
         || body.contains("__BATCH_LIMIT__")
+        || body.contains("__PADDING__")
     {
         return None;
     }
@@ -83,6 +85,30 @@ pub(crate) fn render(
 /// Renders one JSON string literal for inlining into the page script.
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Largest padding block appended to one rendered bridge page.
+const MAX_PADDING_BYTES: usize = 4096;
+
+/// Builds the random-length comment body that hides the page's fixed size.
+///
+/// Without it the document is a deployment constant, so its `Content-Length`
+/// alone separates a bridge fetch from an index fetch on the same origin — for
+/// an observer who never has to decrypt anything to measure it. The alphabet is
+/// hexadecimal so the block can never contain a sequence that ends the comment
+/// or reopens markup.
+fn padding(rng: &SecureRandom) -> String {
+    let mut length = [0u8; 2];
+    rng.fill(&mut length);
+    let bytes = (u16::from_be_bytes(length) as usize) % MAX_PADDING_BYTES;
+    let mut raw = vec![0u8; bytes.div_ceil(2)];
+    rng.fill(&mut raw);
+    let mut out = String::with_capacity(bytes);
+    for byte in raw {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out.truncate(bytes);
+    out
 }
 
 /// Reference bridge document, kept byte-identical to the upstream carrier.
@@ -459,6 +485,7 @@ if(!initialized&&androidNonce&&androidBridge&&typeof androidBridge.postMessage==
 addEventListener('pagehide',()=>close(true),{once:true});
 })();
 </script>
+<!--__PADDING__-->
 </body>
 </html>
 "####;
@@ -483,11 +510,27 @@ mod tests {
         assert!(body.contains("\"https://proxy.example.com\""));
         assert!(body.contains("\"token\""));
         assert!(body.contains("2097152"));
+        assert!(body.contains("<!--"));
         assert!(
             page.csp
                 .contains("connect-src 'self' wss://proxy.example.com")
         );
         assert!(page.csp.contains("script-src 'nonce-"));
+    }
+
+    #[test]
+    fn padding_varies_the_rendered_length() {
+        let rng = SecureRandom::new();
+        let mut lengths = std::collections::HashSet::new();
+        for _ in 0..16 {
+            let page = render("proxy.example.com", "token", CarrierMode::Https, 1024, &rng)
+                .expect("render");
+            lengths.insert(page.body.len());
+        }
+        assert!(
+            lengths.len() > 1,
+            "the bridge page must not have one fixed size"
+        );
     }
 
     #[test]

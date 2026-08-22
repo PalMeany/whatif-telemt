@@ -12,10 +12,12 @@ use crate::web::error::WebError;
 use crate::web::frame::{self, FrameType};
 use crate::web::session::{CreateOutcome, Session, SessionOptions};
 
+use tracing::debug;
+
 use super::limits::{StreamPermit, allow_profile_rate, allow_rate};
 use super::{
     Bootstrap, Manager, WebProfile, decrement_ip, decrement_profile, evict_oldest_unused,
-    remove_expired,
+    ip_bucket, remove_expired,
 };
 
 impl Manager {
@@ -26,6 +28,7 @@ impl Manager {
         client_ip: IpAddr,
     ) -> std::result::Result<String, WebError> {
         let now = Instant::now();
+        let bucket = ip_bucket(client_ip);
         let (token, hash) = self.new_token();
         let mut guard = self.state.lock();
         let state = &mut *guard;
@@ -34,11 +37,7 @@ impl Manager {
         }
         remove_expired(state, now);
         let per_ip_full = self.limits.max_bootstraps_per_ip != 0
-            && state
-                .bootstraps_per_ip
-                .get(&client_ip)
-                .copied()
-                .unwrap_or(0)
+            && state.bootstraps_per_ip.get(&bucket).copied().unwrap_or(0)
                 >= self.limits.max_bootstraps_per_ip;
         if per_ip_full
             || !allow_rate(
@@ -48,12 +47,21 @@ impl Manager {
                 self.limits.new_bootstraps_burst,
             )
         {
+            debug!(
+                profile = %profile.name,
+                per_ip_full,
+                "WEB bootstrap refused by a rate or per-address ceiling"
+            );
             self.count_limit_hit();
             return Err(WebError::Limit);
         }
         if state.bootstraps.len() >= self.limits.max_bootstraps_global
             && !evict_oldest_unused(state)
         {
+            debug!(
+                profile = %profile.name,
+                "WEB bootstrap refused: every issued bootstrap is already redeemed"
+            );
             self.count_limit_hit();
             return Err(WebError::Limit);
         }
@@ -62,14 +70,14 @@ impl Manager {
             Bootstrap {
                 expires: now + Duration::from_millis(self.timeouts.bootstrap_lifetime_ms),
                 profile: profile.clone(),
-                issuance_ip: client_ip,
+                issuance_ip: bucket,
                 body_digest: [0u8; 32],
                 session_token: String::new(),
                 session: None,
                 used: false,
             },
         );
-        *state.bootstraps_per_ip.entry(client_ip).or_insert(0) += 1;
+        *state.bootstraps_per_ip.entry(bucket).or_insert(0) += 1;
         Ok(token)
     }
 
@@ -94,9 +102,12 @@ impl Manager {
         client_ip: IpAddr,
         body: &[u8],
     ) -> std::result::Result<CreateOutcome, WebError> {
-        if frame::parse_hello(body).is_err() {
-            return Err(WebError::Protocol);
-        }
+        // The client's protocol version is read but not yet acted on: v1 is the
+        // only version this relay speaks, and answering a newer HELLO with the
+        // v1 WELCOME is the downgrade signal a later client needs. Refusing it
+        // outright would be a 404 that a client cannot tell apart from "this
+        // host is not a relay at all".
+        let client_version = frame::parse_hello(body).map_err(|_| WebError::Protocol)?;
         let raw = decode_token(token).ok_or(WebError::Authentication)?;
         let hash = token_hash(&raw);
         let body_digest = sha256(body);
@@ -126,13 +137,14 @@ impl Manager {
         }
         let profile = entry.profile.clone();
         let issuance_ip = entry.issuance_ip;
+        let bucket = ip_bucket(client_ip);
         let profile_limits = profile.limits.clone();
         let sessions_for_profile = state
             .sessions_per_profile
             .get(&profile.name)
             .copied()
             .unwrap_or(0);
-        let sessions_for_ip = state.sessions_per_ip.get(&client_ip).copied().unwrap_or(0);
+        let sessions_for_ip = state.sessions_per_ip.get(&bucket).copied().unwrap_or(0);
         let per_ip_full = self.limits.max_sessions_per_ip != 0
             && sessions_for_ip >= self.limits.max_sessions_per_ip;
         if state.closed
@@ -140,6 +152,12 @@ impl Manager {
             || sessions_for_profile >= profile_limits.max_sessions
             || per_ip_full
         {
+            debug!(
+                profile = %profile.name,
+                per_ip_full,
+                sessions_for_profile,
+                "WEB session refused by a capacity ceiling"
+            );
             self.count_limit_hit();
             return Err(WebError::Limit);
         }
@@ -158,6 +176,7 @@ impl Manager {
             profile_limits.new_sessions_burst,
         );
         if !allowed {
+            debug!(profile = %profile.name, "WEB session refused by a creation rate limit");
             self.count_limit_hit();
             return Err(WebError::Limit);
         }
@@ -177,9 +196,10 @@ impl Manager {
             timeouts: self.timeouts.clone(),
             manager: self.self_ref.clone(),
             runtime: self.runtime.clone(),
+            rng: self.rng.clone(),
         });
         state.sessions.insert(session_hash, created.clone());
-        *state.sessions_per_ip.entry(client_ip).or_insert(0) += 1;
+        *state.sessions_per_ip.entry(bucket).or_insert(0) += 1;
         *state
             .sessions_per_profile
             .entry(profile.name.clone())
@@ -194,6 +214,14 @@ impl Manager {
         self.metrics
             .sessions_created
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        debug!(
+            session = created.id,
+            profile = %profile.name,
+            carrier = created.carrier_mode().as_str(),
+            client_version,
+            negotiated = client_version.min(frame::PROTOCOL_VERSION),
+            "WEB session created"
+        );
         Ok(CreateOutcome {
             token: session_token,
             welcome: frame::encode(FrameType::WELCOME, 0, &[]),
@@ -250,6 +278,12 @@ impl Manager {
             || streams_for_profile >= profile.limits.max_streams
             || dials_for_profile >= profile.limits.max_backend_dials_in_flight
         {
+            debug!(
+                profile = %profile.name,
+                streams_live = state.streams_live,
+                dials_in_flight = state.backend_dials_in_flight,
+                "WEB stream refused by a capacity ceiling"
+            );
             return None;
         }
         let profile_rate = state
@@ -267,6 +301,7 @@ impl Manager {
             profile.limits.new_streams_burst,
         );
         if !allowed {
+            debug!(profile = %profile.name, "WEB stream refused by a creation rate limit");
             return None;
         }
         state.stream_rate = global_rate;
@@ -333,7 +368,7 @@ impl Manager {
                     session.token_hash,
                     Instant::now() + Duration::from_millis(self.timeouts.bootstrap_lifetime_ms),
                 );
-                decrement_ip(&mut state.sessions_per_ip, session.client_ip);
+                decrement_ip(&mut state.sessions_per_ip, ip_bucket(session.client_ip));
                 decrement_profile(&mut state.sessions_per_profile, &session.profile.name);
             }
             let session_id = session.id;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use crate::crypto::hash::sha256;
 use crate::web::error::WebError;
@@ -12,7 +13,7 @@ use crate::web::frame::{self, Frame, FrameType};
 use crate::web::manager::StreamPermit;
 
 use super::Session;
-use super::state::{PendingClass, QUEUE_ITEM_COST, SessionState, StreamState};
+use super::state::{PendingCharge, PendingClass, QUEUE_ITEM_COST, SessionState, StreamState};
 
 /// A stream created by this batch, handed to the backend spawner.
 pub(crate) struct OpenedStream {
@@ -24,8 +25,8 @@ pub(crate) struct OpenedStream {
 /// Outcome of applying one validated batch.
 struct Applied {
     opened: Vec<OpenedStream>,
-    unused_cost: usize,
-    unused_items: usize,
+    /// Uplink budget the batch reserved but did not use.
+    unused: PendingCharge,
     /// False when a control frame could not be queued and the session must die.
     ok: bool,
 }
@@ -94,9 +95,7 @@ impl Session {
             return Err(WebError::Backpressure);
         }
         let applied = self.apply_batch(&mut state, frames, reserved_cost, reserved_items);
-        if applied.unused_cost != 0 || applied.unused_items != 0 {
-            self.release_pending_locked(&mut state, applied.unused_cost, applied.unused_items);
-        }
+        self.release_pending_locked(&mut state, applied.unused);
         if applied.ok {
             state.main.last_up_sequence = sequence;
             state.main.last_up_digest = digest;
@@ -105,6 +104,11 @@ impl Session {
 
         self.spawn_opened(applied.opened);
         if !applied.ok {
+            debug!(
+                session = self.id,
+                profile = %self.profile.name,
+                "WEB session closed: control reserve exhausted while refusing a stream"
+            );
             self.close();
             return Err(WebError::Closed);
         }
@@ -134,6 +138,10 @@ impl Session {
         if state.closed {
             return Err(WebError::Closed);
         }
+        // A lane is created only once every check that can still refuse the
+        // batch has passed. Inserting it first and unwinding on failure is what
+        // let a client mint one queue per stream id it never opened.
+        let mut created_lane = false;
         if !state.lanes.contains_key(&lane_id) {
             let starts_with_open = frames.first().is_some_and(|f| f.kind == FrameType::OPEN);
             if lane_id != 0 && !starts_with_open && only_late_frames(frames) {
@@ -147,7 +155,24 @@ impl Session {
                 self.lane_protocol_failure(lane_id);
                 return Err(WebError::Protocol);
             }
+            // A fresh lane always starts its own numbering at one.
+            if sequence != 1 {
+                drop(state);
+                self.lane_protocol_failure(lane_id);
+                return Err(WebError::Protocol);
+            }
+            if !self.admit_lane_locked(&mut state) {
+                drop(state);
+                debug!(
+                    session = self.id,
+                    lane = lane_id,
+                    profile = %self.profile.name,
+                    "WEB lane refused: per-session lane ceiling reached"
+                );
+                return Err(WebError::Limit);
+            }
             state.lanes.insert(lane_id, super::state::LaneQueue::new());
+            created_lane = true;
         }
         state.last_activity = Instant::now();
         let (last_sequence, last_digest, up_active) = {
@@ -164,6 +189,7 @@ impl Session {
             return Ok(sequence);
         }
         if sequence != last_sequence + 1 || sequence == 0 {
+            self.unwind_lane_locked(&mut state, lane_id, created_lane);
             drop(state);
             self.lane_protocol_failure(lane_id);
             return Err(WebError::Protocol);
@@ -182,6 +208,7 @@ impl Session {
                 .get_mut(&lane_id)
                 .expect("lane present")
                 .up_active = false;
+            self.unwind_lane_locked(&mut state, lane_id, created_lane);
             drop(state);
             self.lane_protocol_failure(lane_id);
             return Err(WebError::Protocol);
@@ -200,12 +227,11 @@ impl Session {
                 .get_mut(&lane_id)
                 .expect("lane present")
                 .up_active = false;
+            self.unwind_lane_locked(&mut state, lane_id, created_lane);
             return Err(WebError::Backpressure);
         }
         let applied = self.apply_batch(&mut state, frames, reserved_cost, reserved_items);
-        if applied.unused_cost != 0 || applied.unused_items != 0 {
-            self.release_pending_locked(&mut state, applied.unused_cost, applied.unused_items);
-        }
+        self.release_pending_locked(&mut state, applied.unused);
         if let Some(lane) = state.lanes.get_mut(&lane_id) {
             lane.up_active = false;
             if applied.ok {
@@ -217,11 +243,46 @@ impl Session {
 
         self.spawn_opened(applied.opened);
         if !applied.ok {
+            debug!(
+                session = self.id,
+                lane = lane_id,
+                profile = %self.profile.name,
+                "WEB session closed: control reserve exhausted while refusing a stream"
+            );
             self.close();
             return Err(WebError::Closed);
         }
         self.count_up(body.len());
         Ok(sequence)
+    }
+
+    /// Makes room for one more carrier lane, evicting a drained closed lane.
+    ///
+    /// Returns false when every lane the session holds still belongs to a live
+    /// stream, which is exactly the per-session stream ceiling being enforced
+    /// a second time on the carrier side.
+    fn admit_lane_locked(&self, state: &mut SessionState) -> bool {
+        if state.lanes.len() < self.max_lanes() {
+            return true;
+        }
+        let Some(released) = state.evict_closed_lane() else {
+            return false;
+        };
+        self.release_pending_locked(state, released);
+        state.lanes.len() < self.max_lanes()
+    }
+
+    /// Removes a lane this batch created before the batch was refused.
+    fn unwind_lane_locked(&self, state: &mut SessionState, lane_id: u32, created: bool) {
+        if !created {
+            return;
+        }
+        let Some(mut lane) = state.lanes.remove(&lane_id) else {
+            return;
+        };
+        let released = lane.charged();
+        lane.clear();
+        self.release_pending_locked(state, released);
     }
 
     /// Rejects a batch that would violate stream lifecycle or flow control.
@@ -320,15 +381,14 @@ impl Session {
                     };
                     let Some(permit) = permit else {
                         let evicted = state.remember_closed(id, self.limits.max_closed_stream_ids);
-                        self.release_pending_locked(state, evicted.0, evicted.1);
+                        self.release_pending_locked(state, evicted);
                         if let Some(manager) = self.manager.upgrade() {
                             manager.count_stream_rejected();
                         }
                         if !self.queue_frame_locked(state, FrameType::CLOSE, id, &[]) {
                             return Applied {
                                 opened,
-                                unused_cost: reserved_cost,
-                                unused_items: reserved_items,
+                                unused: PendingCharge::data(reserved_cost, reserved_items),
                                 ok: false,
                             };
                         }
@@ -370,7 +430,8 @@ impl Session {
                     let Some(mut stream) = state.streams.remove(&id) else {
                         continue;
                     };
-                    let released = (stream.pending_write_cost, stream.pending_write_items);
+                    let mut released =
+                        PendingCharge::data(stream.pending_write_cost, stream.pending_write_items);
                     stream.pending_write_bytes = 0;
                     stream.pending_write_cost = 0;
                     stream.pending_write_items = 0;
@@ -380,20 +441,15 @@ impl Session {
                     stream.cancel.cancel();
                     stream.wake_reader();
                     stream.wake_writer();
-                    let evicted = state.remember_closed(id, self.limits.max_closed_stream_ids);
-                    self.release_pending_locked(
-                        state,
-                        released.0 + evicted.0,
-                        released.1 + evicted.1,
-                    );
+                    released.add(state.remember_closed(id, self.limits.max_closed_stream_ids));
+                    self.release_pending_locked(state, released);
                 }
                 _ => continue,
             }
         }
         Applied {
             opened,
-            unused_cost: reserved_cost,
-            unused_items: reserved_items,
+            unused: PendingCharge::data(reserved_cost, reserved_items),
             ok: true,
         }
     }

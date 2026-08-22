@@ -29,25 +29,30 @@ impl Relay {
         let head = request_head(&request);
         let path = head.uri.path().to_string();
         let websocket = path == "/api/v1/ws";
-        if head.uri.query().is_some() || (head.headers.contains_key("cookie") && !websocket) {
-            return self.transport_not_found(&head, peer).await;
-        }
-        let Some(ip) = client_ip(peer, &head.headers, &self.trusted_proxies) else {
-            return self.transport_not_found(&head, peer).await;
-        };
+        // The upgrade endpoint needs the request intact for hyper's upgrade
+        // handle, so it owns its own refusal path and drains there.
         if websocket {
             return self.serve_websocket(request, head, peer).await;
         }
+        // From here the body belongs to this function: every refusal has to
+        // consume it, or the reserved paths become distinguishable from the
+        // operator's own paths by connection framing alone.
+        let body = request.into_body();
+        if head.uri.query().is_some() || head.headers.contains_key("cookie") {
+            return self.transport_not_found_draining(&head, body, peer).await;
+        }
+        let Some(ip) = client_ip(peer, &head.headers, &self.trusted_proxies) else {
+            return self.transport_not_found_draining(&head, body, peer).await;
+        };
         let Some(token) = bearer_token(header(&head.headers, "authorization")).map(str::to_owned)
         else {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         };
-        let body = request.into_body();
         match path.as_str() {
             "/api/v1/session" => self.serve_session(head, body, peer, &token, ip).await,
             "/api/v1/up" => self.serve_up(head, body, peer, &token).await,
             "/api/v1/down" => self.serve_down(head, body, peer, &token).await,
-            _ => self.transport_not_found(&head, peer).await,
+            _ => self.transport_not_found_draining(&head, body, peer).await,
         }
     }
 
@@ -62,7 +67,7 @@ impl Relay {
     ) -> Response<WebBody> {
         if head.method == Method::DELETE {
             if self.manager.close_token(token).is_err() {
-                return self.transport_not_found(&head, peer).await;
+                return self.transport_not_found_draining(&head, body, peer).await;
             }
             let bodyless = empty_body(body, self.body_deadline()).await;
             if !bodyless || head.headers.contains_key("content-type") {
@@ -77,7 +82,7 @@ impl Relay {
             || !binary_content_type(header(&head.headers, "content-type"))
             || !self.manager.has_bootstrap(token)
         {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         }
         let Some(payload) = read_body(body, MAX_CREATE_BODY_BYTES, self.body_deadline()).await
         else {
@@ -107,7 +112,7 @@ impl Relay {
                 );
                 response
             }
-            Err(WebError::Limit) => retry_later(),
+            Err(WebError::Limit) => self.retry_later(),
             Err(_) => self.transport_not_found(&head, peer).await,
         }
     }
@@ -123,14 +128,14 @@ impl Relay {
         if head.method != Method::POST
             || !binary_content_type(header(&head.headers, "content-type"))
         {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         }
         let sequence = header(&head.headers, "x-up-seq").and_then(canonical_uint);
         let Some(sequence) = sequence.filter(|value| *value != 0) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         };
         let Some(session) = self.manager.get(token) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         };
         let Some(payload) = read_body(body, self.limits.max_body_bytes, self.body_deadline()).await
         else {
@@ -167,7 +172,11 @@ impl Relay {
                 insert(response_headers, "x-up-ack", &ack.to_string());
                 response
             }
-            Err(WebError::Backpressure) | Err(WebError::Concurrent) => retry_later(),
+            // A refused lane is a capacity condition, not an authentication
+            // one, so it gets the same retryable answer as a refused session.
+            Err(WebError::Backpressure) | Err(WebError::Concurrent) | Err(WebError::Limit) => {
+                self.retry_later()
+            }
             Err(_) => self.transport_not_found(&head, peer).await,
         }
     }
@@ -181,13 +190,13 @@ impl Relay {
         token: &str,
     ) -> Response<WebBody> {
         if head.method != Method::POST || head.headers.contains_key("content-type") {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         }
         let Some(cursor) = header(&head.headers, "x-down-cursor").and_then(canonical_uint) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         };
         let Some(session) = self.manager.get(token) else {
-            return self.transport_not_found(&head, peer).await;
+            return self.transport_not_found_draining(&head, body, peer).await;
         };
         if !empty_body(body, self.body_deadline()).await {
             return self.transport_not_found(&head, peer).await;
@@ -241,7 +250,7 @@ impl Relay {
                 *response.body_mut() = full(payload);
                 response
             }
-            Err(WebError::Concurrent) => retry_later(),
+            Err(WebError::Concurrent) => self.retry_later(),
             Err(_) => self.transport_not_found(&head, peer).await,
         }
     }
@@ -250,14 +259,19 @@ impl Relay {
     pub(crate) fn session_for(&self, token: &str) -> Option<Arc<Session>> {
         self.manager.get(token)
     }
-}
 
-/// The single retryable answer: capacity will return shortly.
-fn retry_later() -> Response<WebBody> {
-    let mut response = Response::new(full(Bytes::new()));
-    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-    let response_headers = response.headers_mut();
-    insert(response_headers, "cache-control", "no-store");
-    insert(response_headers, "retry-after", "1");
-    response
+    /// The single retryable answer: capacity will return shortly.
+    ///
+    /// It is counted, because a 503 here is the only externally visible symptom
+    /// of an exhausted queue budget or a saturated capacity ceiling, and the
+    /// deliberately indistinguishable 404 hides everything else.
+    fn retry_later(&self) -> Response<WebBody> {
+        self.manager.count_retry_later();
+        let mut response = Response::new(full(Bytes::new()));
+        *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+        let response_headers = response.headers_mut();
+        insert(response_headers, "cache-control", "no-store");
+        insert(response_headers, "retry-after", "1");
+        response
+    }
 }

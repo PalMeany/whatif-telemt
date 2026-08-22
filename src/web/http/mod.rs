@@ -78,7 +78,7 @@ impl Relay {
                 expected = %self.hostname,
                 "WEB request rejected: Host does not match web.hostname"
             );
-            return self.serve_wrong_host(&request);
+            return self.serve_wrong_host(request, peer).await;
         }
         if TRANSPORT_PATHS.contains(&request.uri().path()) {
             return self.serve_api(request, peer).await;
@@ -180,6 +180,24 @@ impl Relay {
         self.serve_entry(site, &request_head(&request), entry, StatusCode::NOT_FOUND)
     }
 
+    /// Answers a refused transport request whose body is still unread.
+    ///
+    /// Dropping an unread `Incoming` makes hyper abort the connection in the
+    /// middle of the body. That is observable: `POST /api/v1/up` with a large
+    /// declared length would be cut short while `POST /api/v1/upx` streams
+    /// cleanly to the same 404, which is an unauthenticated oracle for exactly
+    /// the four reserved paths. Reading the body to its end first removes the
+    /// difference.
+    pub(crate) async fn transport_not_found_draining(
+        self: &Arc<Self>,
+        head: &RequestHead,
+        body: Incoming,
+        peer: SocketAddr,
+    ) -> Response<WebBody> {
+        drain_body(body, self.body_deadline()).await;
+        self.transport_not_found(head, peer).await
+    }
+
     /// The response shape used for every unauthenticated transport request.
     ///
     /// In application mode the request is handed to the operator's site with
@@ -250,14 +268,18 @@ impl Relay {
         self.serve_entry(site, &request_head(&request), entry, StatusCode::OK)
     }
 
-    fn serve_wrong_host(self: &Arc<Self>, request: &Request<Incoming>) -> Response<WebBody> {
-        match &self.site {
-            Some(site) => {
-                let entry = site.not_found().clone();
-                self.serve_entry(site, &request_head(request), entry, StatusCode::NOT_FOUND)
-            }
-            None => plain_not_found(),
-        }
+    /// Answers a request whose `Host` names something else entirely.
+    ///
+    /// This has to be the operator's own not-found response, application mode
+    /// included. Answering it from the relay instead would make one
+    /// unauthenticated request with a mismatched `Host` separate this origin
+    /// from every other host on the internet.
+    async fn serve_wrong_host(
+        self: &Arc<Self>,
+        request: Request<Incoming>,
+        peer: SocketAddr,
+    ) -> Response<WebBody> {
+        self.serve_not_found(request, peer).await
     }
 
     /// Writes one in-memory entry with the site-wide header set.
@@ -311,6 +333,34 @@ impl Relay {
     pub(crate) fn body_deadline(&self) -> Duration {
         Duration::from_millis(self.timeouts.body_read_ms)
     }
+
+    /// Wall-clock ceiling for handling one request end to end.
+    ///
+    /// A parked long poll is the slowest legitimate request, and the reverse
+    /// proxy adds the application's own response time on top, so the deadline
+    /// is derived from both rather than fixed. Without it, a slow body, a
+    /// wedged application, or a client that stops reading holds a connection
+    /// and its accept-loop permit indefinitely, and the front-proxy templates
+    /// bound neither hop.
+    pub(crate) fn request_deadline(&self) -> Duration {
+        let poll = self.timeouts.long_poll_ms;
+        let body = self.timeouts.body_read_ms;
+        Duration::from_millis(poll.saturating_add(body).saturating_add(poll / 2))
+    }
+}
+
+/// The answer for a request that overran the relay's own deadline.
+///
+/// It is the retryable answer rather than the site's 404: the client did
+/// nothing wrong, and every carrier already treats 503 as "come back".
+pub(crate) fn request_timeout_response() -> Response<WebBody> {
+    let mut response = Response::new(full(Bytes::new()));
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    let response_headers = response.headers_mut();
+    response_headers.insert("content-length", HeaderValue::from_static("0"));
+    insert(response_headers, "cache-control", "no-store");
+    insert(response_headers, "retry-after", "1");
+    response
 }
 
 /// Request head kept after the body has been detached.
@@ -329,15 +379,19 @@ pub(crate) fn request_head(request: &Request<Incoming>) -> RequestHead {
     }
 }
 
-/// Minimal 404 used when no static site is loaded.
+/// Minimal 404 used when neither a static site nor an application is loaded.
+///
+/// Configuration validation requires exactly one of `web.public_dir` and
+/// `web.public_upstream`, so this is only ever reached defensively. It carries
+/// no body and no media type on purpose: any fixed banner here — Go's
+/// `404 page not found` most of all — is a fingerprint that identifies the
+/// origin from a single unauthenticated request.
 pub(crate) fn plain_not_found() -> Response<WebBody> {
-    let mut response = Response::new(full(Bytes::from_static(b"404 page not found\n")));
+    let mut response = Response::new(full(Bytes::new()));
     *response.status_mut() = StatusCode::NOT_FOUND;
-    insert(
-        response.headers_mut(),
-        "content-type",
-        "text/plain; charset=utf-8",
-    );
+    let response_headers = response.headers_mut();
+    response_headers.insert("content-length", HeaderValue::from_static("0"));
+    insert(response_headers, "cache-control", "no-store");
     response
 }
 
@@ -349,20 +403,30 @@ pub(crate) fn insert(headers: &mut HeaderMap<HeaderValue>, name: &'static str, v
 }
 
 /// Reads a bounded request body under a deadline.
+///
+/// A body that overruns `limit` is still read to its end before the refusal is
+/// returned. Stopping early would make hyper abort the connection, and that
+/// abort is visible to the client: it is the same oracle that draining a
+/// refused body removes, just reached with a larger body.
 pub(crate) async fn read_body(body: Incoming, limit: usize, deadline: Duration) -> Option<Bytes> {
     tokio::time::timeout(deadline, async move {
         let mut body = body;
         let mut buffer: Vec<u8> = Vec::new();
+        let mut overrun = false;
         while let Some(frame) = body.frame().await {
-            let frame = frame.ok()?;
+            let Ok(frame) = frame else {
+                return None;
+            };
             if let Some(chunk) = frame.data_ref() {
-                if buffer.len().saturating_add(chunk.len()) > limit {
-                    return None;
+                if overrun || buffer.len().saturating_add(chunk.len()) > limit {
+                    overrun = true;
+                    buffer = Vec::new();
+                    continue;
                 }
                 buffer.extend_from_slice(chunk);
             }
         }
-        Some(Bytes::from(buffer))
+        (!overrun).then(|| Bytes::from(buffer))
     })
     .await
     .ok()
@@ -372,6 +436,25 @@ pub(crate) async fn read_body(body: Incoming, limit: usize, deadline: Duration) 
 /// True when the request carries no body at all.
 pub(crate) async fn empty_body(body: Incoming, deadline: Duration) -> bool {
     read_body(body, 0, deadline).await.is_some()
+}
+
+/// Reads and discards a request body a refused endpoint never looks at.
+///
+/// Nothing is accumulated, so there is no byte ceiling here: the deadline is
+/// the bound, exactly as it is for a body the operator's application would have
+/// streamed on any other path. The outcome is deliberately ignored, because the
+/// response is the same either way and the point is only to leave the
+/// connection framed like every other path of the same site.
+pub(crate) async fn drain_body(body: Incoming, deadline: Duration) {
+    let _ = tokio::time::timeout(deadline, async move {
+        let mut body = body;
+        while let Some(frame) = body.frame().await {
+            if frame.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
 }
 
 /// A decoded bridge capability candidate.
