@@ -58,6 +58,9 @@ Options:
   --carrier-port PORT  WEB carrier listener, loopback         (default: 8080)
   --admin-port PORT    Relay health and metrics, loopback     (default: 8081)
   --carrier-mode MODE  https | https-lanes | websocket | websocket-lanes
+                       Keep the default. The current client implements only the
+                       HTTPS long-poll carrier and does not negotiate, so any
+                       other mode hangs it on "connecting" with no error.
                                                               (default: https)
   --src DIR            Repository checkout to build from (default: this one)
   --config PATH        Configuration file  (default: /etc/telemt/config.toml)
@@ -113,7 +116,12 @@ case "$HOSTNAME_ARG" in
 esac
 
 case "$CARRIER_MODE" in
-    https|https-lanes|websocket|websocket-lanes) : ;;
+    https) : ;;
+    https-lanes|websocket|websocket-lanes)
+        warn "carrier mode '$CARRIER_MODE' is not implemented by the current client: it will"
+        warn "render the bridge, create a session, and then hang on \"connecting\" forever."
+        warn "Use https unless you are testing a client that implements this mode."
+        ;;
     *) die "carrier mode '$CARRIER_MODE' is not one of https, https-lanes, websocket, websocket-lanes" ;;
 esac
 

@@ -33,7 +33,9 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::config::{ProxyConfig, WebBackend, WebConfig, WebProfileConfig, WebProfileLimits};
+use crate::config::{
+    CarrierMode, ProxyConfig, WebBackend, WebConfig, WebProfileConfig, WebProfileLimits,
+};
 use crate::crypto::SecureRandom;
 use crate::error::{ProxyError, Result};
 use crate::maestro::generation::RuntimeGeneration;
@@ -142,6 +144,7 @@ async fn build(
     };
 
     warn_on_public_listener(carrier_address);
+    warn_on_unsupported_carrier(&web, &profiles);
 
     let runtime = WebRuntime::new(active_runtime);
     let manager = Manager::new(
@@ -326,6 +329,39 @@ fn hash_profile_limits(limits: &WebProfileLimits, hasher: &mut impl std::hash::H
     ] {
         value.hash(hasher);
     }
+}
+
+/// Warns when a profile selects a carrier no shipped client can drive.
+///
+/// The relay implements all four carrier modes, but the v1 client implements
+/// exactly one: the HTTPS long-poll through its hidden WebView. Its own plan
+/// says so — "the v1 HTTPS long-poll carrier is operational; the deployed
+/// bridge does not require a public WebSocket or another carrier" — and it
+/// performs no negotiation, so it cannot report the mismatch.
+///
+/// The failure is silent and expensive to diagnose: the bridge page renders,
+/// the session is created, and only then does the carrier the client never
+/// implemented fail to make progress. The client's own deadlines turn that
+/// into an endless reconnect loop, which the user sees as a proxy that stays
+/// on "connecting" forever while every server-side counter looks healthy.
+fn warn_on_unsupported_carrier(web: &WebConfig, profiles: &[Arc<WebProfile>]) {
+    let unsupported: Vec<&str> = profiles
+        .iter()
+        .filter(|profile| profile.carrier != CarrierMode::Https)
+        .map(|profile| profile.name.as_str())
+        .collect();
+    if unsupported.is_empty() {
+        return;
+    }
+    warn!(
+        default_mode = web.carrier_mode.as_str(),
+        profiles = unsupported.len(),
+        example = unsupported.first().copied().unwrap_or_default(),
+        "WEB proxy: a carrier mode other than `https` is selected. The current client speaks \
+         only the HTTPS long-poll carrier and does not negotiate, so it will render the bridge, \
+         create a session, and then hang on \"connecting\" forever. Set web.carrier_mode = \
+         \"https\" unless you are testing a client that implements the mode."
+    );
 }
 
 /// Warns when the carrier listener is reachable from outside the host.

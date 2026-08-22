@@ -87,6 +87,32 @@ tracking account every user to that address.
 
 ## Configuration
 
+## Carrier modes
+
+**Use `carrier_mode = "https"`.**
+
+The relay implements four carrier modes — `https`, `https-lanes`, `websocket`,
+`websocket-lanes` — because the reference relay does. The current client
+implements exactly one of them: the HTTPS long-poll carried by its hidden
+WebView. Telegram Desktop's
+[WEB proxy plan](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/web-proxy-plan.md)
+states that "the v1 HTTPS long-poll carrier is operational; the deployed bridge
+does not require a public WebSocket or another carrier", and the transport
+"allows only the exact canonical HTTPS bridge navigation". There is no carrier
+negotiation in v1, so a client cannot report that it does not speak the mode an
+operator selected.
+
+Choosing any other mode produces a failure that looks like nothing is wrong:
+the capability resolves, the bridge page renders with the right mode, the
+session is created, `sessions_created_total` and `streams_opened_total` both
+rise — and the client sits on "connecting" indefinitely, because its 10-second
+bridge-message and 30-second write-progress deadlines fail the carrier and
+restart it forever. telemt emits a start-up warning naming the affected
+profiles.
+
+The other three modes remain in the relay for a client that implements them.
+Treat them as unreleased.
+
 ```toml
 [web]
 enabled = true
@@ -95,7 +121,7 @@ listen = "127.0.0.1:8080"           # carrier listener, behind the TLS front pro
 admin_listen = "127.0.0.1:8081"     # /healthz, /readyz, /metrics; "" disables
 public_dir = "site"                 # operator-owned static site (needs index.html)
 # public_upstream = "http://127.0.0.1:3000"   # or a private site application
-carrier_mode = "https"              # https | https-lanes | websocket | websocket-lanes
+carrier_mode = "https"              # keep this: see "Carrier modes" below
 derive_user_profiles = true         # every [access.users] entry gets WEB access
 trusted_proxies = ["127.0.0.0/8", "::1/128"]
 ```
@@ -152,7 +178,7 @@ the same name.
 name = "media"
 secret = "000102030405060708090a0b0c0d0e0f"   # hex or base64url
 backend = "internal"                           # or "127.0.0.1:2398"
-carrier_mode = "websocket-lanes"
+carrier_mode = "https"                         # see "Carrier modes" below
 
 [web.profiles.limits]
 max_sessions = 32

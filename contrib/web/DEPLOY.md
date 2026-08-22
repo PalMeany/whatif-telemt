@@ -222,9 +222,20 @@ trusted_proxies = ["127.0.0.0/8", "::1/128"]
 ```
 
 `derive_user_profiles = true` gives every `[access.users]` entry WEB access
-with the secret it already has — no second credential to distribute. Start on
-`carrier_mode = "https"`; move to `https-lanes` or `websocket-lanes` once the
-deployment is healthy.
+with the secret it already has — no second credential to distribute.
+
+**Use `carrier_mode = "https"`.** The relay implements four carrier modes, but
+the current client implements exactly one: the HTTPS long-poll through its
+hidden WebView. Its own
+[plan](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/web-proxy-plan.md)
+states that "the v1 HTTPS long-poll carrier is operational; the deployed bridge
+does not require a public WebSocket or another carrier", and the client performs
+no carrier negotiation — so it cannot tell you it does not speak the mode you
+chose. Selecting `https-lanes`, `websocket`, or `websocket-lanes` produces a
+deployment where the bridge page renders, the session is created, every
+server-side counter looks healthy, and the client sits on "connecting" forever
+while its 10-second bridge and 30-second write-progress deadlines drive an
+endless reconnect loop. telemt warns about this at start-up.
 
 ## 7. Caddy
 
@@ -383,6 +394,7 @@ The same series appear on telemt's own metrics endpoint prefixed
 | Every request returns 404 behind a CDN | the CDN forwards its own origin hostname, and `web.hostname` must be the name clients type | set `web.hostname` to the client-facing name and normalise `Host` at the origin proxy |
 | Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and the exact secret string the client uses |
 | Client connects, carrier looks healthy, no data ever flows | no mode a WEB client can speak is enabled | set `secure = true` and hand out the `dd…` secret; the reject shows as `direct_modes_disabled` in the bad-connect classes |
+| Client stays on "connecting" forever; sessions are created and counters look healthy; it connects instantly after switching to another proxy and back | `carrier_mode` is not `https`, and the client implements no other carrier | set `carrier_mode = "https"` and restart |
 | Client rejects the secret in its proxy settings | an `ee` fake-TLS secret was handed out | WEB clients accept only plain and `dd` secrets |
 | `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `web.listen` |
 | Caddy exits with `permission denied` on a log file | `/var/log/caddy` missing or not writable by `caddy` | drop the `log` block, or `mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy` |
