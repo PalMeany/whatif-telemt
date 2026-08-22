@@ -188,13 +188,13 @@ and `[web.timeouts]`, with the same names and defaults:
 | `max_pending_global` | `536870912` | Queued bytes across the process |
 | `max_pending_items_per_session` | `16384` | Queued items per session |
 | `max_pending_items_global` | `262144` | Queued items across the process |
-| `max_sessions_per_ip` | `16` | Sessions one client address may hold (`0` disables it) |
+| `max_sessions_per_ip` | `0` (off) | Sessions one client address may hold |
 | `max_sessions_global` | `128` | Live sessions |
 | `max_streams_global` | `4096` | Live streams |
 | `max_backend_dials_in_flight` | `256` | Backend connections establishing at once |
 | `new_sessions_per_minute` / `new_sessions_burst` | `600` / `128` | Session creation rate |
 | `new_streams_per_minute` / `new_streams_burst` | `6000` / `512` | Stream creation rate |
-| `max_bootstraps_per_ip` | `32` | Unconsumed bootstraps per address (`0` disables it) |
+| `max_bootstraps_per_ip` | `0` (off) | Unconsumed bootstraps per address |
 | `max_bootstraps_global` | `512` | Unconsumed bootstraps |
 | `new_bootstraps_per_minute` / `new_bootstraps_burst` | `1200` / `256` | Bootstrap issuance rate |
 | `max_profiles` | `32` | Explicit profile entries |
@@ -212,11 +212,31 @@ and `[web.timeouts]`, with the same names and defaults:
 Per-profile overrides live under `[web.profiles.limits]` and may only lower the
 process-wide ceiling they refine.
 
-The two per-address ceilings count an IPv6 client per `/64`, not per address: a
-single subscriber is routinely handed a whole `/64`, so counting exact addresses
-would let one client walk past either ceiling one address at a time. They apply
+Both per-address ceilings are **off by default**, and turning them on is a
+decision to make deliberately. They count an IPv6 client per `/64`, not per
+address — a single subscriber is routinely handed a whole `/64` — and they apply
 to the address telemt resolves through `trusted_proxies`, so behind a front
 proxy they count the real client rather than the proxy.
+
+The reason they default to off is carrier-grade NAT. Most clients of a
+circumvention proxy share one public address with thousands of strangers, and
+`max_sessions_per_ip` counts *live* sessions, which includes every session a
+client abandoned when its network dropped: those stay live for the whole
+`reconnect_grace_ms`. Any value low enough to bound one attacker is low enough
+to lock out a whole mobile carrier, and the session creation rate limits
+(`new_sessions_per_minute` / `new_sessions_burst`) bound the same abuse without
+that side effect.
+
+`max_bootstraps_per_ip` fails worse still: a refused bootstrap cannot be
+reported, because an error would confirm to a prober that the capability was
+valid, so the client is served the ordinary index and fails with no retry and no
+diagnostic.
+
+Enable them only when clients have addresses of their own. When
+`max_sessions_per_ip` is set, a client reconnecting from an address at its
+ceiling first reclaims its own sessions that have been silent for more than
+twice `long_poll_ms`, so a flapping network cannot lock a client out of its own
+slots; a session still driving its carrier is never displaced.
 
 `[web.limits]` and `[web.timeouts]` are read once, at start-up. The process-wide
 pending pools, the per-session budget partitions, and the accept loops are all

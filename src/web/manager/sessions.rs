@@ -112,6 +112,14 @@ impl Manager {
         let hash = token_hash(&raw);
         let body_digest = sha256(body);
         let now = Instant::now();
+        let bucket = ip_bucket(client_ip);
+
+        // Reclaim this address's own abandoned sessions before its ceiling is
+        // measured. Taken before the lock, because inspecting a session takes
+        // the session lock and the order is always session before manager.
+        if self.limits.max_sessions_per_ip != 0 {
+            self.reap_bucket(bucket);
+        }
 
         let mut guard = self.state.lock();
         let state = &mut *guard;
@@ -137,7 +145,6 @@ impl Manager {
         }
         let profile = entry.profile.clone();
         let issuance_ip = entry.issuance_ip;
-        let bucket = ip_bucket(client_ip);
         let profile_limits = profile.limits.clone();
         let sessions_for_profile = state
             .sessions_per_profile
@@ -227,6 +234,42 @@ impl Manager {
             welcome: frame::encode(FrameType::WELCOME, 0, &[]),
             session: created,
         })
+    }
+
+    /// Closes sessions from one client address that stopped driving a carrier.
+    ///
+    /// The per-address ceiling counts live sessions, and a session whose
+    /// carrier went away stays live for the whole reconnect grace. Without
+    /// this, a client on a flapping network fills its own ceiling with its own
+    /// abandoned sessions and cannot reconnect until the periodic reaper
+    /// catches up — a grace period plus a cleanup interval later, which is
+    /// exactly long enough to look like the proxy is simply broken.
+    ///
+    /// Only sessions silent for twice the long-poll period are taken. A
+    /// healthy carrier re-polls, or pings, well inside that window, so a live
+    /// session belonging to a different client behind the same address is
+    /// never displaced.
+    fn reap_bucket(&self, bucket: IpAddr) {
+        let idle = Duration::from_millis(self.timeouts.long_poll_ms.saturating_mul(2));
+        let sessions: Vec<Arc<Session>> = {
+            let guard = self.state.lock();
+            guard
+                .sessions
+                .values()
+                .filter(|session| ip_bucket(session.client_ip) == bucket)
+                .cloned()
+                .collect()
+        };
+        let now = Instant::now();
+        for session in sessions {
+            if now.saturating_duration_since(session.last_activity()) > idle {
+                debug!(
+                    session = session.id,
+                    "WEB session closed: carrier abandoned, reclaiming its per-address slot"
+                );
+                session.close();
+            }
+        }
     }
 
     /// Looks up a live session by its bearer.

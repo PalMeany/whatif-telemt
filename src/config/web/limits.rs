@@ -54,11 +54,16 @@ pub struct WebLimits {
     #[serde(default = "default_max_pending_items_global")]
     pub max_pending_items_global: usize,
 
-    /// Sessions one client address may hold; `0` disables the per-IP ceiling.
+    /// Sessions one client address may hold; `0` (the default) disables it.
     ///
     /// An IPv6 client is counted per `/64`, because a single subscriber is
     /// routinely handed a whole one and could otherwise walk past this ceiling
     /// one address at a time.
+    ///
+    /// Enable it only when clients have addresses of their own. Behind a
+    /// carrier-grade NAT one address is thousands of subscribers, and the
+    /// ceiling counts live sessions — including the ones a client abandoned
+    /// when its network dropped.
     #[serde(default = "default_max_sessions_per_ip")]
     pub max_sessions_per_ip: usize,
 
@@ -90,9 +95,14 @@ pub struct WebLimits {
     #[serde(default = "default_new_streams_burst")]
     pub new_streams_burst: usize,
 
-    /// Unconsumed bootstraps one client address may hold; `0` disables it.
+    /// Unconsumed bootstraps one client address may hold; `0` (the default)
+    /// disables it.
     ///
-    /// Counted per `/64` for IPv6, exactly like `max_sessions_per_ip`.
+    /// Counted per `/64` for IPv6, exactly like `max_sessions_per_ip`, and
+    /// subject to the same carrier-NAT caveat. Refusing a bootstrap serves the
+    /// ordinary index rather than an error, because an error would confirm the
+    /// capability was valid, so a client that hits this ceiling fails with no
+    /// retry and no diagnostic.
     #[serde(default = "default_max_bootstraps_per_ip")]
     pub max_bootstraps_per_ip: usize,
 

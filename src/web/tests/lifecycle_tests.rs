@@ -181,6 +181,75 @@ async fn the_per_address_session_ceiling_counts_an_ipv6_client_per_prefix() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnecting_client_is_not_locked_out_by_its_own_dead_sessions() {
+    // The per-address ceiling counts live sessions, and an abandoned one stays
+    // live for the whole reconnect grace. A client whose network flaps must not
+    // fill its own ceiling with its own corpses: that reads as "the proxy does
+    // not work on the first try, but works after switching away and back".
+    let mut limits = WebLimits::default();
+    limits.max_sessions_per_ip = 1;
+    let timeouts = WebTimeouts {
+        // A carrier is considered abandoned after twice the long-poll period.
+        long_poll_ms: 1,
+        ..WebTimeouts::default()
+    };
+    let manager = manager_with(limits, timeouts).await;
+    let profile = profile_of(&manager);
+
+    let bootstrap = manager
+        .issue_bootstrap(&profile, CLIENT_IP)
+        .expect("bootstrap");
+    let abandoned = manager
+        .create(&bootstrap, CLIENT_IP, &hello())
+        .expect("create")
+        .session;
+
+    // The client goes away without a clean DELETE and comes back.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let bootstrap = manager
+        .issue_bootstrap(&profile, CLIENT_IP)
+        .expect("second bootstrap");
+    let reconnected = manager
+        .create(&bootstrap, CLIENT_IP, &hello())
+        .expect("a reconnect must displace the client's own dead session");
+
+    assert!(
+        abandoned.is_closed_for_test(),
+        "the corpse must be reclaimed"
+    );
+    assert!(!reconnected.session.is_closed_for_test());
+    assert_eq!(manager.capacity().sessions, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_session_keeps_its_slot_against_a_neighbour() {
+    // Behind a carrier NAT the bucket is shared, so reclaiming must never take
+    // a session that is still driving its carrier.
+    let mut limits = WebLimits::default();
+    limits.max_sessions_per_ip = 1;
+    let manager = manager_with(limits, WebTimeouts::default()).await;
+    let profile = profile_of(&manager);
+
+    let bootstrap = manager
+        .issue_bootstrap(&profile, CLIENT_IP)
+        .expect("bootstrap");
+    let live = manager
+        .create(&bootstrap, CLIENT_IP, &hello())
+        .expect("create")
+        .session;
+
+    let bootstrap = manager
+        .issue_bootstrap(&profile, CLIENT_IP)
+        .expect("second bootstrap");
+    assert_eq!(
+        manager.create(&bootstrap, CLIENT_IP, &hello()).err(),
+        Some(WebError::Limit),
+        "an active session must not be displaced"
+    );
+    assert!(!live.is_closed_for_test());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rotating_a_secret_closes_the_sessions_it_opened() {
     let manager = manager_with(WebLimits::default(), WebTimeouts::default()).await;
     let profile = profile_of(&manager);

@@ -65,8 +65,14 @@ pub(super) fn default_max_pending_items_global() -> usize {
     256 * 1024
 }
 
+/// Off by default: the per-address session ceiling counts *live* sessions, and
+/// most clients of a censorship-circumvention proxy share a carrier-grade NAT
+/// address with thousands of strangers. Any value low enough to bound one
+/// attacker is low enough to lock out a whole mobile carrier. The session
+/// creation rate limits bound the same abuse without that side effect, so this
+/// is opt-in for deployments whose clients have addresses of their own.
 pub(super) fn default_max_sessions_per_ip() -> usize {
-    16
+    0
 }
 
 pub(super) fn default_max_sessions_global() -> usize {
@@ -97,8 +103,12 @@ pub(super) fn default_new_streams_burst() -> usize {
     512
 }
 
+/// Off by default, for the same reason as `default_max_sessions_per_ip`, and
+/// with a worse failure mode: a refused bootstrap cannot be reported without
+/// revealing that the capability was valid, so the client is served the
+/// ordinary index and fails with no retry and no signal.
 pub(super) fn default_max_bootstraps_per_ip() -> usize {
-    32
+    0
 }
 
 pub(super) fn default_max_bootstraps_global() -> usize {
