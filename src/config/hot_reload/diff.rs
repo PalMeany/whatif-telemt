@@ -1,6 +1,5 @@
 use super::*;
 
-
 fn canonicalize_json(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -43,7 +42,6 @@ fn listeners_equal(
 ) -> bool {
     serde_json::to_value(lhs).ok() == serde_json::to_value(rhs).ok()
 }
-
 
 /// Warns when the requested snapshot contains fields that require restart.
 pub(super) fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: bool) {
@@ -230,7 +228,6 @@ pub(super) fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot
 /// 2. `detected_ip_v4` — from STUN/interface probe at startup
 /// 3. `detected_ip_v6` — fallback
 /// 4. `"UNKNOWN"` — warn the user to set `public_host`
-
 
 /// Which top-level config sections changed and whether any require a restart.
 #[derive(Debug, Default, Clone, serde::Serialize)]

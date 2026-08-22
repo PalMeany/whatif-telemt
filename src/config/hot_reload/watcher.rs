@@ -123,7 +123,6 @@ fn apply_watch_manifest<W1: Watcher, W2: Watcher>(
     }
 }
 
-
 /// Load config, validate, diff against current, and broadcast if changed.
 pub(super) fn reload_config(
     config_path: &PathBuf,
@@ -198,7 +197,6 @@ pub(super) fn reload_config(
     reload_state.mark_applied(rendered_hash);
     Some(next_manifest)
 }
-
 
 /// Spawn the hot-reload watcher task.
 ///

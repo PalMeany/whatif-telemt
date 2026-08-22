@@ -74,8 +74,7 @@ async fn run_unix_accept_loop(
                 };
 
                 let connection_id = connection_counter.fetch_add(1, Ordering::Relaxed);
-                let fake_peer =
-                    SocketAddr::from(([127, 0, 0, 1], (connection_id % 65535) as u16));
+                let fake_peer = SocketAddr::from(([127, 0, 0, 1], (connection_id % 65535) as u16));
                 let stats = runtime.stats.clone();
                 let upstream_manager = runtime.upstream_manager.clone();
                 let replay_checker = runtime.replay_checker.clone();

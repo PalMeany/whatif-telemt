@@ -31,8 +31,7 @@ async fn save_sections_preserves_other_tables_and_comments() {
 
 #[test]
 fn find_bounds_matches_array_of_tables() {
-    let src =
-        "[server]\nport = 1\n\n[[upstreams]]\nkind = \"a\"\n\n[[upstreams]]\nkind = \"b\"\n";
+    let src = "[server]\nport = 1\n\n[[upstreams]]\nkind = \"a\"\n\n[[upstreams]]\nkind = \"b\"\n";
     let bounds = find_toml_table_bounds(src, "upstreams");
     assert!(bounds.is_some(), "should locate [[upstreams]] block start");
     let (start, end) = bounds.unwrap();
@@ -242,8 +241,7 @@ async fn access_mutation_writes_only_the_single_included_owner() {
     let root = dir.path().join("config.toml");
     let included = dir.path().join("users.toml");
     let root_body = "include = \"users.toml\"\n[censorship]\ntls_domain = \"example.com\"\n";
-    let included_body =
-        "[access.users]\nalice = \"00000000000000000000000000000000\"\n";
+    let included_body = "[access.users]\nalice = \"00000000000000000000000000000000\"\n";
     tokio::fs::write(&root, root_body).await.unwrap();
     tokio::fs::write(&included, included_body).await.unwrap();
     let mut cfg = load_config_from_disk(&root).await.unwrap();
@@ -303,8 +301,8 @@ fn render_user_rate_limits_section() {
         },
     );
 
-    let rendered = render_access_section(&cfg, AccessSection::UserRateLimits)
-        .expect("section must render");
+    let rendered =
+        render_access_section(&cfg, AccessSection::UserRateLimits).expect("section must render");
 
     assert!(rendered.starts_with("[access.user_rate_limits]\n"));
     assert!(rendered.contains("alice = { up_bps = 1024, down_bps = 2048 }"));

@@ -8,9 +8,7 @@ use crate::config::ProxyConfig;
 use crate::maestro::generation::RuntimeGeneration;
 
 use super::accept::ListenerSlot;
-use super::bind::{
-    BoundListeners, BoundTcpListener, PreparedTcpListener, prepare_listener,
-};
+use super::bind::{BoundListeners, BoundTcpListener, PreparedTcpListener, prepare_listener};
 use super::plan::{ListenerBindSpec, listener_bind_plan};
 #[cfg(unix)]
 use super::unix::UnixAcceptHandle;

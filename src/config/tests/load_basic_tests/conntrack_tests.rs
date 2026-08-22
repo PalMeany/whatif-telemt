@@ -173,4 +173,3 @@ fn force_close_bumped_when_below_drain_ttl() {
     assert_eq!(cfg.general.me_reinit_drain_timeout_secs, 90);
     let _ = std::fs::remove_file(path);
 }
-

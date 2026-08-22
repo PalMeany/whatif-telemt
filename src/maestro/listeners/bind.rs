@@ -10,8 +10,8 @@ use tracing::{error, info, warn};
 
 use crate::config::ProxyConfig;
 use crate::startup::{COMPONENT_LISTENERS_BIND, StartupTracker};
-use crate::transport::socket::{activate_listener_socket, bind_listener_socket};
 use crate::transport::find_listener_processes;
+use crate::transport::socket::{activate_listener_socket, bind_listener_socket};
 
 use super::plan::{ListenerBindSpec, listener_bind_plan};
 use crate::maestro::helpers::print_proxy_links;
@@ -88,9 +88,7 @@ fn log_bind_error(addr: SocketAddr, reuse_allow: bool, error_value: &std::io::Er
     }
 }
 
-pub(super) fn prepare_listener(
-    spec: ListenerBindSpec,
-) -> std::io::Result<PreparedTcpListener> {
+pub(super) fn prepare_listener(spec: ListenerBindSpec) -> std::io::Result<PreparedTcpListener> {
     match bind_listener_socket(spec.addr, &spec.options) {
         Ok(socket) => Ok(PreparedTcpListener { socket, spec }),
         Err(error_value) => {
@@ -165,7 +163,12 @@ fn print_configured_links(
     if config.general.links.show.is_empty() || config.general.links.public_host.is_none() {
         return;
     }
-    let host = config.general.links.public_host.as_deref().unwrap_or_default();
+    let host = config
+        .general
+        .links
+        .public_host
+        .as_deref()
+        .unwrap_or_default();
     let port = config
         .general
         .links

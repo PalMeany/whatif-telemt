@@ -51,8 +51,7 @@ async fn patch_revision_conflict() {
 
 #[tokio::test]
 async fn patch_sni_reports_restart_required() {
-    let (path, _d) =
-        temp_config("[censorship]\ntls_domain = \"a.com\"\n[server]\nport = 443\n");
+    let (path, _d) = temp_config("[censorship]\ntls_domain = \"a.com\"\n[server]\nport = 443\n");
     let patch: Json = serde_json::json!({"censorship": {"tls_domain": "b.com"}});
     let resp = apply_patch_to_path(&path, &patch, None).await.unwrap();
     assert!(resp.restart_required);
@@ -252,9 +251,7 @@ async fn patch_rejects_multiple_source_owners_without_writing() {
         "censorship": {"tls_domain": "new.example"}
     });
 
-    let error = apply_patch_to_path(&root, &patch, None)
-        .await
-        .unwrap_err();
+    let error = apply_patch_to_path(&root, &patch, None).await.unwrap_err();
 
     assert_eq!(error.code, "config_patch_not_atomic");
     assert_eq!(tokio::fs::read_to_string(&root).await.unwrap(), root_body);
@@ -276,10 +273,7 @@ async fn unavailable_reload_coordinator_is_detected_before_config_write() {
     drop(receiver);
 
     let error = match control
-        .reserve(
-            prepared.response.revision.clone(),
-            ReloadRequest::default(),
-        )
+        .reserve(prepared.response.revision.clone(), ReloadRequest::default())
         .await
     {
         Ok(_) => panic!("closed reload coordinator must reject the reservation"),

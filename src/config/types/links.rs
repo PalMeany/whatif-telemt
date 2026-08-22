@@ -28,7 +28,6 @@ impl Default for LinksConfig {
     }
 }
 
-
 /// In TOML, this can be:
 /// - `show_link = "*"`          — show links for all users
 /// - `show_link = ["a", "b"]`   — show links for specific users

@@ -29,10 +29,7 @@ fn targets(low_family: &str) -> SynLimitTargets {
         _ => panic!("TELEMT_PF_LOW_FAMILY must be v4 or v6"),
     };
     SynLimitTargets {
-        pf_v4: vec![rule(
-            IpAddr::V4(Ipv4Addr::new(198, 18, 1, 1)),
-            v4_rate,
-        )],
+        pf_v4: vec![rule(IpAddr::V4(Ipv4Addr::new(198, 18, 1, 1)), v4_rate)],
         pf_v6: vec![rule(
             IpAddr::V6("fd00:18:1::1".parse::<Ipv6Addr>().unwrap()),
             v6_rate,

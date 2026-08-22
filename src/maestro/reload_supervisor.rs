@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use tokio::sync::watch;
 use tokio::sync::Mutex;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -158,10 +158,7 @@ impl ReloadSupervisor {
         let old_runtime = self.active_runtime.load_full();
         let resolved = resolve_reload_config(&old_runtime.config(), &command.config);
         self.control
-            .set_deferred_fields(
-                command.reload_id,
-                resolved.deferred_process_fields.clone(),
-            )
+            .set_deferred_fields(command.reload_id, resolved.deferred_process_fields.clone())
             .await;
 
         let prepared = match prepare_runtime(

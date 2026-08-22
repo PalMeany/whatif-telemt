@@ -351,9 +351,7 @@ async fn test_chunked_send_has_no_fd_growth_after_success_and_cancellation_stres
         send_tcp_fragmented_fd(success_fd, &[0x5A], 92)
             .await
             .unwrap_or_else(|error| {
-                panic!(
-                    "success cycle {iteration} failed with MSS {success_mss_before}: {error}"
-                )
+                panic!("success cycle {iteration} failed with MSS {success_mss_before}: {error}")
             });
         let mut received = [0_u8; 1];
         success_client.read_exact(&mut received).await.unwrap();

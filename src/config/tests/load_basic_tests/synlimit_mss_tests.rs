@@ -117,7 +117,6 @@ fn synlimit_synfix_zero_values_are_rejected() {
     }
 }
 
-
 #[test]
 fn client_mss_presets_and_listener_override_are_resolved() {
     let toml = r#"
@@ -366,4 +365,3 @@ fn listener_client_mss_invalid_preset_is_rejected() {
     assert!(err.contains("must be \"\", extreme-low, tspu, 2in8"));
     let _ = std::fs::remove_file(path);
 }
-

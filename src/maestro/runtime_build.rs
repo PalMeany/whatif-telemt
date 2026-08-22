@@ -337,8 +337,8 @@ pub(crate) fn resolve_reload_config(
         || old.server.listen_backlog != desired.server.listen_backlog;
     let listener_policy_changed =
         listener_identity_matches && !listener_process_fields_equal(&old.server, &desired.server);
-    let unsupported_identity_change = !listener_identity_matches
-        && !listener_rebind_supported(old, desired);
+    let unsupported_identity_change =
+        !listener_identity_matches && !listener_rebind_supported(old, desired);
     if global_listener_policy_changed || listener_policy_changed || unsupported_identity_change {
         fields.push("server.listeners".to_string());
         effective.server.port = old.server.port;
@@ -402,9 +402,7 @@ pub(crate) fn resolve_reload_config(
         fields.push("general.data_path".to_string());
         effective.general.data_path = old.general.data_path.clone();
     }
-    if serde_json::to_value(&old.logging).ok()
-        != serde_json::to_value(&desired.logging).ok()
-    {
+    if serde_json::to_value(&old.logging).ok() != serde_json::to_value(&desired.logging).ok() {
         fields.push("logging".to_string());
         effective.logging = old.logging.clone();
     }

@@ -15,10 +15,7 @@ pub(super) struct ListenerBindSpec {
     pub(super) tls_response_fragment_size: Option<u16>,
 }
 
-fn listener_port_or_legacy(
-    listener: &crate::config::ListenerConfig,
-    server: &ServerConfig,
-) -> u16 {
+fn listener_port_or_legacy(listener: &crate::config::ListenerConfig, server: &ServerConfig) -> u16 {
     listener.port.unwrap_or(server.port)
 }
 

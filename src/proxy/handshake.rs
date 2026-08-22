@@ -69,13 +69,14 @@ pub(crate) use self::tls_handshake::handle_tls_handshake_with_shared_and_options
 #[cfg(test)]
 pub(crate) use self::auth_probe::{
     auth_probe_fail_streak_for_testing_in_shared, auth_probe_is_throttled_for_testing_in_shared,
-    auth_probe_record_failure_for_testing, auth_probe_saturation_is_throttled_at_for_testing_in_shared,
+    auth_probe_record_failure_for_testing,
+    auth_probe_saturation_is_throttled_at_for_testing_in_shared,
     auth_probe_saturation_is_throttled_for_testing_in_shared,
     auth_probe_saturation_state_for_testing_in_shared,
     auth_probe_saturation_state_lock_for_testing_in_shared, auth_probe_state_for_testing_in_shared,
-    clear_auth_probe_state_for_testing_in_shared, clear_unknown_sni_warn_state_for_testing_in_shared,
-    clear_warned_secrets_for_testing_in_shared, should_emit_unknown_sni_warn_for_testing_in_shared,
-    warned_secrets_for_testing_in_shared,
+    clear_auth_probe_state_for_testing_in_shared,
+    clear_unknown_sni_warn_state_for_testing_in_shared, clear_warned_secrets_for_testing_in_shared,
+    should_emit_unknown_sni_warn_for_testing_in_shared, warned_secrets_for_testing_in_shared,
 };
 
 const ACCESS_SECRET_BYTES: usize = 16;

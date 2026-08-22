@@ -6,9 +6,7 @@ use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload as tracing_reload};
 
 use crate::config::{LogLevel, ProxyConfig};
-use crate::startup::{
-    COMPONENT_CONFIG_LOAD, COMPONENT_TRACING_INIT, StartupTracker,
-};
+use crate::startup::{COMPONENT_CONFIG_LOAD, COMPONENT_TRACING_INIT, StartupTracker};
 
 use super::helpers::{
     parse_cli, print_maestro_line, resolve_runtime_base_dir, resolve_runtime_config_path,

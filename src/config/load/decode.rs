@@ -50,8 +50,7 @@ pub(super) fn decode_source_graph(graph: ConfigSourceGraph) -> Result<DecodedSou
         .unwrap_or(false);
     let legacy_top_level_beobachten = parsed_toml.get("beobachten").cloned();
     let legacy_top_level_beobachten_minutes = parsed_toml.get("beobachten_minutes").cloned();
-    let legacy_top_level_beobachten_flush_secs =
-        parsed_toml.get("beobachten_flush_secs").cloned();
+    let legacy_top_level_beobachten_flush_secs = parsed_toml.get("beobachten_flush_secs").cloned();
     let legacy_top_level_beobachten_file = parsed_toml.get("beobachten_file").cloned();
     let stun_servers_is_explicit = network_table
         .map(|table| table.contains_key("stun_servers"))
@@ -100,9 +99,7 @@ pub(super) fn decode_source_graph(graph: ConfigSourceGraph) -> Result<DecodedSou
         && let Some(value) = legacy_top_level_beobachten_flush_secs.as_ref()
     {
         let raw = value.as_integer().ok_or_else(|| {
-            ProxyError::Config(
-                "beobachten_flush_secs (top-level) must be an integer".to_string(),
-            )
+            ProxyError::Config("beobachten_flush_secs (top-level) must be an integer".to_string())
         })?;
         let parsed = u64::try_from(raw).map_err(|_| {
             ProxyError::Config(
@@ -112,9 +109,7 @@ pub(super) fn decode_source_graph(graph: ConfigSourceGraph) -> Result<DecodedSou
         config.general.beobachten_flush_secs = parsed;
         legacy_beobachten_applied = true;
     }
-    if !beobachten_file_is_explicit
-        && let Some(value) = legacy_top_level_beobachten_file.as_ref()
-    {
+    if !beobachten_file_is_explicit && let Some(value) = legacy_top_level_beobachten_file.as_ref() {
         let parsed = value.as_str().ok_or_else(|| {
             ProxyError::Config("beobachten_file (top-level) must be a string".to_string())
         })?;
@@ -126,8 +121,7 @@ pub(super) fn decode_source_graph(graph: ConfigSourceGraph) -> Result<DecodedSou
     }
 
     let legacy_nat_stun = config.general.middle_proxy_nat_stun.take();
-    let legacy_nat_stun_servers =
-        std::mem::take(&mut config.general.middle_proxy_nat_stun_servers);
+    let legacy_nat_stun_servers = std::mem::take(&mut config.general.middle_proxy_nat_stun_servers);
     let legacy_nat_stun_used = legacy_nat_stun.is_some() || !legacy_nat_stun_servers.is_empty();
     if stun_servers_is_explicit {
         let mut explicit_stun_servers = Vec::new();

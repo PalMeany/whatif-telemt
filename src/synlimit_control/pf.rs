@@ -31,7 +31,12 @@ pub(super) async fn apply_synlimit_rules(
     }
 
     let script = pf_synlimit_script(targets);
-    run_command("pfctl", &["-a", namespace.pf_anchor.as_str(), "-f", "-"], Some(script)).await
+    run_command(
+        "pfctl",
+        &["-a", namespace.pf_anchor.as_str(), "-f", "-"],
+        Some(script),
+    )
+    .await
 }
 
 async fn has_pf_anchor_hook() -> Result<bool, String> {
@@ -98,7 +103,10 @@ mod tests {
     #[test]
     fn pf_script_uses_native_rate_limited_pass() {
         let mut targets = SynLimitTargets::default();
-        targets.pf_v4 = vec![test_rule(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))), 443)];
+        targets.pf_v4 = vec![test_rule(
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            443,
+        )];
         let script = pf_synlimit_script(&targets);
 
         assert!(script.contains(

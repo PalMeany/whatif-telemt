@@ -227,4 +227,3 @@ impl Default for TelemetryConfig {
         }
     }
 }
-

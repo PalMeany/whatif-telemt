@@ -168,8 +168,7 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
     }
     if config.general.me_route_backpressure_base_timeout_ms > 5000 {
         return Err(ProxyError::Config(
-            "general.me_route_backpressure_base_timeout_ms must be within [1, 5000]"
-                .to_string(),
+            "general.me_route_backpressure_base_timeout_ms must be within [1, 5000]".to_string(),
         ));
     }
 
@@ -182,15 +181,13 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
     }
     if config.general.me_route_backpressure_high_timeout_ms > 5000 {
         return Err(ProxyError::Config(
-            "general.me_route_backpressure_high_timeout_ms must be within [1, 5000]"
-                .to_string(),
+            "general.me_route_backpressure_high_timeout_ms must be within [1, 5000]".to_string(),
         ));
     }
 
     if !(1..=100).contains(&config.general.me_route_backpressure_high_watermark_pct) {
         return Err(ProxyError::Config(
-            "general.me_route_backpressure_high_watermark_pct must be within [1, 100]"
-                .to_string(),
+            "general.me_route_backpressure_high_watermark_pct must be within [1, 100]".to_string(),
         ));
     }
 

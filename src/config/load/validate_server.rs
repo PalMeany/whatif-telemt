@@ -1,8 +1,7 @@
 use super::*;
 
 pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
-    if !(1..=MAX_API_REQUEST_BODY_LIMIT_BYTES)
-        .contains(&config.server.api.request_body_limit_bytes)
+    if !(1..=MAX_API_REQUEST_BODY_LIMIT_BYTES).contains(&config.server.api.request_body_limit_bytes)
     {
         return Err(ProxyError::Config(
             "server.api.request_body_limit_bytes must be within [1, 1048576]".to_string(),

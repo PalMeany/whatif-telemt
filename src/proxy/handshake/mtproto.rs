@@ -417,4 +417,3 @@ where
     debug!(peer = %peer, "MTProto handshake: no matching user found");
     HandshakeResult::BadClient { reader, writer }
 }
-

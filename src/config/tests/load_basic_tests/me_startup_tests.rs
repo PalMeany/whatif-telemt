@@ -302,4 +302,3 @@ fn rpc_proxy_req_every_zero_and_valid_range_are_accepted() {
     assert_eq!(cfg_valid.general.rpc_proxy_req_every, 40);
     let _ = std::fs::remove_file(path_valid);
 }
-

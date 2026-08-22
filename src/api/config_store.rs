@@ -11,13 +11,11 @@ use super::model::ApiFailure;
 // Source-preserving TOML rendering and atomic persistence helpers.
 mod persistence;
 
+#[cfg(test)]
+use persistence::{find_toml_table_bounds, render_access_section, save_sections_to_disk};
 pub(in crate::api) use persistence::{
     render_server_listeners, render_top_level_section, save_access_sections_to_disk,
     upsert_toml_table, write_atomic,
-};
-#[cfg(test)]
-use persistence::{
-    find_toml_table_bounds, render_access_section, save_sections_to_disk,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

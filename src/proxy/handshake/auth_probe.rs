@@ -86,7 +86,11 @@ pub(super) fn auth_probe_scan_start_offset_in(
     auth_probe_eviction_offset_in(shared, peer_ip, now) % state_len
 }
 
-pub(super) fn auth_probe_is_throttled_in(shared: &ProxySharedState, peer_ip: IpAddr, now: Instant) -> bool {
+pub(super) fn auth_probe_is_throttled_in(
+    shared: &ProxySharedState,
+    peer_ip: IpAddr,
+    now: Instant,
+) -> bool {
     let peer_ip = normalize_auth_probe_ip(peer_ip);
     let state = &shared.handshake.auth_probe;
     let Some(entry) = state.get(&peer_ip) else {
@@ -135,7 +139,10 @@ pub(super) fn auth_probe_should_apply_preauth_throttle_in(
     auth_probe_saturation_grace_exhausted_in(shared, peer_ip, now)
 }
 
-pub(super) fn auth_probe_saturation_is_throttled_in(shared: &ProxySharedState, now: Instant) -> bool {
+pub(super) fn auth_probe_saturation_is_throttled_in(
+    shared: &ProxySharedState,
+    now: Instant,
+) -> bool {
     let mut guard = shared
         .handshake
         .auth_probe_saturation
@@ -198,7 +205,11 @@ pub(super) fn auth_probe_note_expensive_invalid_scan_in(
     auth_probe_note_saturation_in(shared, now);
 }
 
-pub(super) fn auth_probe_record_failure_in(shared: &ProxySharedState, peer_ip: IpAddr, now: Instant) {
+pub(super) fn auth_probe_record_failure_in(
+    shared: &ProxySharedState,
+    peer_ip: IpAddr,
+    now: Instant,
+) {
     let peer_ip = normalize_auth_probe_ip(peer_ip);
     let state = &shared.handshake.auth_probe;
     auth_probe_record_failure_with_state_in(shared, state, peer_ip, now);
@@ -504,5 +515,3 @@ pub(super) async fn maybe_apply_server_hello_delay(config: &ProxyConfig) {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 }
-
-

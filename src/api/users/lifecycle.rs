@@ -56,7 +56,6 @@ pub(in crate::api) async fn rotate_secret(
     ))
 }
 
-
 pub(in crate::api) async fn delete_user(
     user: &str,
     expected_revision: Option<String>,
@@ -115,4 +114,3 @@ pub(in crate::api) async fn delete_user(
 
     Ok((user.to_string(), revision))
 }
-

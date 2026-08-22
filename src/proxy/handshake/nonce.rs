@@ -96,4 +96,3 @@ pub fn encrypt_tg_nonce(nonce: &[u8; HANDSHAKE_LEN]) -> Vec<u8> {
     let (encrypted, _, _) = encrypt_tg_nonce_with_ciphers(nonce);
     encrypted
 }
-

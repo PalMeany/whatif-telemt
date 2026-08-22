@@ -334,4 +334,3 @@ fn me_pool_min_fresh_ratio_out_of_range_is_rejected() {
     assert!(err.contains("general.me_pool_min_fresh_ratio must be within [0.0, 1.0]"));
     let _ = std::fs::remove_file(path);
 }
-

@@ -45,12 +45,10 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
     }
 
     let mut exclusive_mask = HashMap::with_capacity(config.censorship.exclusive_mask.len());
-    let mut exclusive_mask_targets =
-        HashMap::with_capacity(config.censorship.exclusive_mask.len());
+    let mut exclusive_mask_targets = HashMap::with_capacity(config.censorship.exclusive_mask.len());
     for (domain, target) in std::mem::take(&mut config.censorship.exclusive_mask) {
         let domain = normalize_domain_to_ascii(&domain, "censorship.exclusive_mask domain")?;
-        let target =
-            normalize_exclusive_mask_target(&target, "censorship.exclusive_mask target")?;
+        let target = normalize_exclusive_mask_target(&target, "censorship.exclusive_mask target")?;
         let Some((host, port)) = parse_exclusive_mask_target(&target) else {
             return Err(ProxyError::Config(format!(
                 "Invalid censorship.exclusive_mask target for '{}': '{}'. Expected host:port with port > 0",

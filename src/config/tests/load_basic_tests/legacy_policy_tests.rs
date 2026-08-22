@@ -422,4 +422,3 @@ fn update_every_zero_is_rejected() {
     assert!(err.contains("general.update_every must be > 0"));
     let _ = std::fs::remove_file(path);
 }
-

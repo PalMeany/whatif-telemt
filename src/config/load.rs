@@ -23,7 +23,6 @@ mod strict_keys;
 // Precomputed user authentication data for handshake hot paths.
 mod runtime_auth;
 // Post-deserialization validation helpers.
-mod validation;
 mod decode;
 mod effective;
 mod pipeline;
@@ -31,6 +30,7 @@ mod validate_core;
 mod validate_me;
 mod validate_runtime;
 mod validate_server;
+mod validation;
 
 use self::includes::{hash_rendered_snapshot, normalize_config_path, preprocess_includes};
 use self::normalize::{
@@ -41,8 +41,8 @@ use self::normalize::{
 pub(crate) use self::runtime_auth::UserAuthSnapshot;
 use self::strict_keys::handle_unknown_config_keys;
 use self::validation::{
-    normalize_upstream_family_policy, validate_listener_runtime_profiles,
-    validate_logging_config, validate_network_cfg, validate_upstreams,
+    normalize_upstream_family_policy, validate_listener_runtime_profiles, validate_logging_config,
+    validate_network_cfg, validate_upstreams,
 };
 
 const MAX_ME_WRITER_CMD_CHANNEL_CAPACITY: usize = 16_384;

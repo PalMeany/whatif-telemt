@@ -133,26 +133,28 @@ async fn run_server(addr: SocketAddr, fragment_size: u16, fake_cert_len: usize) 
     let replay_checker = ReplayChecker::new(128, Duration::from_secs(60));
     let rng = SecureRandom::new();
     let shared = ProxySharedState::new();
-    let (tls_reader, mut tls_writer, user) = match
-        handle_tls_handshake_with_shared_and_options(
-            &client_hello,
-            read_half,
-            write_half,
-            peer,
-            &config,
-            &replay_checker,
-            &rng,
-            None,
-            &shared,
-            TlsResponseWriteOptions::tcp(raw_fd, Some(fragment_size)),
-        )
-        .await
+    let (tls_reader, mut tls_writer, user) = match handle_tls_handshake_with_shared_and_options(
+        &client_hello,
+        read_half,
+        write_half,
+        peer,
+        &config,
+        &replay_checker,
+        &rng,
+        None,
+        &shared,
+        TlsResponseWriteOptions::tcp(raw_fd, Some(fragment_size)),
+    )
+    .await
     {
         HandshakeResult::Success(result) => result,
         _ => panic!("wire-test FakeTLS authentication failed"),
     };
     assert_eq!(user, "wire");
-    tls_writer.write_all(&vec![0xA5; BULK_PAYLOAD_LEN]).await.unwrap();
+    tls_writer
+        .write_all(&vec![0xA5; BULK_PAYLOAD_LEN])
+        .await
+        .unwrap();
     tls_writer.shutdown().await.unwrap();
     drop(tls_reader);
     // SAFETY: the write half still owns the accepted socket while it is borrowed.

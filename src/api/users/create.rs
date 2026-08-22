@@ -175,4 +175,3 @@ pub(in crate::api) async fn create_user(
 
     Ok((CreateUserResponse { user, secret }, revision))
 }
-

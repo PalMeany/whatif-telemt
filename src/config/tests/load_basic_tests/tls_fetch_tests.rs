@@ -183,4 +183,3 @@ fn valid_ad_tag_is_preserved_during_load() {
     );
     let _ = std::fs::remove_file(path);
 }
-

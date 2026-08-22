@@ -94,8 +94,7 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
         ));
     }
 
-    if !(4096..=16 * 1024 * 1024)
-        .contains(&config.general.me_d2c_frame_buf_shrink_threshold_bytes)
+    if !(4096..=16 * 1024 * 1024).contains(&config.general.me_d2c_frame_buf_shrink_threshold_bytes)
     {
         return Err(ProxyError::Config(
             "general.me_d2c_frame_buf_shrink_threshold_bytes must be within [4096, 16777216]"
@@ -105,15 +104,13 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
 
     if !(4096..=1024 * 1024).contains(&config.general.direct_relay_copy_buf_c2s_bytes) {
         return Err(ProxyError::Config(
-            "general.direct_relay_copy_buf_c2s_bytes must be within [4096, 1048576]"
-                .to_string(),
+            "general.direct_relay_copy_buf_c2s_bytes must be within [4096, 1048576]".to_string(),
         ));
     }
 
     if !(8192..=2 * 1024 * 1024).contains(&config.general.direct_relay_copy_buf_s2c_bytes) {
         return Err(ProxyError::Config(
-            "general.direct_relay_copy_buf_s2c_bytes must be within [8192, 2097152]"
-                .to_string(),
+            "general.direct_relay_copy_buf_s2c_bytes must be within [8192, 2097152]".to_string(),
         ));
     }
 
@@ -177,8 +174,7 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
         || config.general.me_pool_drain_soft_evict_budget_per_core > 64
     {
         return Err(ProxyError::Config(
-            "general.me_pool_drain_soft_evict_budget_per_core must be within [1, 64]"
-                .to_string(),
+            "general.me_pool_drain_soft_evict_budget_per_core must be within [1, 64]".to_string(),
         ));
     }
 

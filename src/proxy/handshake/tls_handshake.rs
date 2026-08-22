@@ -237,7 +237,6 @@ where
         }
     }
 
-
     let Some(validation) = tls_validation::validate_tls_client(
         handshake,
         peer,
@@ -422,4 +421,3 @@ async fn write_tls_response<W: AsyncWrite + Unpin>(
     writer.write_all(response).await?;
     writer.flush().await
 }
-

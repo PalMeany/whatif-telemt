@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::config::ProxyConfig;
@@ -260,9 +260,9 @@ impl ReloadControl {
             .active_generation
             .load(Ordering::Acquire)
             .saturating_add(1);
-        let status = self
-            .status_store
-            .reserve(target_generation, config_revision, request.clone())?;
+        let status =
+            self.status_store
+                .reserve(target_generation, config_revision, request.clone())?;
         Ok(ReloadReservation {
             permit: Some(permit),
             status,

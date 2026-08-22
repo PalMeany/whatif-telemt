@@ -44,7 +44,10 @@ pub(super) fn sticky_hint_get_by_ip(shared: &ProxySharedState, peer_ip: IpAddr) 
         .map(|entry| *entry)
 }
 
-pub(super) fn sticky_hint_get_by_ip_prefix(shared: &ProxySharedState, peer_ip: IpAddr) -> Option<u32> {
+pub(super) fn sticky_hint_get_by_ip_prefix(
+    shared: &ProxySharedState,
+    peer_ip: IpAddr,
+) -> Option<u32> {
     shared
         .handshake
         .sticky_user_by_ip_prefix
@@ -104,7 +107,11 @@ pub(super) fn record_recent_user_success_in(shared: &ProxySharedState, user_id: 
     ring[idx].store(user_id.saturating_add(1), Ordering::Relaxed);
 }
 
-pub(super) fn mark_candidate_if_new(tried_user_ids: &mut [u32], tried_len: &mut usize, user_id: u32) -> bool {
+pub(super) fn mark_candidate_if_new(
+    tried_user_ids: &mut [u32],
+    tried_len: &mut usize,
+    user_id: u32,
+) -> bool {
     if tried_user_ids[..*tried_len].contains(&user_id) {
         return false;
     }
@@ -222,7 +229,11 @@ pub(super) fn warn_invalid_secret_once_in(
     }
 }
 
-pub(super) fn decode_user_secret(shared: &ProxySharedState, name: &str, secret_hex: &str) -> Option<Vec<u8>> {
+pub(super) fn decode_user_secret(
+    shared: &ProxySharedState,
+    name: &str,
+    secret_hex: &str,
+) -> Option<Vec<u8>> {
     match hex::decode(secret_hex) {
         Ok(bytes) if bytes.len() == ACCESS_SECRET_BYTES => Some(bytes),
         Ok(bytes) => {
@@ -251,7 +262,11 @@ pub(super) fn decode_user_secret(shared: &ProxySharedState, name: &str, secret_h
 // over TCP (DD). Enforcing this separation prevents an attacker from using a
 // TLS-capable client to bypass the operator intent for the direct MTProto mode,
 // and vice versa.
-pub(super) fn mode_enabled_for_proto(config: &ProxyConfig, proto_tag: ProtoTag, is_tls: bool) -> bool {
+pub(super) fn mode_enabled_for_proto(
+    config: &ProxyConfig,
+    proto_tag: ProtoTag,
+    is_tls: bool,
+) -> bool {
     match proto_tag {
         ProtoTag::Secure => {
             if is_tls {
@@ -289,4 +304,3 @@ pub(super) fn decode_user_secrets_in(
 
     secrets
 }
-

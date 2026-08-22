@@ -1,6 +1,5 @@
 use super::*;
 
-
 /// Fields that are safe to swap without restarting listeners.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HotFields {
@@ -222,7 +221,6 @@ impl HotFields {
         }
     }
 }
-
 
 pub(super) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     let mut cfg = old.clone();

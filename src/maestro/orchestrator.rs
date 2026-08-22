@@ -8,9 +8,7 @@ use tracing::{error, info, warn};
 use crate::api;
 use crate::ip_tracker::UserIpTracker;
 use crate::network::probe::{decide_network_capabilities, log_probe_result, run_probe};
-use crate::proxy::direct_buffer_budget::{
-    DirectBufferBudget, resolve_direct_buffer_hard_limit,
-};
+use crate::proxy::direct_buffer_budget::{DirectBufferBudget, resolve_direct_buffer_hard_limit};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::ProxySharedState;
 use crate::startup::{COMPONENT_API_BOOTSTRAP, COMPONENT_NETWORK_PROBE};

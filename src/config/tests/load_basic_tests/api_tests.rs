@@ -22,7 +22,6 @@ fn api_minimal_runtime_cache_ttl_out_of_range_is_rejected() {
     let _ = std::fs::remove_file(path);
 }
 
-
 #[test]
 fn api_runtime_edge_cache_ttl_out_of_range_is_rejected() {
     let toml = r#"
@@ -88,4 +87,3 @@ fn api_runtime_edge_events_capacity_out_of_range_is_rejected() {
     assert!(err.contains("server.api.runtime_edge_events_capacity must be within [16, 4096]"));
     let _ = std::fs::remove_file(path);
 }
-

@@ -58,10 +58,10 @@ pub(super) async fn patch_config(
     let reservation = if let Some(request) = reload_request.filter(|_| resolved.runtime_changed) {
         Some(
             shared
-            .reload_control
-            .reserve(prepared.response.revision.clone(), request)
-            .await
-            .map_err(reload_submit_failure)?,
+                .reload_control
+                .reserve(prepared.response.revision.clone(), request)
+                .await
+                .map_err(reload_submit_failure)?,
         )
     } else {
         None
@@ -176,8 +176,7 @@ async fn prepare_patch_to_path(
     for section in &touched {
         if *section == "server" {
             let rendered = render_server_listeners(&requested_cfg)?;
-            owner_contents =
-                upsert_toml_table(&owner_contents, "server.listeners", &rendered);
+            owner_contents = upsert_toml_table(&owner_contents, "server.listeners", &rendered);
         } else {
             let rendered = render_top_level_section(&requested_cfg, section)?;
             owner_contents = upsert_toml_table(&owner_contents, section, &rendered);

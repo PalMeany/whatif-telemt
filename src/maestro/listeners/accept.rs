@@ -251,8 +251,9 @@ impl ListenerSlot {
     pub(super) async fn stop(&mut self) -> Result<(), String> {
         self.cancellation.cancel();
         if let Some(task) = self.task.take() {
-            task.await
-                .map_err(|error_value| format!("listener {} task failed: {error_value}", self.spec.addr))?;
+            task.await.map_err(|error_value| {
+                format!("listener {} task failed: {error_value}", self.spec.addr)
+            })?;
         }
         Ok(())
     }

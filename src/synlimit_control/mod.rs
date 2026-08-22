@@ -78,9 +78,7 @@ pub(crate) async fn clear_synlimit_rules_all_backends() -> Result<bool, String> 
 
 async fn clear_synlimit_rules_for_namespace(namespace: &SynLimitNamespace) -> Result<bool, String> {
     if !has_firewall_privileges() {
-        return Err(
-            "SYN limiter cleanup requires root or CAP_NET_ADMIN privileges".to_string(),
-        );
+        return Err("SYN limiter cleanup requires root or CAP_NET_ADMIN privileges".to_string());
     }
 
     let mut errors = Vec::new();

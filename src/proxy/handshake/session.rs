@@ -32,4 +32,3 @@ impl Drop for HandshakeSuccess {
         self.enc_iv.zeroize();
     }
 }
-

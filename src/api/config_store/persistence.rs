@@ -7,13 +7,13 @@ use serde::Serialize;
 
 use crate::config::{ProxyConfig, RateLimitBps};
 
+#[cfg(test)]
+use super::compute_revision;
 use super::{
     AccessSection, compute_snapshot_revision, load_candidate_snapshot, load_config_snapshot,
     resolve_single_source_owner, toml_path_exists,
 };
 use crate::api::model::ApiFailure;
-#[cfg(test)]
-use super::compute_revision;
 
 /// Re-render the given top-level tables from `cfg` and upsert each into the
 /// on-disk file, preserving every untouched section (and its comments).
@@ -80,9 +80,7 @@ pub(in crate::api) fn render_top_level_section(
 }
 
 /// Renders normalized listener entries as nested array-of-table blocks.
-pub(in crate::api) fn render_server_listeners(
-    cfg: &ProxyConfig,
-) -> Result<String, ApiFailure> {
+pub(in crate::api) fn render_server_listeners(cfg: &ProxyConfig) -> Result<String, ApiFailure> {
     let mut out = String::new();
     for listener in &cfg.server.listeners {
         out.push_str("[[server.listeners]]\n");
@@ -339,10 +337,7 @@ fn header_belongs_to(header: &str, table_name: &str) -> bool {
 /// [`find_all_table_blocks`] for the full set of (possibly scattered) blocks.
 /// Locates one complete TOML table block in source text.
 #[cfg(test)]
-pub(super) fn find_toml_table_bounds(
-    source: &str,
-    table_name: &str,
-) -> Option<(usize, usize)> {
+pub(super) fn find_toml_table_bounds(source: &str, table_name: &str) -> Option<(usize, usize)> {
     find_all_table_blocks(source, table_name).into_iter().next()
 }
 

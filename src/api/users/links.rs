@@ -197,4 +197,3 @@ fn resolve_extra_tls_domains(cfg: &ProxyConfig) -> Vec<&str> {
     }
     domains
 }
-

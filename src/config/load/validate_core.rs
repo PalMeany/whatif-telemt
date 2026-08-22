@@ -207,8 +207,7 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
         ));
     }
 
-    if config.timeouts.relay_client_idle_hard_secs < config.timeouts.relay_client_idle_soft_secs
-    {
+    if config.timeouts.relay_client_idle_hard_secs < config.timeouts.relay_client_idle_soft_secs {
         return Err(ProxyError::Config(
             "timeouts.relay_client_idle_hard_secs must be >= timeouts.relay_client_idle_soft_secs"
                 .to_string(),

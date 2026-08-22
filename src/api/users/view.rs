@@ -110,4 +110,3 @@ pub(in crate::api) fn build_user_quota_list(cfg: &ProxyConfig, stats: &Stats) ->
     }
     UserQuotaListData { users }
 }
-

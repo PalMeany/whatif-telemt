@@ -194,7 +194,6 @@ pub(in crate::api) async fn patch_user(
     Ok((user_info, revision))
 }
 
-
 pub(in crate::api) async fn set_user_enabled(
     user: &str,
     enabled: bool,
@@ -243,4 +242,3 @@ pub(in crate::api) async fn set_user_enabled(
 
     Ok((user_info, revision))
 }
-
