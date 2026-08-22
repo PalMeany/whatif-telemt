@@ -62,6 +62,7 @@ fn synlimit_synfix_defaults_are_loaded_for_listener() {
     assert_eq!(listener.synlimit_hashlimit_size, 32_768);
 }
 
+#[cfg(target_os = "freebsd")]
 #[test]
 fn synlimit_pf_mode_is_loaded_for_listener() {
     let cfg = load_config_from_temp_toml(
@@ -80,6 +81,30 @@ fn synlimit_pf_mode_is_loaded_for_listener() {
     );
 
     assert_eq!(cfg.server.listeners[0].synlimit, SynLimitMode::Pf);
+}
+
+#[cfg(not(target_os = "freebsd"))]
+#[test]
+fn synlimit_pf_mode_is_rejected_off_freebsd() {
+    let toml = r#"
+        [censorship]
+        tls_domain = "example.com"
+
+        [access.users]
+        user = "00000000000000000000000000000000"
+
+        [[server.listeners]]
+        ip = "0.0.0.0"
+        port = 443
+        synlimit = "pf"
+    "#;
+    let dir = std::env::temp_dir();
+    let path = dir.join("telemt_synlimit_pf_unsupported_test.toml");
+    std::fs::write(&path, toml).unwrap();
+    let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+    assert!(err.contains("backend pf is unsupported on this platform"));
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -1742,11 +1767,12 @@ fn client_mss_presets_and_listener_override_are_resolved() {
     let _ = std::fs::remove_file(path);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn client_mss_custom_value_is_accepted() {
     let toml = r#"
         [server]
-        client_mss = "4096"
+        client_mss = "92"
         client_mss_bulk = "1400"
 
         [censorship]
@@ -1760,8 +1786,80 @@ fn client_mss_custom_value_is_accepted() {
     std::fs::write(&path, toml).unwrap();
     let cfg = ProxyConfig::load(&path).unwrap();
 
-    assert_eq!(cfg.server.client_mss_value(), Ok(Some(4096)));
+    assert_eq!(cfg.server.client_mss_value(), Ok(Some(92)));
     assert_eq!(cfg.server.client_mss_bulk_value(), Ok(Some(1400)));
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn client_mss_bulk_requires_a_larger_bulk_profile_and_handshake_participant() {
+    for (name, server, expected) in [
+        (
+            "without_handshake",
+            "client_mss_bulk = \"1400\"",
+            "requires an effective client_mss",
+        ),
+        (
+            "equal",
+            "client_mss = \"1400\"\nclient_mss_bulk = \"1400\"",
+            "must be greater than the effective handshake MSS",
+        ),
+        (
+            "inverted",
+            "client_mss = \"1500\"\nclient_mss_bulk = \"1400\"",
+            "must be greater than the effective handshake MSS",
+        ),
+    ] {
+        let toml = format!(
+            "[server]\n{server}\n\n[censorship]\ntls_domain = \"example.com\"\n\n[access.users]\nuser = \"00000000000000000000000000000000\"\n"
+        );
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("telemt_client_mss_bulk_{name}_test.toml"));
+        std::fs::write(&path, toml).unwrap();
+        let err = ProxyConfig::load(&path).unwrap_err().to_string();
+
+        assert!(err.contains(expected), "unexpected error: {err}");
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn client_mss_bulk_allows_explicit_listener_opt_out() {
+    let toml = r#"
+        [server]
+        client_mss = "92"
+        client_mss_bulk = "1400"
+
+        [[server.listeners]]
+        ip = "0.0.0.0"
+        port = 443
+
+        [[server.listeners]]
+        ip = "::"
+        port = 443
+        client_mss = ""
+
+        [censorship]
+        tls_domain = "example.com"
+
+        [access.users]
+        user = "00000000000000000000000000000000"
+    "#;
+    let dir = std::env::temp_dir();
+    let path = dir.join("telemt_client_mss_bulk_listener_opt_out_test.toml");
+    std::fs::write(&path, toml).unwrap();
+    let cfg = ProxyConfig::load(&path).unwrap();
+
+    assert_eq!(
+        cfg.server.listeners[0].effective_client_mss(&cfg.server),
+        Ok(Some(92))
+    );
+    assert_eq!(
+        cfg.server.listeners[1].effective_client_mss(&cfg.server),
+        Ok(None)
+    );
     let _ = std::fs::remove_file(path);
 }
 

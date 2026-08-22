@@ -152,8 +152,7 @@ pub(crate) async fn bind_listeners(
                         %addr,
                         fragment_size,
                         bulk_mss = client_mss,
-                        segment_multiplier = mss_segment_multiplier(fragment_size),
-                        "Initial FakeTLS response fragmentation configured"
+                        "Initial FakeTLS response best-effort chunking configured"
                     );
                 }
                 let listener_proxy_protocol = listener_conf
@@ -518,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn client_mss_with_bulk_uses_bulk_listener_and_fragments_initial_response() {
+    fn client_mss_with_bulk_uses_bulk_listener_and_chunks_initial_response() {
         assert_eq!(
             tcp_mss_runtime_profile(Some(92), Some(1400)),
             (Some(1400), Some(92))

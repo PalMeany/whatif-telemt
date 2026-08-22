@@ -16,12 +16,10 @@
 //! | `general` | `telemetry` / `me_*_policy`    | Applied immediately                            |
 //! | `network` | `dns_overrides`                | Applied immediately                            |
 //! | `access`  | All user/quota fields          | Effective immediately                          |
-//! | `server.listeners` | `synlimit*` for existing endpoints | Netfilter rules reconciled immediately |
-//!
 //! Fields that require re-binding sockets (`server.listeners`, legacy
 //! `server.port`, `censorship.*`, `network.*`, `use_middle_proxy`) are **not**
-//! applied, except for SYN limiter fields on unchanged listener endpoints; a
-//! warning is emitted.
+//! applied; a warning is emitted. SYN limiter rules are process-owned and are
+//! reconciled only during privileged startup.
 //! Non-hot changes are never mixed into the runtime config snapshot.
 
 use std::collections::BTreeSet;
@@ -36,9 +34,11 @@ use tracing::{error, info, warn};
 
 use super::load::{LoadedConfig, ProxyConfig};
 use crate::config::{
-    CidrRateLimitKey, ListenerConfig, LogLevel, MeBindStaleMode, MeFloorMode, MeSocksKdfPolicy,
-    MeTelemetryLevel, MeWriterPickMode, SynLimitMode,
+    CidrRateLimitKey, LogLevel, MeBindStaleMode, MeFloorMode, MeSocksKdfPolicy, MeTelemetryLevel,
+    MeWriterPickMode,
 };
+#[cfg(test)]
+use crate::config::{ListenerConfig, SynLimitMode};
 
 const HOT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(50);
 
@@ -133,22 +133,6 @@ pub struct HotFields {
     pub user_max_unique_ips_global_each: usize,
     pub user_max_unique_ips_mode: crate::config::UserMaxUniqueIpsMode,
     pub user_max_unique_ips_window_secs: u64,
-    pub listener_synlimit: Vec<ListenerSynLimitHotFields>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListenerSynLimitHotFields {
-    pub ip: IpAddr,
-    pub port: Option<u16>,
-    pub synlimit: SynLimitMode,
-    pub synlimit_seconds: u32,
-    pub synlimit_hitcount: u32,
-    pub synlimit_burst: u32,
-    pub synlimit_ios_seconds: u32,
-    pub synlimit_ios_hitcount: u32,
-    pub synlimit_ios_burst: u32,
-    pub synlimit_hashlimit_expire_ms: u32,
-    pub synlimit_hashlimit_size: u32,
 }
 
 impl HotFields {
@@ -278,30 +262,6 @@ impl HotFields {
             user_max_unique_ips_global_each: cfg.access.user_max_unique_ips_global_each,
             user_max_unique_ips_mode: cfg.access.user_max_unique_ips_mode,
             user_max_unique_ips_window_secs: cfg.access.user_max_unique_ips_window_secs,
-            listener_synlimit: cfg
-                .server
-                .listeners
-                .iter()
-                .map(ListenerSynLimitHotFields::from_listener)
-                .collect(),
-        }
-    }
-}
-
-impl ListenerSynLimitHotFields {
-    fn from_listener(listener: &ListenerConfig) -> Self {
-        Self {
-            ip: listener.ip,
-            port: listener.port,
-            synlimit: listener.synlimit,
-            synlimit_seconds: listener.synlimit_seconds,
-            synlimit_hitcount: listener.synlimit_hitcount,
-            synlimit_burst: listener.synlimit_burst,
-            synlimit_ios_seconds: listener.synlimit_ios_seconds,
-            synlimit_ios_hitcount: listener.synlimit_ios_hitcount,
-            synlimit_ios_burst: listener.synlimit_ios_burst,
-            synlimit_hashlimit_expire_ms: listener.synlimit_hashlimit_expire_ms,
-            synlimit_hashlimit_size: listener.synlimit_hashlimit_size,
         }
     }
 }
@@ -348,18 +308,7 @@ fn listeners_equal(
     lhs: &[crate::config::ListenerConfig],
     rhs: &[crate::config::ListenerConfig],
 ) -> bool {
-    if lhs.len() != rhs.len() {
-        return false;
-    }
-    lhs.iter().zip(rhs.iter()).all(|(a, b)| {
-        a.ip == b.ip
-            && a.port == b.port
-            && a.client_mss == b.client_mss
-            && a.announce == b.announce
-            && a.announce_ip == b.announce_ip
-            && a.proxy_protocol == b.proxy_protocol
-            && a.reuse_allow == b.reuse_allow
-    })
+    serde_json::to_value(lhs).ok() == serde_json::to_value(rhs).ok()
 }
 
 fn resolve_default_link_port(cfg: &ProxyConfig) -> u16 {
@@ -608,33 +557,11 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.access.user_max_unique_ips_global_each = new.access.user_max_unique_ips_global_each;
     cfg.access.user_max_unique_ips_mode = new.access.user_max_unique_ips_mode;
     cfg.access.user_max_unique_ips_window_secs = new.access.user_max_unique_ips_window_secs;
-    overlay_listener_synlimit_fields(&mut cfg.server.listeners, &new.server.listeners);
-
     if cfg.rebuild_runtime_user_auth().is_err() {
         cfg.runtime_user_auth = None;
     }
 
     cfg
-}
-
-fn overlay_listener_synlimit_fields(old: &mut [ListenerConfig], new: &[ListenerConfig]) {
-    if old.len() != new.len() {
-        return;
-    }
-    for (old_listener, new_listener) in old.iter_mut().zip(new.iter()) {
-        if old_listener.ip != new_listener.ip || old_listener.port != new_listener.port {
-            continue;
-        }
-        old_listener.synlimit = new_listener.synlimit;
-        old_listener.synlimit_seconds = new_listener.synlimit_seconds;
-        old_listener.synlimit_hitcount = new_listener.synlimit_hitcount;
-        old_listener.synlimit_burst = new_listener.synlimit_burst;
-        old_listener.synlimit_ios_seconds = new_listener.synlimit_ios_seconds;
-        old_listener.synlimit_ios_hitcount = new_listener.synlimit_ios_hitcount;
-        old_listener.synlimit_ios_burst = new_listener.synlimit_ios_burst;
-        old_listener.synlimit_hashlimit_expire_ms = new_listener.synlimit_hashlimit_expire_ms;
-        old_listener.synlimit_hashlimit_size = new_listener.synlimit_hashlimit_size;
-    }
 }
 
 /// Warn if any non-hot fields changed (require restart).
@@ -910,13 +837,6 @@ fn log_changes(
         info!(
             "config reload: network.dns_overrides updated ({} entries)",
             new_hot.dns_overrides.len()
-        );
-    }
-
-    if old_hot.listener_synlimit != new_hot.listener_synlimit {
-        info!(
-            "config reload: server.listeners SYN limiter updated ({} listeners)",
-            new_hot.listener_synlimit.len()
         );
     }
 
@@ -1338,6 +1258,7 @@ fn reload_config(
     let LoadedConfig {
         config: new_cfg,
         source_files,
+        source_contents: _,
         rendered_hash,
     } = loaded;
     let next_manifest = WatchManifest::from_source_files(&source_files);
@@ -1731,7 +1652,7 @@ mod tests {
     }
 
     #[test]
-    fn listener_synlimit_extended_fields_are_hot() {
+    fn listener_synlimit_fields_are_process_owned() {
         let mut old = sample_config();
         old.server.listeners.push(ListenerConfig {
             ip: "0.0.0.0".parse().unwrap(),
@@ -1765,14 +1686,17 @@ mod tests {
         let applied = overlay_hot_fields(&old, &new);
         let listener = &applied.server.listeners[0];
         assert_eq!(applied.server.port, old.server.port);
-        assert_eq!(listener.synlimit_seconds, 120);
-        assert_eq!(listener.synlimit_hitcount, 96);
-        assert_eq!(listener.synlimit_burst, 2);
-        assert_eq!(listener.synlimit_ios_seconds, 2);
-        assert_eq!(listener.synlimit_ios_hitcount, 18);
-        assert_eq!(listener.synlimit_ios_burst, 36);
-        assert_eq!(listener.synlimit_hashlimit_expire_ms, 90_000);
-        assert_eq!(listener.synlimit_hashlimit_size, 65_536);
+        assert_eq!(listener.synlimit_seconds, old.server.listeners[0].synlimit_seconds);
+        assert_eq!(
+            listener.synlimit_hitcount,
+            old.server.listeners[0].synlimit_hitcount
+        );
+        assert_eq!(listener.synlimit_burst, old.server.listeners[0].synlimit_burst);
+        assert_eq!(
+            listener.synlimit_hashlimit_size,
+            old.server.listeners[0].synlimit_hashlimit_size
+        );
+        assert!(classify_config_changes(&old, &new).restart_required);
     }
 
     #[test]

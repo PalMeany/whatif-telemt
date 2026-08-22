@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,8 +34,8 @@ use self::normalize::{
 pub(crate) use self::runtime_auth::UserAuthSnapshot;
 use self::strict_keys::handle_unknown_config_keys;
 use self::validation::{
-    normalize_upstream_family_policy, validate_logging_config, validate_network_cfg,
-    validate_upstreams,
+    normalize_upstream_family_policy, validate_listener_runtime_profiles,
+    validate_logging_config, validate_network_cfg, validate_upstreams,
 };
 
 const MAX_ME_WRITER_CMD_CHANNEL_CAPACITY: usize = 16_384;
@@ -49,10 +49,25 @@ const MAX_MAX_CLIENT_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_API_REQUEST_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
+/// Validated config plus the exact recursive source snapshot used to build it.
 pub(crate) struct LoadedConfig {
+    /// Validated and normalized effective configuration.
     pub(crate) config: ProxyConfig,
+    /// Canonical paths participating in the recursive include graph.
     pub(crate) source_files: Vec<PathBuf>,
+    /// Raw source bytes keyed by canonical source path.
+    pub(crate) source_contents: BTreeMap<PathBuf, String>,
+    /// Legacy hash of the include-expanded rendered snapshot.
     pub(crate) rendered_hash: u64,
+}
+
+/// Raw recursive source graph captured before typed deserialization.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigSourceGraph {
+    /// Raw source bytes keyed by canonical source path.
+    pub(crate) source_contents: BTreeMap<PathBuf, String>,
+    /// Include-expanded TOML used for typed deserialization.
+    pub(crate) rendered: String,
 }
 
 /// Main runtime configuration loaded from TOML.
@@ -120,14 +135,64 @@ impl ProxyConfig {
         Self::load_with_metadata(path).map(|loaded| loaded.config)
     }
 
+    /// Loads typed configuration together with its source and rendered metadata.
     pub(crate) fn load_with_metadata<P: AsRef<Path>>(path: P) -> Result<LoadedConfig> {
+        Self::load_with_source_overrides(path, &BTreeMap::new())
+    }
+
+    /// Loads a typed snapshot while replacing selected captured source documents.
+    pub(crate) fn load_with_source_overrides<P: AsRef<Path>>(
+        path: P,
+        source_overrides: &BTreeMap<PathBuf, String>,
+    ) -> Result<LoadedConfig> {
+        let graph = Self::read_source_graph_with_overrides(path, source_overrides)?;
+        Self::load_source_graph(graph)
+    }
+
+    /// Captures the raw include graph without requiring typed config validity.
+    pub(crate) fn read_source_graph<P: AsRef<Path>>(path: P) -> Result<ConfigSourceGraph> {
+        Self::read_source_graph_with_overrides(path, &BTreeMap::new())
+    }
+
+    /// Captures a raw include graph with in-memory source replacements.
+    pub(crate) fn read_source_graph_with_overrides<P: AsRef<Path>>(
+        path: P,
+        source_overrides: &BTreeMap<PathBuf, String>,
+    ) -> Result<ConfigSourceGraph> {
         let path = path.as_ref();
-        let content =
-            std::fs::read_to_string(path).map_err(|e| ProxyError::Config(e.to_string()))?;
+        let normalized_path = normalize_config_path(path);
+        let content = source_overrides
+            .get(&normalized_path)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| std::fs::read_to_string(path))
+            .map_err(|e| ProxyError::Config(e.to_string()))?;
         let base_dir = path.parent().unwrap_or(Path::new("."));
         let mut source_files = BTreeSet::new();
-        source_files.insert(normalize_config_path(path));
-        let processed = preprocess_includes(&content, base_dir, 0, &mut source_files)?;
+        source_files.insert(normalized_path.clone());
+        let mut source_contents = BTreeMap::new();
+        source_contents.insert(normalized_path, content.clone());
+        let processed = preprocess_includes(
+            &content,
+            base_dir,
+            0,
+            &mut source_files,
+            &mut source_contents,
+            source_overrides,
+        )?;
+
+        Ok(ConfigSourceGraph {
+            source_contents,
+            rendered: processed,
+        })
+    }
+
+    fn load_source_graph(graph: ConfigSourceGraph) -> Result<LoadedConfig> {
+        let ConfigSourceGraph {
+            source_contents,
+            rendered: processed,
+        } = graph;
+        let source_files: BTreeSet<PathBuf> = source_contents.keys().cloned().collect();
 
         let parsed_toml: toml::Value =
             toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
@@ -1349,6 +1414,7 @@ impl ProxyConfig {
                 listener.announce = Some(ip.to_string());
             }
         }
+        validate_listener_runtime_profiles(&config)?;
 
         // Migration: show_link (top-level) → general.links.show.
         if !config.show_link.is_empty() && config.general.links.show.is_empty() {
@@ -1387,6 +1453,7 @@ impl ProxyConfig {
         Ok(LoadedConfig {
             config,
             source_files: source_files.into_iter().collect(),
+            source_contents,
             rendered_hash: hash_rendered_snapshot(&processed),
         })
     }
@@ -1458,6 +1525,7 @@ impl ProxyConfig {
         }
 
         crate::network::dns_overrides::validate_entries(&self.network.dns_overrides)?;
+        validate_listener_runtime_profiles(self)?;
 
         Ok(())
     }

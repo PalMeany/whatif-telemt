@@ -14,7 +14,7 @@ use super::reload::{
     ReloadCommand, ReloadCommandReceiver, ReloadControl, ReloadFailurePolicy, ReloadMode,
     ReloadPhase,
 };
-use super::runtime_build::{PreparedRuntime, deferred_process_fields, prepare_runtime};
+use super::runtime_build::{PreparedRuntime, prepare_runtime, resolve_reload_config};
 use super::runtime_tasks::RuntimeLogFilter;
 
 pub(crate) struct ReloadSupervisor {
@@ -147,14 +147,17 @@ impl ReloadSupervisor {
             .mark_phase(command.reload_id, ReloadPhase::Preparing)
             .await;
         let old_runtime = self.active_runtime.load_full();
-        let deferred = deferred_process_fields(&old_runtime.config(), &command.config);
+        let resolved = resolve_reload_config(&old_runtime.config(), &command.config);
         self.control
-            .set_deferred_fields(command.reload_id, deferred)
+            .set_deferred_fields(
+                command.reload_id,
+                resolved.deferred_process_fields.clone(),
+            )
             .await;
 
         let prepared = match prepare_runtime(
             command.target_generation,
-            command.config.as_ref().clone(),
+            resolved.effective,
             &self.config_path,
             self.quota_store.clone(),
             self.runtime_log_filter.clone(),

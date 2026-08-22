@@ -33,7 +33,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*, reload as tracing_reload};
 
 use crate::api;
-use crate::config::{LogLevel, ProxyConfig};
+use crate::config::{LogLevel, ProxyConfig, SynLimitMode};
 use crate::conntrack_control;
 use crate::crypto::SecureRandom;
 use crate::ip_tracker::UserIpTracker;
@@ -96,6 +96,7 @@ pub async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
 // Shared maestro startup and main loop. `drop_after_bind` runs on Unix after listeners are bound
 // (for privilege drop); it is a no-op on other platforms.
 async fn run_telemt_core(
+    privilege_drop_requested: bool,
     drop_after_bind: impl FnOnce(),
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let process_started_at = Instant::now();
@@ -279,6 +280,7 @@ async fn run_telemt_core(
         eprintln!("[telemt] Invalid config: {}", e);
         std::process::exit(1);
     }
+    validate_synlimit_privilege_drop(&config, privilege_drop_requested)?;
 
     if let Some(p) = data_path {
         config.general.data_path = Some(p);
@@ -987,12 +989,12 @@ async fn run_telemt_core(
         std::process::exit(1);
     }
 
-    synlimit_control::reconcile_synlimit_rules(&config).await;
+    synlimit_control::reconcile_synlimit_rules(&config)
+        .await
+        .map_err(std::io::Error::other)?;
 
     // On Unix, caller supplies privilege drop after bind and privileged firewall setup.
     drop_after_bind();
-
-    let synlimit_controller = synlimit_control::spawn_synlimit_controller(runtime_watch_rx);
 
     runtime_tasks::spawn_metrics_if_configured(&config, &startup_tracker, active_runtime.clone())
         .await;
@@ -1012,11 +1014,28 @@ async fn run_telemt_core(
         process_started_at,
         active_runtime,
         quota_state_path,
-        synlimit_controller,
         reload_supervisor,
     )
     .await;
 
+    Ok(())
+}
+
+fn validate_synlimit_privilege_drop(
+    config: &ProxyConfig,
+    privilege_drop_requested: bool,
+) -> std::io::Result<()> {
+    if privilege_drop_requested
+        && config
+            .server
+            .listeners
+            .iter()
+            .any(|listener| listener.synlimit != SynLimitMode::Off)
+    {
+        return Err(std::io::Error::other(
+            "SYN limiter cannot be combined with --run-as-user or --run-as-group without a privileged firewall helper",
+        ));
+    }
     Ok(())
 }
 
@@ -1040,7 +1059,7 @@ async fn run_inner(
     let user = daemon_opts.user.clone();
     let group = daemon_opts.group.clone();
 
-    run_telemt_core(|| {
+    run_telemt_core(user.is_some() || group.is_some(), || {
         if user.is_some() || group.is_some() {
             if let Err(e) = drop_privileges(user.as_deref(), group.as_deref(), _pid_file.as_ref()) {
                 error!(error = %e, "Failed to drop privileges");
@@ -1053,5 +1072,46 @@ async fn run_inner(
 
 #[cfg(not(unix))]
 async fn run_inner() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    run_telemt_core(|| {}).await
+    run_telemt_core(false, || {}).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ListenerConfig;
+
+    fn listener_with_synlimit(synlimit: SynLimitMode) -> ListenerConfig {
+        ListenerConfig {
+            ip: "127.0.0.1".parse().unwrap(),
+            port: Some(443),
+            client_mss: None,
+            synlimit,
+            synlimit_seconds: 60,
+            synlimit_hitcount: 48,
+            synlimit_burst: 24,
+            synlimit_ios_seconds: 1,
+            synlimit_ios_hitcount: 12,
+            synlimit_ios_burst: 24,
+            synlimit_hashlimit_expire_ms: 60_000,
+            synlimit_hashlimit_size: 32_768,
+            announce: None,
+            announce_ip: None,
+            proxy_protocol: None,
+            reuse_allow: false,
+        }
+    }
+
+    #[test]
+    fn privilege_drop_rejects_enabled_synlimit_only() {
+        let mut config = ProxyConfig::default();
+        config
+            .server
+            .listeners
+            .push(listener_with_synlimit(SynLimitMode::Iptables));
+
+        assert!(validate_synlimit_privilege_drop(&config, true).is_err());
+        assert!(validate_synlimit_privilege_drop(&config, false).is_ok());
+        config.server.listeners[0].synlimit = SynLimitMode::Off;
+        assert!(validate_synlimit_privilege_drop(&config, true).is_ok());
+    }
 }

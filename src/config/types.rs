@@ -1623,11 +1623,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub client_mss: Option<String>,
 
-    /// Client-facing TCP MSS for bulk traffic when initial-response fragmentation
-    /// is enabled on Linux. The listener uses this MSS from connection setup;
-    /// `client_mss` becomes the fragment size for the authenticated FakeTLS
-    /// response. Empty/omitted keeps `client_mss` connection-wide. Uses the same
-    /// preset/integer grammar as `client_mss`.
+    /// Experimental Linux-only bulk MSS used with best-effort userspace
+    /// chunking of the authenticated FakeTLS response. TCP offloads, loss, and
+    /// retransmission may coalesce write boundaries. Empty or omitted keeps
+    /// `client_mss` connection-wide. Uses the same preset/integer grammar as
+    /// `client_mss`.
     #[serde(default)]
     pub client_mss_bulk: Option<String>,
 

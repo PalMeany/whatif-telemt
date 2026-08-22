@@ -51,7 +51,6 @@ pub(crate) async fn wait_for_shutdown(
     process_started_at: Instant,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
-    synlimit_controller: synlimit_control::SynlimitController,
     reload_supervisor: ReloadSupervisorHandle,
 ) {
     let signal = wait_for_shutdown_signal().await;
@@ -60,7 +59,6 @@ pub(crate) async fn wait_for_shutdown(
         process_started_at,
         active_runtime,
         quota_state_path,
-        synlimit_controller,
         reload_supervisor,
     )
     .await;
@@ -92,7 +90,6 @@ async fn perform_shutdown(
     process_started_at: Instant,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     quota_state_path: PathBuf,
-    synlimit_controller: synlimit_control::SynlimitController,
     reload_supervisor: ReloadSupervisorHandle,
 ) {
     let shutdown_started_at = Instant::now();
@@ -130,7 +127,6 @@ async fn perform_shutdown(
         }
     }
 
-    synlimit_controller.shutdown().await;
     if let Err(error) = synlimit_control::clear_synlimit_rules_all_backends().await {
         warn!(error = %error, "Failed to clear SYN limiter rules during shutdown");
     }

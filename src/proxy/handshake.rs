@@ -69,7 +69,7 @@ pub(crate) struct TlsResponseWriteOptions {
 }
 
 impl TlsResponseWriteOptions {
-    /// Creates Linux TCP response fragmentation options for an accepted socket.
+    /// Creates Linux best-effort response chunking options for an accepted socket.
     #[cfg(target_os = "linux")]
     pub(crate) fn tcp(fd: std::os::unix::io::RawFd, fragment_size: Option<u16>) -> Self {
         Self {
@@ -980,7 +980,7 @@ where
     .await
 }
 
-/// Handles FakeTLS with optional initial-response fragmentation on a TCP socket.
+/// Handles FakeTLS with optional best-effort initial-response chunking.
 pub(crate) async fn handle_tls_handshake_with_shared_and_options<R, W>(
     handshake: &[u8],
     reader: R,
@@ -2023,7 +2023,8 @@ pub fn generate_tg_nonce(
             let mut key_iv = Zeroizing::new(Vec::with_capacity(KEY_LEN + IV_LEN));
             key_iv.extend_from_slice(client_enc_key);
             key_iv.extend_from_slice(&client_enc_iv.to_be_bytes());
-            key_iv.reverse(); // Python/C behavior: reversed enc_key+enc_iv in nonce
+            // Python/C compatibility requires reversed enc_key+enc_iv nonce bytes.
+            key_iv.reverse();
             nonce[SKIP_LEN..SKIP_LEN + KEY_LEN + IV_LEN].copy_from_slice(&key_iv);
         }
 
@@ -2064,7 +2065,8 @@ pub fn encrypt_tg_nonce_with_ciphers(nonce: &[u8; HANDSHAKE_LEN]) -> (Vec<u8>, A
     let dec_iv = u128::from_be_bytes(dec_iv_arr);
 
     let mut encryptor = AesCtr::new(&enc_key, enc_iv);
-    let encrypted_full = encryptor.encrypt(nonce); // counter: 0 → 4
+    // Encryption advances the nonce counter from zero to four.
+    let encrypted_full = encryptor.encrypt(nonce);
 
     let mut result = nonce[..PROTO_TAG_POS].to_vec();
     result.extend_from_slice(&encrypted_full[PROTO_TAG_POS..]);

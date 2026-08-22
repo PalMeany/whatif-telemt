@@ -418,18 +418,8 @@ pub(super) async fn rotate_secret(
     cfg.access.users.insert(user.to_string(), secret.clone());
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let touched_sections = [
-        AccessSection::Users,
-        AccessSection::UserEnabled,
-        AccessSection::UserAdTags,
-        AccessSection::UserMaxTcpConns,
-        AccessSection::UserExpirations,
-        AccessSection::UserDataQuota,
-        AccessSection::UserRateLimits,
-        AccessSection::UserMaxUniqueIps,
-    ];
     let revision =
-        save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
+        save_access_sections_to_disk(&shared.config_path, &cfg, &[AccessSection::Users]).await?;
     drop(_guard);
 
     let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
@@ -529,27 +519,32 @@ pub(super) async fn delete_user(
         ));
     }
 
+    let mut touched_sections = vec![AccessSection::Users];
     cfg.access.users.remove(user);
-    cfg.access.user_enabled.remove(user);
-    cfg.access.user_ad_tags.remove(user);
-    cfg.access.user_max_tcp_conns.remove(user);
-    cfg.access.user_expirations.remove(user);
-    cfg.access.user_data_quota.remove(user);
-    cfg.access.user_rate_limits.remove(user);
-    cfg.access.user_max_unique_ips.remove(user);
+    if cfg.access.user_enabled.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserEnabled);
+    }
+    if cfg.access.user_ad_tags.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserAdTags);
+    }
+    if cfg.access.user_max_tcp_conns.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserMaxTcpConns);
+    }
+    if cfg.access.user_expirations.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserExpirations);
+    }
+    if cfg.access.user_data_quota.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserDataQuota);
+    }
+    if cfg.access.user_rate_limits.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserRateLimits);
+    }
+    if cfg.access.user_max_unique_ips.remove(user).is_some() {
+        touched_sections.push(AccessSection::UserMaxUniqueIps);
+    }
 
     cfg.validate()
         .map_err(|e| ApiFailure::bad_request(format!("config validation failed: {}", e)))?;
-    let touched_sections = [
-        AccessSection::Users,
-        AccessSection::UserEnabled,
-        AccessSection::UserAdTags,
-        AccessSection::UserMaxTcpConns,
-        AccessSection::UserExpirations,
-        AccessSection::UserDataQuota,
-        AccessSection::UserRateLimits,
-        AccessSection::UserMaxUniqueIps,
-    ];
     let revision =
         save_access_sections_to_disk(&shared.config_path, &cfg, &touched_sections).await?;
     drop(_guard);

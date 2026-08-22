@@ -5,6 +5,21 @@ use super::model::{SynLimitNamespace, SynLimitRule, SynLimitTargets};
 
 const PF_ANCHOR_ROOT: &str = "telemt_synlimit";
 
+#[derive(Clone, Copy)]
+enum PfFamily {
+    Inet,
+    Inet6,
+}
+
+impl PfFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Inet => "inet",
+            Self::Inet6 => "inet6",
+        }
+    }
+}
+
 pub(super) async fn apply_synlimit_rules(
     targets: &SynLimitTargets,
     namespace: &SynLimitNamespace,
@@ -31,25 +46,22 @@ fn is_pf_anchor_hook_line(line: &str) -> bool {
 fn pf_synlimit_script(targets: &SynLimitTargets) -> String {
     let mut script = String::new();
     for target in &targets.pf_v4 {
-        push_pf_rules(&mut script, target);
+        push_pf_rules(&mut script, PfFamily::Inet, target);
     }
     for target in &targets.pf_v6 {
-        push_pf_rules(&mut script, target);
+        push_pf_rules(&mut script, PfFamily::Inet6, target);
     }
     script
 }
 
-fn push_pf_rules(script: &mut String, target: &SynLimitRule) {
+fn push_pf_rules(script: &mut String, family: PfFamily, target: &SynLimitRule) {
     let destination = pf_destination(target.ip);
     script.push_str(&format!(
-        "pass in quick proto tcp from any to {destination} port {port} flags S/SA keep state (max-src-conn-rate {rate}/{seconds})\n",
+        "pass in quick {family} proto tcp from any to {destination} port {port} flags S/SA keep state (max-src-conn-rate {rate}/{seconds})\n",
+        family = family.as_str(),
         port = target.port,
         rate = target.generic_hitcount,
         seconds = target.generic_seconds,
-    ));
-    script.push_str(&format!(
-        "block return-rst in quick proto tcp from any to {destination} port {port}\n",
-        port = target.port,
     ));
 }
 
@@ -84,24 +96,15 @@ mod tests {
     use crate::synlimit_control::model::test_rule;
 
     #[test]
-    fn pf_script_uses_rate_limited_pass_before_reject() {
+    fn pf_script_uses_native_rate_limited_pass() {
         let mut targets = SynLimitTargets::default();
         targets.pf_v4 = vec![test_rule(Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))), 443)];
         let script = pf_synlimit_script(&targets);
 
         assert!(script.contains(
-            "pass in quick proto tcp from any to 203.0.113.7 port 443 flags S/SA keep state (max-src-conn-rate 48/60)"
+            "pass in quick inet proto tcp from any to 203.0.113.7 port 443 flags S/SA keep state (max-src-conn-rate 48/60)"
         ));
-        assert!(script.contains(
-            "block return-rst in quick proto tcp from any to 203.0.113.7 port 443"
-        ));
-        let pass_idx = script
-            .find("pass in quick proto tcp from any to 203.0.113.7 port 443")
-            .expect("rate-limited pass rule must be rendered");
-        let block_idx = script
-            .find("block return-rst in quick proto tcp from any to 203.0.113.7 port 443")
-            .expect("reject fallback rule must be rendered");
-        assert!(pass_idx < block_idx);
+        assert!(!script.contains("return-rst"));
     }
 
     #[test]
@@ -111,8 +114,8 @@ mod tests {
         targets.pf_v6 = vec![test_rule(Some(IpAddr::V6(Ipv6Addr::LOCALHOST)), 8443)];
         let script = pf_synlimit_script(&targets);
 
-        assert!(script.contains("to any port 443"));
-        assert!(script.contains("to ::1 port 8443"));
+        assert!(script.contains("pass in quick inet proto tcp from any to any port 443"));
+        assert!(script.contains("pass in quick inet6 proto tcp from any to ::1 port 8443"));
     }
 
     #[test]
