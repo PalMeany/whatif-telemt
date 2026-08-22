@@ -1981,8 +1981,8 @@ This document lists all configuration keys accepted by `config.toml`.
     client_mss = "tspu"
     ```
 ## client_mss_bulk
-  - **Constraints / validation**: `String`. Same grammar as [`client_mss`](#client_mss) (empty/omitted, presets `"extreme-low"`/`"tspu"`/`"2in8"`, or a decimal in `88..=4096`).
-  - **Description**: Enables separated MSS handling for `ServerHello` and for all other packets. The listener uses `client_mss_bulk` from the start of the connection, including when the client sends `ClientHello`. Telemt sends the initial authenticated FakeTLS response (`ServerHello`) in chunks no larger than `client_mss`. Normal MTProto traffic then continues with `client_mss_bulk`, without changing MSS on an established connection. This keeps the smaller `ServerHello` chunks while avoiding small segments for all later traffic. When this option is empty or omitted, `client_mss` applies to the whole connection. **Linux-only**.
+  - **Constraints / validation**: Linux-only `String`. Same grammar as [`client_mss`](#client_mss) (empty/omitted, presets `"extreme-low"`/`"tspu"`/`"2in8"`, or a decimal in `88..=4096`). A non-empty value requires at least one listener with an effective `client_mss`, and it must be greater than every participating listener's handshake value. A listener may use `client_mss = ""` as an explicit opt-out.
+  - **Description**: Enables an experimental two-size profile. The listener uses `client_mss_bulk` from the start of the connection, including when the client sends `ClientHello`. Telemt sends the initial authenticated FakeTLS response (`ServerHello`) with best-effort userspace writes no larger than `client_mss`; normal MTProto writes then continue without the low chunk size. TCP is a byte stream: `MSG_EOR`, TCP offloads, loss, and retransmission provide no guarantee that write boundaries remain packet, SKB, or retransmitted-segment boundaries. When this option is empty or omitted, `client_mss` remains the kernel MSS for the whole connection and is the only strong segment upper-bound contract. Changes require listener restart/rebind.
   - **Example**:
 
     ```toml
@@ -2311,15 +2311,15 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`ip`](#ip) | `IpAddr` | — | `✘` |
 | [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`client_mss`](#client_mss-serverlisteners) | `String` | `[server].client_mss` | `✘` |
-| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"`, `"nftables"`, or `"pf"` | `false` | `✔` |
-| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✔` |
-| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✔` |
-| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `24` | `✔` |
-| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✔` |
-| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✔` |
-| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✔` |
-| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✔` |
+| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"`, `"nftables"`, or `"pf"` | `false` | `✘` |
+| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✘` |
+| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✘` |
+| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `24` | `✘` |
+| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✘` |
+| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✘` |
+| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✘` |
+| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✘` |
+| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✘` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2357,7 +2357,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
     ```
 ## synlimit (server.listeners)
   - **Constraints / validation**: `false`, `"iptables"`, `"nftables"`, or `"pf"`. Omitted or `false` disables SYN limiting for this listener.
-  - **Description**: Installs per-listener firewall rules for the listener port. `"iptables"` uses Linux `iptables`/`ip6tables` filter rules with the `hashlimit`, `length`, and TTL/hop-limit matches. `"nftables"` uses Linux Telemt-owned tables with per-source `meter` rules and equivalent IPv4/IPv6 classifiers. These Linux rules are inserted early in `INPUT`, accept under-limit SYN packets, and reject over-limit SYN packets with TCP RST so clients retry promptly instead of waiting for a silent DROP timeout. `"pf"` uses FreeBSD PF source tracking in a Telemt anchor with `max-src-conn-rate`; PF applies this rate after TCP three-way handshake completion, accepts under-limit connections, and rejects over-limit new connections until the source rate falls back below the configured window. The generic bucket is controlled by `synlimit_seconds`, `synlimit_hitcount`, and `synlimit_burst` on Linux; PF maps `synlimit_hitcount / synlimit_seconds` to `max-src-conn-rate` and has no direct equivalents for `synlimit_burst`, `synlimit_ios_*`, or `synlimit_hashlimit_*`. Rules are reconciled at runtime and removed during graceful Telemt shutdown; `SIGKILL` cannot be cleaned up by the process. Linux requires CAP_NET_ADMIN. FreeBSD requires root and a main PF ruleset hook such as `anchor "telemt_synlimit/*"`. `synlimit*` changes hot-reload for existing listener endpoints; changing listener `ip` or `port` still requires restart/rebind.
+  - **Description**: Installs startup-owned per-listener firewall rules for the listener port. Linux accepts only `"iptables"` or `"nftables"`; FreeBSD accepts only `"pf"`; other platforms accept only `false`. Linux netfilter rules accept under-limit SYN packets and reject excess packets with TCP RST. PF renders explicit `inet`/`inet6` rules and uses native `max-src-conn-rate`; excess state-creating packets are silently dropped. Startup fails before accept loops if privileges, backend validation, stale-candidate cleanup, or rule application fails. Every `synlimit*` change requires process restart. Combining enabled SYN limiting with `--run-as-user` or `--run-as-group` is rejected until a separate privileged firewall helper exists. Rules are removed during graceful shutdown; `SIGKILL` cannot be cleaned up by the process. Linux requires CAP_NET_ADMIN. FreeBSD requires root and a main PF ruleset hook such as `anchor "telemt_synlimit/*"`.
   - **Operator note**: Telemt does not persist rules with `iptables-persistent`, write `/etc/sysctl.d`, edit systemd limits, or modify `client_mss`. Apply host-level tuning manually if your deployment policy requires it.
   - **Example**:
 

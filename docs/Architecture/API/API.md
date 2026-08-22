@@ -1393,7 +1393,7 @@ Returns the current editable config sections as TOML-shaped JSON, plus the curre
 }
 ```
 
-Top-level sections absent from the config file are absent from the response. Only `GET` and `PATCH` are accepted; any other method returns `405 Method Not Allowed` with `Allow: GET, PATCH`.
+The response is built from the validated, include-expanded configuration and may therefore contain normalized defaults or synthesized listeners that are absent from the root file. Only `GET` and `PATCH` are accepted; any other method returns `405 Method Not Allowed` with `Allow: GET, PATCH`.
 
 ---
 
@@ -1409,7 +1409,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | --- | --- | --- |
 | `Authorization` | when configured | Same token as all other endpoints. |
 | `Content-Type: application/json` | recommended | Not enforced, but body must be valid JSON. |
-| `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. If supplied and it does not match the current on-disk revision, returns `409 revision_conflict`. If omitted, the patch applies unconditionally. |
+| `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. It covers the complete recursive include graph. If supplied and it does not match the current source manifest, returns `409 revision_conflict`. If omitted, the patch applies unconditionally. |
 
 **Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, plus partially editable `server` (only nested `listeners`).
 
@@ -1422,7 +1422,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `server` with keys other than `listeners` | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
 
-**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. File comments and untouched sections are preserved.
+**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. A mutation is written to the single source file that owns every touched semantic section. File comments, the root file when it is not the owner, and all other include files are preserved. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
 
 **Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified.
 
@@ -1437,7 +1437,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `timeout_secs=1..3600` | for `reload=drain` | Bounded old-generation drain interval. Invalid with `reload=instant`. |
 | `failure_policy=keep_new\|rollback` | no | Defaults to `keep_new`. `rollback` applies only through the activation barrier, before old-generation teardown. |
 
-Without a `reload` query parameter, the endpoint preserves the legacy behavior: it writes the patch and the file watcher applies only supported hot fields.
+Without a `reload` query parameter, the endpoint writes the patch and the file watcher applies only supported hot fields. With a reload query, coordinator capacity and status are reserved before the source file is replaced. Runtime-owned changes enqueue the validated immutable snapshot after the atomic write. A process-only patch is persisted with `200`, reports its deferred fields, and does not create a reload operation.
 
 **Success `200` or `202` response body** (`data` field of the standard envelope):
 ```json
@@ -1459,12 +1459,12 @@ Without a `reload` query parameter, the endpoint preserves the legacy behavior: 
 }
 ```
 
-- `revision` — SHA-256 hex of the config file after the write.
+- `revision` — SHA-256 hex of the canonical source manifest after the write, including every recursive include path and its raw bytes.
 - `restart_required` — legacy file-watcher classification retained for compatibility.
 - `runtime_reload_required` — reports whether a full Maestro generation reload is needed for runtime effect.
 - `process_restart_required` and `deferred_process_fields` — report process-owned sockets or paths that remain unchanged by an in-process reload.
 - `changed` — list of top-level section names that differed.
-- `reload` — accepted operation metadata; omitted when no reload query was supplied.
+- `reload` — accepted operation metadata; omitted without a reload query and for process-only patches that cannot change the active generation.
 
 **Status codes:**
 
@@ -1481,6 +1481,7 @@ Without a `reload` query parameter, the endpoint preserves the legacy behavior: 
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |
 | `409` | `revision_conflict` | `If-Match` header supplied but does not match current revision. |
 | `409` | `reload_in_progress` | Another runtime reload is active; the patch is not written. |
+| `409` | `config_patch_not_atomic` | Touched semantic sections have multiple source owners or cannot be mutated as one source-file transaction. |
 | `500` | `internal_error` | I/O or serialization failure. |
 
 **curl example:**
@@ -1515,7 +1516,7 @@ The endpoint returns `202` with `ReloadAccepted`. A concurrent non-terminal relo
 
 Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activating`, `draining`, `succeeded`, `rolled_back`, or `failed`. Terminal statuses include `finished_at_epoch_secs`; failures include `error`. Successful activation may include `warnings` for old-generation cleanup failures and `deferred_process_fields` for process-owned settings.
 
-Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. API, metrics, client TCP/Unix listeners, PID ownership, and logging remain process-scoped; changed bind/path fields are reported as deferred and do not cause Maestro to invoke systemd, containerd, or another process supervisor.
+Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. API, metrics, client TCP/Unix listeners, listener MSS profiles, PID ownership, and logging remain process-scoped. Desired changes to those fields are reported as deferred and are overlaid with the active values before runtime preparation, so the published generation remains an effective-state view. Maestro does not invoke systemd, containerd, or another process supervisor.
 
 Reload preparation requires every configured TLS-front domain to have a non-default cached profile and requires a ready Middle-End pool when direct fallback is disabled. A candidate that does not satisfy either readiness condition fails without replacing the active generation.
 
