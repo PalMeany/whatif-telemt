@@ -7,9 +7,13 @@ use crate::web::capability::{derive_capability, encode_token};
 use crate::web::frame::{self, FrameType};
 
 use super::harness::{
-    PublicSite, RelayFixture, TEST_HOST, TEST_SECRET, batch, build_manager, data_payloads,
-    header_value, http_request, start_echo_backend, start_relay,
+    PublicSite, RelayFixture, TEST_HOST, TEST_SECRET, batch, build_manager,
+    build_manager_with_stats, data_payloads, header_value, http_request, start_echo_backend,
+    start_relay,
 };
+use super::internal_backend_tests::{authenticating_handshake, secure_mode_config};
+use crate::config::WebBackend as Backend;
+use crate::protocol::ProtoTag;
 
 async fn start_fixture(carrier: CarrierMode) -> RelayFixture {
     let backend = start_echo_backend().await;
@@ -261,4 +265,119 @@ async fn wrong_host_and_bad_sequences_are_refused() {
     )
     .await;
     assert_eq!(status, 404);
+}
+
+/// Starts a relay whose streams terminate in this process, like a deployment.
+async fn start_internal_fixture(carrier: CarrierMode) -> RelayFixture {
+    let (manager, _) = build_manager_with_stats(
+        secure_mode_config(),
+        Backend::Internal,
+        carrier,
+        WebLimits::default(),
+    );
+    start_relay(
+        manager,
+        PublicSite::Directory,
+        WebLimits::default(),
+        WebTimeouts::default(),
+    )
+    .await
+}
+
+/// Creates a session over the HTTPS surface and returns its bearer.
+async fn open_session(fixture: &RelayFixture) -> String {
+    let (_, _, page) = http_request(fixture.address, &get(&bridge_url())).await;
+    let bootstrap = bootstrap_from_page(&page);
+    let hello = frame::encode(FrameType::HELLO, 0, &[1]);
+    let (status, headers, _) = http_request(
+        fixture.address,
+        &post(
+            "/api/v1/session",
+            &[
+                ("Authorization", &format!("Bearer {bootstrap}")),
+                ("Content-Type", "application/octet-stream"),
+            ],
+            &hello,
+        ),
+    )
+    .await;
+    assert_eq!(status, 200, "session creation failed");
+    header_value(&headers, "x-session-token")
+        .expect("session token")
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_real_handshake_survives_an_https_lane() {
+    // `https-lanes` drives one request lane per stream. This is the same
+    // handshake the shared `https` carrier accepts, sent the way a lane client
+    // sends it, against streams that terminate in this process.
+    let fixture = start_internal_fixture(CarrierMode::HttpsLanes).await;
+    let token = open_session(&fixture).await;
+
+    let handshake = authenticating_handshake(&TEST_SECRET, ProtoTag::Secure);
+    let uplink = batch(&[
+        (FrameType::OPEN, 1, Vec::new()),
+        (FrameType::DATA, 1, handshake.to_vec()),
+    ]);
+    let (status, headers, _) = http_request(
+        fixture.address,
+        &post(
+            "/api/v1/up",
+            &[
+                ("Authorization", &format!("Bearer {token}")),
+                ("Content-Type", "application/octet-stream"),
+                ("X-Up-Seq", "1"),
+                ("X-Lane-ID", "1"),
+            ],
+            &uplink,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        204,
+        "the lane refused the opening batch: {:?}",
+        header_value(&headers, "x-up-ack")
+    );
+
+    // The relay must answer the lane with something: data, or the CLOSE that
+    // tells the client the stream is gone. Silence is the reported symptom.
+    let mut cursor = "0".to_string();
+    let mut answered = false;
+    for _ in 0..12 {
+        let (status, headers, body) = http_request(
+            fixture.address,
+            &post(
+                "/api/v1/down",
+                &[
+                    ("Authorization", &format!("Bearer {token}")),
+                    ("X-Down-Cursor", &cursor),
+                    ("X-Lane-ID", "1"),
+                ],
+                b"",
+            ),
+        )
+        .await;
+        assert!(
+            status == 200 || status == 204,
+            "the lane downlink answered {status}"
+        );
+        cursor = header_value(&headers, "x-down-cursor")
+            .unwrap_or("0")
+            .to_string();
+        if status == 200 && !body.is_empty() {
+            answered = true;
+            break;
+        }
+        if header_value(&headers, "x-lane-closed") == Some("1") {
+            answered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        answered,
+        "the lane carried the handshake but never answered: a client sits on \"connecting\" here"
+    );
 }

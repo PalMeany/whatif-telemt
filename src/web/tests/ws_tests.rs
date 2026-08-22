@@ -7,13 +7,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::config::{CarrierMode, WebBackend, WebLimits, WebTimeouts};
+use crate::protocol::ProtoTag;
 use crate::web::capability::{derive_capability, encode_token};
 use crate::web::frame::{self, FrameType};
 
 use super::harness::{
-    PublicSite, RelayFixture, TEST_HOST, TEST_SECRET, batch, build_manager, data_payloads,
-    header_value, http_request, start_echo_backend, start_relay,
+    PublicSite, RelayFixture, TEST_HOST, TEST_SECRET, batch, build_manager,
+    build_manager_with_stats, data_payloads, header_value, http_request, start_echo_backend,
+    start_relay,
 };
+use super::internal_backend_tests::{authenticating_handshake, secure_mode_config};
 
 /// Client key from the RFC example; the accept value is checked against it.
 const CLIENT_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -331,4 +334,72 @@ async fn an_empty_binary_message_does_not_tear_down_the_carrier() {
         echoed.extend_from_slice(&data_payloads(&message, 1));
     }
     assert_eq!(echoed, payload);
+}
+
+/// Starts a relay whose streams terminate in this process, like a deployment.
+async fn start_internal_fixture(carrier: CarrierMode) -> RelayFixture {
+    let (manager, _) = build_manager_with_stats(
+        secure_mode_config(),
+        WebBackend::Internal,
+        carrier,
+        WebLimits::default(),
+    );
+    start_relay(
+        manager,
+        PublicSite::Directory,
+        WebLimits::default(),
+        WebTimeouts::default(),
+    )
+    .await
+}
+
+/// Reads whatever the relay sends next, reporting the opcode it arrived on.
+///
+/// A carrier that is working answers a handshake with either data or a CLOSE
+/// for the stream; one that is broken sends a WebSocket close, or nothing.
+async fn next_carrier_event(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    for _ in 0..40 {
+        let (opcode, payload) = read_frame(stream).await?;
+        match opcode {
+            0x2 | 0x8 => return Some((opcode, payload)),
+            _ => continue,
+        }
+    }
+    None
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_real_handshake_survives_a_lane_websocket() {
+    // The mode a lane deployment actually runs, driven by a handshake the
+    // proxy accepts, over a real socket. The echo-backend lane test proves
+    // bytes move; this proves a client could ever get through.
+    let fixture = start_internal_fixture(CarrierMode::WebsocketLanes).await;
+    let address = fixture.address;
+    let token = create_session(address).await;
+    let mut socket = open_socket(address, &format!("tproxy-lane-v1.{token}.1")).await;
+
+    let handshake = authenticating_handshake(&TEST_SECRET, ProtoTag::Secure);
+    send_binary(
+        &mut socket,
+        &batch(&[
+            (FrameType::OPEN, 1, Vec::new()),
+            (FrameType::DATA, 1, handshake.to_vec()),
+        ]),
+    )
+    .await;
+
+    let event = next_carrier_event(&mut socket).await;
+    assert!(
+        event.is_some(),
+        "the lane carrier answered nothing at all: a client would sit on \"connecting\" here"
+    );
+    let (opcode, payload) = event.expect("carrier event");
+    assert_eq!(
+        opcode, 0x2,
+        "the relay closed the lane socket instead of carrying the stream"
+    );
+    assert!(
+        !payload.is_empty(),
+        "the lane delivered an empty carrier message"
+    );
 }

@@ -28,7 +28,7 @@ const CLIENT_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 44));
 /// This is the transform a WEB client actually puts on the carrier: the client
 /// rejects `ee` fake-TLS secrets for WEB proxies, so only the plain (classic)
 /// and `dd` (secure) forms ever reach the relay.
-fn authenticating_handshake(secret: &[u8], proto_tag: ProtoTag) -> [u8; HANDSHAKE_LEN] {
+pub(super) fn authenticating_handshake(secret: &[u8], proto_tag: ProtoTag) -> [u8; HANDSHAKE_LEN] {
     let mut handshake = [0x5Au8; HANDSHAKE_LEN];
     for (index, byte) in handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN]
         .iter_mut()
@@ -62,7 +62,7 @@ fn authenticating_handshake(secret: &[u8], proto_tag: ProtoTag) -> [u8; HANDSHAK
 ///
 /// The handshake decision under test happens before any DC connect, and a dead
 /// loopback upstream keeps the test off the network.
-fn secure_mode_config() -> ProxyConfig {
+pub(super) fn secure_mode_config() -> ProxyConfig {
     let mut config = ProxyConfig::default();
     config.general.use_middle_proxy = false;
     config.general.modes.classic = false;
