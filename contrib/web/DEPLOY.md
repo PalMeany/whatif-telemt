@@ -13,6 +13,24 @@ meant to be run in order as `root` on the target host.
 
 If telemt is already installed and running, skip to step 5.
 
+## Quick path
+
+[`install-web.sh`](../../install-web.sh) automates steps 2-9 of this runbook on a
+clean Debian or Ubuntu host and prints the credentials and the bridge URL at the
+end:
+
+```bash
+git clone https://gitlab.corp.alterra.host/nuvira-backend/telemt-webp.git /usr/local/src/telemt
+cd /usr/local/src/telemt
+./install-web.sh --hostname proxy.example.com --site /path/to/your/site
+```
+
+It refuses to guess at anything that matters: it will not invent a public site,
+will not overwrite an existing configuration, and will not run without a
+hostname that is already canonical. Read the rest of this document before
+trusting a host to it — everything the script writes is described below, and
+steps 0, 1, and 10 onwards are still yours to do.
+
 ## 0. Port layout — decide this first
 
 The bridge page must be fetched over real HTTPS with a publicly trusted
@@ -305,10 +323,15 @@ PY
 ```
 
 ```bash
-curl -sSI "PASTE_THE_PRINTED_URL" | grep -iE 'HTTP/|content-security-policy'
+curl -sS -D - -o /dev/null "PASTE_THE_PRINTED_URL" | grep -iE 'HTTP/|content-security-policy'
 # expect: HTTP/2 200
 #         content-security-policy: default-src 'none'; ... script-src 'nonce-...'
 ```
+
+It must be a **GET**: the bridge is issued only for `GET /`, so `curl -I` sends
+`HEAD`, receives the ordinary index, and makes a healthy relay look broken. The
+`default-src 'self'` policy of the static site is the tell that you fetched the
+index instead of the bridge.
 
 Any other query on `/` must return your ordinary index, not the bridge.
 
