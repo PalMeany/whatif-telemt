@@ -18,6 +18,12 @@ pub(crate) const CAPABILITY_TEXT_LEN: usize = 43;
 /// Raw byte length of a capability, bootstrap token, or session token.
 pub(crate) const TOKEN_BYTES: usize = 32;
 
+/// Length of an MTProxy secret key, before any prefix or fronted domain.
+pub(crate) const SECRET_BYTES: usize = 16;
+
+/// Longest fronted domain an `ee` secret may carry, per DNS limits.
+const MAX_FRONTED_DOMAIN_BYTES: usize = 253;
+
 /// Derives the bridge capability for one hostname and secret.
 pub(crate) fn derive_capability(host: &str, secret: &[u8]) -> [u8; 32] {
     let mut message = Vec::with_capacity(CAPABILITY_CONTEXT.len() + host.len());
@@ -62,20 +68,30 @@ pub(crate) fn token_hash(token: &[u8; TOKEN_BYTES]) -> [u8; 32] {
 /// is retained. `ee` fake-TLS secrets are accepted with the same 17-byte shape
 /// because a client may derive its capability from the secret it was given.
 pub(crate) fn decode_secret(value: &str) -> Result<Vec<u8>, &'static str> {
+    const INVALID: &str = "secret must decode to 16 bytes, optionally dd- or ee-prefixed, with an ee secret optionally carrying its fronted domain";
     let value = value.trim();
-    let decoded = if value.len() == 32 || value.len() == 34 {
-        hex::decode(value).map_err(|_| "secret must decode to 16 bytes, optionally prefixed")?
+    let looks_hex = value.len() >= 32
+        && value.len().is_multiple_of(2)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let decoded = if looks_hex {
+        hex::decode(value).map_err(|_| INVALID)?
     } else {
         URL_SAFE_NO_PAD
             .decode(value.as_bytes())
             .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(value.as_bytes()))
-            .map_err(|_| "secret must decode to 16 bytes, optionally prefixed")?
+            .map_err(|_| INVALID)?
     };
-    if decoded.len() != 16 && decoded.len() != 17 {
-        return Err("secret must decode to 16 bytes, optionally prefixed");
-    }
-    if decoded.len() == 17 && decoded[0] != 0xdd && decoded[0] != 0xee {
-        return Err("17-byte secret must use the dd or ee prefix");
+    match decoded.len() {
+        SECRET_BYTES => {}
+        // `dd` selects random padding; `ee` without a domain is the bare
+        // fake-TLS form.
+        len if len == SECRET_BYTES + 1 && matches!(decoded[0], 0xdd | 0xee) => {}
+        // A fake-TLS secret carries the fronted domain after the key, and the
+        // client keys its bridge capability with the whole decoded value.
+        len if len > SECRET_BYTES + 1
+            && decoded[0] == 0xee
+            && len - SECRET_BYTES - 1 <= MAX_FRONTED_DOMAIN_BYTES => {}
+        _ => return Err(INVALID),
     }
     Ok(decoded)
 }
@@ -155,7 +171,20 @@ mod tests {
                 .len(),
             17
         );
+        // The fake-TLS form telemt actually publishes in its EE-TLS link:
+        // ee | 16-byte key | fronted domain.
+        let fronted = format!(
+            "ee000102030405060708090a0b0c0d0e0f{}",
+            hex::encode("www.google.com")
+        );
+        assert_eq!(decode_secret(&fronted).unwrap().len(), 17 + 14);
         assert!(decode_secret("ab000102030405060708090a0b0c0d0e0f").is_err());
+        // Only `ee` may carry a domain.
+        let dd_fronted = format!(
+            "dd000102030405060708090a0b0c0d0e0f{}",
+            hex::encode("www.google.com")
+        );
+        assert!(decode_secret(&dd_fronted).is_err());
         assert!(decode_secret("00").is_err());
     }
 

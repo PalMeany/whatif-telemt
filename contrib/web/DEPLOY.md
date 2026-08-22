@@ -315,7 +315,17 @@ A WEB-capable client needs **only two values** and derives the capability
 itself; the secret never reaches the page:
 
 - host: `proxy.example.com`
-- secret: the user's 32-hex secret
+- secret: **the EE-TLS secret from the proxy link**, `ee<secret><domain-hex>`
+
+Give users the secret whose mode is enabled. This runbook enables `tls` only,
+so the bare 32-hex secret must not be distributed: it derives a capability that
+reaches the bridge, but the stream it opens speaks the classic transform, which
+`[general.modes] classic = false` refuses and masks — a carrier that looks
+healthy and passes no data. telemt prints the accepted forms at start-up:
+
+```bash
+journalctl -u telemt --no-pager | grep -i "secret form"
+```
 
 For direct MTProto clients, telemt prints `tg://` links at start-up
 (`[general.links] show = "*"`):
@@ -345,7 +355,8 @@ The same series appear on telemt's own metrics endpoint prefixed
 | telemt exits with `No listeners. Exiting.` | no usable `[[server.listeners]]` | check the listener block and that the port is free |
 | Caddy fails to start | telemt already holds 443 | see step 0: the front proxy owns 443 |
 | Every request returns 404, including `/` | `Host` seen by telemt ≠ `web.hostname` | make the front proxy preserve `Host` |
-| Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and secret |
+| Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and the exact secret string the client uses |
+| Client connects, carrier looks healthy, no data ever flows | the distributed secret's mode is disabled (bare secret with `classic = false`) | hand out the EE-TLS secret; check the start-up warning and `telemt_connects_bad` by class |
 | `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `web.listen` |
 | Caddy exits with `permission denied` on a log file | `/var/log/caddy` missing or not writable by `caddy` | drop the `log` block, or `mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy` |
 | Caddy warns `Unnecessary header_up X-Forwarded-For` | Caddy already sets the header | remove the directive |

@@ -84,9 +84,22 @@ URL        = https://<hostname>/?bridge=<capability>
 ```
 
 With `derive_user_profiles = true` every user in `[access.users]` can use the
-WEB transport with the secret they already have — including its `dd` and `ee`
-prefixed forms — and no extra configuration. New users become usable within one
-refresh interval (30 s) of a configuration reload; no restart is needed.
+WEB transport with the secret they already have. The capability is derived for
+every form that secret can take in a proxy link — bare, `dd`-prefixed, and
+`ee`-prefixed both with and without each fronted domain from
+`censorship.tls_domain`/`tls_domains` — so a user may paste whichever secret
+their link contains. New users become usable within one refresh interval (30 s)
+of a configuration reload; no restart is needed.
+
+**Hand out the secret whose mode is enabled.** The bridge capability and the
+MTProto handshake are separate checks: a bare secret derives a capability that
+reaches the bridge, but the stream it opens then speaks the classic transform,
+and `[general.modes] classic = false` refuses it and masks the connection. The
+result looks exactly like a working carrier that passes no data. With the usual
+TLS-only telemt configuration, give users the **EE-TLS** secret
+(`ee<secret><domain-hex>`) from the printed proxy link. telemt logs the accepted
+forms at start-up and warns when a mode a distributed secret would need is
+disabled.
 
 ### Explicit profiles
 

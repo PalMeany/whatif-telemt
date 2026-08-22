@@ -61,7 +61,32 @@ pub(super) fn build_manager(
         .access
         .users
         .insert("tester".to_string(), hex::encode(TEST_SECRET));
+    build_manager_with_config(config, backend, carrier, limits)
+}
+
+/// Builds a manager over a caller-supplied proxy configuration.
+pub(super) fn build_manager_with_config(
+    config: ProxyConfig,
+    backend: WebBackend,
+    carrier: CarrierMode,
+    limits: WebLimits,
+) -> Arc<Manager> {
+    build_manager_with_stats(config, backend, carrier, limits).0
+}
+
+/// Builds a manager and hands back the runtime statistics it feeds, so a test
+/// can tell an accepted handshake from a rejected one.
+pub(super) fn build_manager_with_stats(
+    mut config: ProxyConfig,
+    backend: WebBackend,
+    carrier: CarrierMode,
+    limits: WebLimits,
+) -> (Arc<Manager>, Arc<crate::stats::Stats>) {
+    config
+        .rebuild_runtime_user_auth()
+        .expect("user auth snapshot");
     let generation = test_runtime_generation(1, config);
+    let stats = generation.stats.clone();
     let runtime = WebRuntime::new(Arc::new(arc_swap::ArcSwap::from(generation)));
     let profile = Arc::new(WebProfile {
         name: "tester".to_string(),
@@ -70,7 +95,9 @@ pub(super) fn build_manager(
         capabilities: vec![derive_capability(TEST_HOST, &TEST_SECRET)],
         limits: WebProfileLimits::default().with_defaults(&limits),
     });
-    Manager::new(limits, WebTimeouts::default(), vec![profile], runtime).expect("manager")
+    let manager =
+        Manager::new(limits, WebTimeouts::default(), vec![profile], runtime).expect("manager");
+    (manager, stats)
 }
 
 /// Encodes one frame batch.

@@ -95,7 +95,8 @@ async fn build(
 ) -> Result<()> {
     let web = config.web.clone();
     web.validate()?;
-    let profiles = build_profiles(&web, &config.access.users)?;
+    let fronted = fronted_domains(config);
+    let profiles = build_profiles(&web, &config.access.users, &fronted)?;
     let carrier_address: SocketAddr = web
         .listen
         .parse()
@@ -167,8 +168,9 @@ async fn build(
         manager.clone(),
         runtime.clone(),
         web.clone(),
-        profile_fingerprint(&web, &config.access.users),
+        profile_fingerprint(&web, &config.access.users, &fronted),
     ));
+    log_client_secret_forms(config, &fronted);
     info!(
         hostname = %web.hostname,
         carrier = %web.listen,
@@ -206,11 +208,12 @@ async fn watch_profiles(
         } else {
             &initial_web
         };
-        let next = profile_fingerprint(web, &config.access.users);
+        let fronted = fronted_domains(&config);
+        let next = profile_fingerprint(web, &config.access.users, &fronted);
         if next == fingerprint {
             continue;
         }
-        match build_profiles(web, &config.access.users) {
+        match build_profiles(web, &config.access.users, &fronted) {
             Ok(profiles) => {
                 let count = profiles.len();
                 match manager.replace_profiles(profiles) {
@@ -231,12 +234,17 @@ async fn watch_profiles(
 }
 
 /// Fingerprints every input that changes the derived capability set.
-fn profile_fingerprint(web: &WebConfig, users: &HashMap<String, String>) -> u64 {
+fn profile_fingerprint(
+    web: &WebConfig,
+    users: &HashMap<String, String>,
+    fronted: &[String],
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     web.hostname.hash(&mut hasher);
     web.carrier_mode.as_str().hash(&mut hasher);
     web.derive_user_profiles.hash(&mut hasher);
+    fronted.hash(&mut hasher);
     let mut entries: Vec<(&String, &String)> = users.iter().collect();
     entries.sort();
     for (name, secret) in entries {
@@ -256,11 +264,12 @@ fn profile_fingerprint(web: &WebConfig, users: &HashMap<String, String>) -> u64 
 fn build_profiles(
     web: &WebConfig,
     users: &HashMap<String, String>,
+    fronted: &[String],
 ) -> Result<Vec<Arc<WebProfile>>> {
     let mut profiles = Vec::with_capacity(web.profiles.len() + users.len());
     let mut names = std::collections::HashSet::new();
     for entry in &web.profiles {
-        let profile = explicit_profile(web, entry)?;
+        let profile = explicit_profile(web, entry, fronted)?;
         names.insert(profile.name.clone());
         profiles.push(Arc::new(profile));
     }
@@ -284,7 +293,7 @@ fn build_profiles(
                 name: user.clone(),
                 backend: WebBackend::Internal,
                 carrier: web.carrier_mode,
-                capabilities: capabilities_for(&web.hostname, &decoded),
+                capabilities: capabilities_for(&web.hostname, &decoded, fronted),
                 limits: WebProfileLimits::default().with_defaults(&web.limits),
             }));
         }
@@ -297,14 +306,18 @@ fn build_profiles(
     Ok(profiles)
 }
 
-fn explicit_profile(web: &WebConfig, entry: &WebProfileConfig) -> Result<WebProfile> {
+fn explicit_profile(
+    web: &WebConfig,
+    entry: &WebProfileConfig,
+    fronted: &[String],
+) -> Result<WebProfile> {
     let secret = capability::decode_secret(&entry.secret)
         .map_err(|reason| ProxyError::Config(format!("web profile '{}': {reason}", entry.name)))?;
     Ok(WebProfile {
         name: entry.name.clone(),
         backend: WebBackend::parse(&entry.backend)?,
         carrier: web.profile_carrier_mode(entry),
-        capabilities: capabilities_for(&web.hostname, &secret),
+        capabilities: capabilities_for(&web.hostname, &secret, fronted),
         limits: entry.limits.with_defaults(&web.limits),
     })
 }
@@ -313,17 +326,89 @@ fn explicit_profile(web: &WebConfig, entry: &WebProfileConfig) -> Result<WebProf
 ///
 /// A client derives the capability from the secret it was configured with, so
 /// a bare 16-byte secret also has to match its `dd` and `ee` prefixed forms.
-fn capabilities_for(hostname: &str, secret: &[u8]) -> Vec<[u8; 32]> {
-    let mut result = vec![capability::derive_capability(hostname, secret)];
-    if secret.len() == 16 {
+fn capabilities_for(hostname: &str, secret: &[u8], fronted: &[String]) -> Vec<[u8; 32]> {
+    let mut forms: Vec<Vec<u8>> = vec![secret.to_vec()];
+    if secret.len() == capability::SECRET_BYTES {
         for prefix in [0xddu8, 0xee] {
-            let mut prefixed = Vec::with_capacity(17);
+            let mut prefixed = Vec::with_capacity(1 + secret.len());
             prefixed.push(prefix);
             prefixed.extend_from_slice(secret);
-            result.push(capability::derive_capability(hostname, &prefixed));
+            forms.push(prefixed);
+        }
+        // A fake-TLS secret carries the fronted domain, and telemt publishes
+        // exactly that value in its EE-TLS link. The client keys the bridge
+        // capability with the whole decoded secret, so a deployment whose
+        // users paste the EE-TLS secret only reaches the bridge if the domain
+        // is part of the derivation.
+        for domain in fronted {
+            let mut with_domain = Vec::with_capacity(1 + secret.len() + domain.len());
+            with_domain.push(0xee);
+            with_domain.extend_from_slice(secret);
+            with_domain.extend_from_slice(domain.as_bytes());
+            forms.push(with_domain);
+        }
+    }
+    let mut result: Vec<[u8; 32]> = Vec::with_capacity(forms.len());
+    for form in &forms {
+        let derived = capability::derive_capability(hostname, form);
+        if !result.contains(&derived) {
+            result.push(derived);
         }
     }
     result
+}
+
+/// Every fronted domain an `ee` secret may carry, in EE-TLS link order.
+fn fronted_domains(config: &ProxyConfig) -> Vec<String> {
+    let mut domains = Vec::with_capacity(1 + config.censorship.tls_domains.len());
+    domains.push(config.censorship.tls_domain.clone());
+    for domain in &config.censorship.tls_domains {
+        if !domains.contains(domain) {
+            domains.push(domain.clone());
+        }
+    }
+    domains
+}
+
+/// Reports which secret form clients must be given for this configuration.
+///
+/// A capability derived from a bare secret reaches the bridge, but the stream
+/// it opens then speaks the classic MTProto transform. If the operator has
+/// disabled that mode the handshake is refused and masked, which looks exactly
+/// like a working carrier that passes no data — so it is called out loudly.
+fn log_client_secret_forms(config: &ProxyConfig, fronted: &[String]) {
+    let modes = &config.general.modes;
+    let mut accepted: Vec<&str> = Vec::with_capacity(3);
+    if modes.classic {
+        accepted.push("bare");
+    }
+    if modes.secure {
+        accepted.push("dd");
+    }
+    if modes.tls {
+        accepted.push("ee");
+    }
+    if accepted.is_empty() {
+        warn!("WEB proxy: every proxy mode is disabled, so no client can complete a handshake");
+        return;
+    }
+    info!(
+        forms = accepted.join("/"),
+        fronted = fronted.first().map(String::as_str).unwrap_or(""),
+        "WEB proxy client secret forms accepted by the proxy handshake"
+    );
+    if !modes.classic {
+        warn!(
+            "WEB proxy: general.modes.classic is disabled, so a bare 32-hex secret reaches the \
+             bridge but its stream is refused by the handshake and masked. Hand users the \
+             {} secret from the proxy link instead.",
+            if modes.tls {
+                "EE-TLS (ee…)"
+            } else {
+                "DD (dd…)"
+            }
+        );
+    }
 }
 
 fn resolve_path(value: &str, config_dir: Option<&PathBuf>) -> PathBuf {
@@ -356,13 +441,43 @@ mod profile_tests {
             "alice".to_string(),
             "000102030405060708090a0b0c0d0e0f".to_string(),
         );
-        let profiles = build_profiles(&web, &users).expect("profiles");
+        let profiles = build_profiles(&web, &users, &[]).expect("profiles");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "alice");
         assert_eq!(profiles[0].capabilities.len(), 3);
         assert_eq!(profiles[0].backend, WebBackend::Internal);
         let expected = capability::encode_token(&profiles[0].capabilities[0]);
         assert_eq!(expected, "MHLEY5PmW1GWqJkSrlmJpvJUiLhBH_QKy6yKg8a0JPk");
+    }
+
+    #[test]
+    fn derives_the_fronted_fake_tls_capability() {
+        let web = base_config();
+        let mut users = HashMap::new();
+        users.insert(
+            "alice".to_string(),
+            "000102030405060708090a0b0c0d0e0f".to_string(),
+        );
+        let fronted = vec!["www.google.com".to_string()];
+        let profiles = build_profiles(&web, &users, &fronted).expect("profiles");
+        // bare, dd, ee, and ee carrying the fronted domain
+        assert_eq!(profiles[0].capabilities.len(), 4);
+
+        // The EE-TLS secret telemt publishes must resolve to this profile.
+        let mut published = vec![0xeeu8];
+        published.extend_from_slice(&hex::decode("000102030405060708090a0b0c0d0e0f").expect("hex"));
+        published.extend_from_slice(b"www.google.com");
+        let expected = capability::derive_capability(&web.hostname, &published);
+        assert!(profiles[0].capabilities.contains(&expected));
+    }
+
+    #[test]
+    fn duplicate_fronted_domains_do_not_duplicate_capabilities() {
+        let web = base_config();
+        let secret = hex::decode("000102030405060708090a0b0c0d0e0f").expect("hex");
+        let fronted = vec!["a.example".to_string(), "a.example".to_string()];
+        let capabilities = capabilities_for(&web.hostname, &secret, &fronted);
+        assert_eq!(capabilities.len(), 4);
     }
 
     #[test]
@@ -380,7 +495,7 @@ mod profile_tests {
             "alice".to_string(),
             "000102030405060708090a0b0c0d0e0f".to_string(),
         );
-        let profiles = build_profiles(&web, &users).expect("profiles");
+        let profiles = build_profiles(&web, &users, &[]).expect("profiles");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].carrier, CarrierMode::WebsocketLanes);
         assert!(matches!(profiles[0].backend, WebBackend::Loopback(_)));
@@ -402,7 +517,7 @@ mod profile_tests {
             "bob".to_string(),
             "00000000000000000000000000000000".to_string(),
         );
-        let profiles = build_profiles(&web, &users).expect("profiles");
+        let profiles = build_profiles(&web, &users, &[]).expect("profiles");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "only");
     }
