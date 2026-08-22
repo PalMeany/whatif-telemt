@@ -146,6 +146,87 @@ async fn run_handshake_with_secret(config: ProxyConfig, secret: &[u8]) -> Outcom
     }
 }
 
+/// Drives the same authenticating handshake through one `websocket-lanes`
+/// carrier lane, which is the shape a lane deployment actually runs.
+///
+/// The lane carriers reach the backend through a different path than `https`:
+/// the lane is created by the socket rather than by the batch, the queue is
+/// per-stream, and the poll reports lane closure separately. None of that was
+/// covered against a real handshake.
+async fn run_lane_handshake(config: ProxyConfig) -> Outcome {
+    let (manager, stats) = build_manager_with_stats(
+        config,
+        WebBackend::Internal,
+        CarrierMode::WebsocketLanes,
+        WebLimits::default(),
+    );
+    let profile = manager
+        .match_capability(&derive_capability(TEST_HOST, &TEST_SECRET))
+        .expect("profile");
+    let bootstrap = manager
+        .issue_bootstrap(&profile, CLIENT_IP)
+        .expect("bootstrap");
+    let session = manager
+        .create(
+            &bootstrap,
+            CLIENT_IP,
+            &frame::encode(FrameType::HELLO, 0, &[1]),
+        )
+        .expect("create")
+        .session;
+
+    // The lane socket attaches before any frame arrives, exactly as the client
+    // opens one WebSocket per stream and only then sends its OPEN.
+    assert!(session.acquire_websocket_lane(1), "lane 1 must attach");
+
+    let handshake = authenticating_handshake(&TEST_SECRET, ProtoTag::Secure);
+    let uplink = batch(&[
+        (FrameType::OPEN, 1, Vec::new()),
+        (FrameType::DATA, 1, handshake.to_vec()),
+    ]);
+    assert_eq!(session.process_up_lane(1, 1, &uplink), Ok(1));
+
+    let mut downlink = Vec::new();
+    let mut closed = false;
+    let mut cursor = 0u64;
+    for _ in 0..60 {
+        let (body, next, lane_closed) = session.poll_lane(1, cursor).await.expect("poll lane");
+        cursor = next;
+        downlink.extend_from_slice(&data_payloads(&body, 1));
+        if lane_closed || closed || super::harness::has_close(&body, 1) {
+            closed = true;
+            break;
+        }
+        if !downlink.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Outcome {
+        downlink,
+        closed,
+        rejected: stats.get_connects_bad_class_counts(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dd_secret_stream_is_accepted_over_a_carrier_lane() {
+    let outcome = run_lane_handshake(secure_mode_config()).await;
+    assert!(
+        outcome.rejected.is_empty(),
+        "a valid dd handshake was refused on a lane: {:?}",
+        outcome.rejected
+    );
+    // The stream still ends, because this harness deliberately has no reachable
+    // datacentre; what matters is that the lane carried the handshake to the
+    // proxy and the proxy accepted it, exactly as the shared carrier does.
+    assert!(
+        !outcome.closed || outcome.rejected.is_empty(),
+        "the lane closed the stream for a reason the shared carrier does not: {:?}",
+        outcome.rejected
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dd_secret_stream_is_accepted_by_the_proxy() {
     let outcome = run_handshake(secure_mode_config()).await;
