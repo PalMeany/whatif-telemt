@@ -317,7 +317,7 @@
   - **Ограничения / валидация**: `String`. Если не указан, используется `"https://core.telegram.org/getProxyConfig"`.
   - **Описание**: Необязательный URL для получения `getProxyConfig` (IPv4). Telemt при всегда пытается выполнить новую загрузку с этого URL (и если не задан, использует `https://core.telegram.org/getProxyConfig`).
   - **Example**:
-  
+
     ```toml
     [general]
     proxy_config_v4_url = "https://core.telegram.org/getProxyConfig"
@@ -1893,7 +1893,7 @@
     ```
 ## client_mss
   - **Ограничения / валидация**: `String`. Пустое значение или отсутствие параметра означает, что Telemt не изменяет MSS, выбранный ядром. Поддерживаемые presets: `"extreme-low"` = `88`, `"tspu"` = `92`, `"2in8"` = `256`. Пользовательское десятичное значение должно быть строкой в диапазоне `88..=4096`.
-  - **Описание**: MSS для входящих TCP-соединений клиентов. Значение применяется к TCP listener-сокетам до `listen(2)`, чтобы Linux мог объявить его в SYN/ACK. Параметр влияет только на proxy client TCP listeners и не применяется к API, metrics, Unix sockets, Telegram upstreams, ME sockets или mask backend connections. Изменение требует restart/rebind listener’ов.
+  - **Описание**: Управляет размером сегментов в клиентских соединениях. По умолчанию значение применяется к TCP listener и действует в течение всего соединения. Если в Linux также задан `client_mss_bulk`, Telemt временно ограничивает `TCP_MAXSEG` принятого socket значением `client_mss` на время отправки начального аутентифицированного FakeTLS-ответа (`ServerHello`), а затем восстанавливает bulk MSS при успехе, ошибке записи или отмене задачи. Настройка не влияет на API, metrics, Unix sockets, Telegram upstreams, ME sockets и mask backend connections. Изменение требует перезапуска или повторного создания listener.
   - **Operator note**: Two-tier `synlimit` profile больше не требует автоматического отключения MSS внутри Telemt. Оператор должен сам решить, оставлять MSS shaping для handshake fragmentation или отключать его ради более высокой скорости media.
   - **Performance note**: Низкий MSS предсказуемо увеличивает количество TCP-сегментов. Приблизительный multiplier: `ceil(1460 / client_mss)`.
   - **Пример**:
@@ -1903,8 +1903,8 @@
     client_mss = "tspu"
     ```
 ## client_mss_bulk
-  - **Ограничения / валидация**: `String`. Грамматика та же, что у [`client_mss`](#client_mss) (пусто/не задано, пресеты `"extreme-low"`/`"tspu"`/`"2in8"` либо десятичное число в диапазоне `88..=4096`).
-  - **Описание**: Необязательный MSS для bulk-фазы. Если задан, низкий `client_mss` применяется только на время TLS-handshake (включая инспектируемый DPI ServerHello); как только соединение переходит в фазу relay, MSS клиентского сокета поднимается до `client_mss_bulk` для передачи полезной нагрузки. Так сохраняется anti-DPI фрагментация handshake, но для данных возвращаются пакеты нормального размера — это снижает исходящий packets-per-second примерно во столько раз, каков segment multiplier у `client_mss` (например, ~10x для `"tspu"`). Полезно на хостингах, где abuse-детекция считает packets-per-second, а не полосу. Если пусто/не задано — MSS handshake сохраняется на всё соединение (прежнее поведение). Только Linux; на прочих платформах — no-op.
+  - **Ограничения / валидация**: Только Linux, тип `String`. Грамматика совпадает с [`client_mss`](#client_mss): пустое/отсутствующее значение, пресеты `"extreme-low"`/`"tspu"`/`"2in8"` или десятичное число в диапазоне `88..=4096`. Непустое значение требует хотя бы одного listener с эффективным `client_mss` и должно быть больше handshake-значения каждого участвующего listener. Listener может задать `client_mss = ""` для явного отказа от профиля.
+  - **Описание**: Включает экспериментальный профиль с двумя размерами. Listener использует `client_mss_bulk` с самого начала соединения, включая получение `ClientHello`. При отправке начального аутентифицированного FakeTLS-ответа (`ServerHello`) Telemt временно ограничивает `TCP_MAXSEG` принятого socket значением `client_mss` и использует записи не больше этого значения, затем восстанавливает прежний MSS до обычного MTProto-трафика. Восстановление выполняется при успехе, ошибке записи и отмене задачи. TCP является потоком байтов: `MSG_EOR`, TCP offloads, потери и ретрансляции могут менять наблюдаемые границы capture, поэтому packet-capture release gate остаётся определяющим. Если параметр пуст или отсутствует, `client_mss` остаётся kernel MSS для всего соединения. Изменение требует restart/rebind listener.
   - **Пример**:
 
     ```toml
@@ -2020,7 +2020,7 @@
     ```
 ## mode
   - **Ограничения / валидация**: `tracked`, `notrack` или `hybrid` (чувствителен к регистру, используется нижний регистр).
-  - **Описание**: 
+  - **Описание**:
     - **`tracked`**: не устанавливать notrack-правила, соединения полностью отслеживаются conntrack.
     - **`notrack`**: помечает входящий TCP-трафик к server.port как notrack; цели берутся из `[server.listeners]`, либо из `server.listen_addr_ipv4 / server.listen_addr_ipv6` (неуказанные адреса означают «любой» для этого семейства).
     - **`hybrid`**: notrack применяется только к адресам из `hybrid_listener_ips` (не должно быть пустым, проверяется при загрузке), остальные соединения отслеживаются обычным образом.
@@ -2032,7 +2032,7 @@
     ```
 ## backend
   - **Ограничения / валидация**: `auto`, `nftables`или `iptables` (чувствителен к регистру, используется нижний регистр).
-  - **Описание**: Выбор набора инструментов для применения notrack-правил. 
+  - **Описание**: Выбор набора инструментов для применения notrack-правил.
     - **`auto`**: использует `nft`, если доступен, иначе - `iptables`/`ip6tables`.
     - **`nftables / iptables`**: принудительно выбирает соответствующий backend; при отсутствии бинарника правила не применяются. В nft-режиме используется таблица `inet telemt_conntrack`, в `iptables` — цепочка TELEMT_NOTRACK в таблице raw.
   - **Пример**:
@@ -2237,15 +2237,15 @@
 | [`ip`](#ip) | `IpAddr` | — | `✘` |
 | [`port`](#port-serverlisteners) | `u16` | `server.port` | `✘` |
 | [`client_mss`](#client_mss-serverlisteners) | `String` | `[server].client_mss` | `✘` |
-| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"` или `"nftables"` | `false` | `✔` |
-| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✔` |
-| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✔` |
-| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✔` |
-| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✔` |
-| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✔` |
-| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✔` |
-| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✔` |
+| [`synlimit`](#synlimit-serverlisteners) | `false`, `"iptables"`, `"nftables"` или `"pf"` | `false` | `✘` |
+| [`synlimit_seconds`](#synlimit_seconds-serverlisteners) | `u32` | `60` | `✘` |
+| [`synlimit_hitcount`](#synlimit_hitcount-serverlisteners) | `u32` | `48` | `✘` |
+| [`synlimit_burst`](#synlimit_burst-serverlisteners) | `u32` | `24` | `✘` |
+| [`synlimit_ios_seconds`](#synlimit_ios_seconds-serverlisteners) | `u32` | `1` | `✘` |
+| [`synlimit_ios_hitcount`](#synlimit_ios_hitcount-serverlisteners) | `u32` | `12` | `✘` |
+| [`synlimit_ios_burst`](#synlimit_ios_burst-serverlisteners) | `u32` | `24` | `✘` |
+| [`synlimit_hashlimit_expire_ms`](#synlimit_hashlimit_expire_ms-serverlisteners) | `u32` | `60000` | `✘` |
+| [`synlimit_hashlimit_size`](#synlimit_hashlimit_size-serverlisteners) | `u32` | `32768` | `✘` |
 | [`announce`](#announce) | `String` | — | `✘` |
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
@@ -2282,8 +2282,8 @@
     client_mss = "256"
     ```
 ## synlimit (server.listeners)
-  - **Ограничения / валидация**: `false`, `"iptables"` или `"nftables"`. Если параметр не задан или задан как `false`, SYN limiter для этого listener’а выключен.
-  - **Описание**: Устанавливает per-listener Linux netfilter two-tier SYN-fix rules для порта listener’а. `"iptables"` использует `iptables`/`ip6tables` filter rules с `hashlimit`, `length` и TTL/hop-limit matches. `"nftables"` использует Telemt-owned tables с per-source `meter` rules и эквивалентными IPv4/IPv6 classifiers. Rules вставляются рано в `INPUT`, принимают under-limit SYN packets и отвечают TCP RST на over-limit SYN packets, чтобы клиент быстро переподключался вместо ожидания silent DROP timeout. Generic bucket управляется `synlimit_seconds`, `synlimit_hitcount` и `synlimit_burst`; iOS-like TTL/length bucket управляется `synlimit_ios_*`. Rules reconciled at runtime и удаляются при graceful shutdown Telemt; `SIGKILL` процессом не очищается. Требует CAP_NET_ADMIN. Изменения `synlimit*` hot-reload’ятся для существующих listener endpoints; изменение listener `ip` или `port` по-прежнему требует restart/rebind.
+  - **Ограничения / валидация**: `false`, `"iptables"`, `"nftables"` или `"pf"`. Если параметр отсутствует или равен `false`, SYN limiting для этого listener отключён.
+  - **Описание**: Устанавливает принадлежащие startup-процессу per-listener firewall rules для порта listener. Linux принимает только `"iptables"` или `"nftables"`, FreeBSD — только `"pf"`, остальные платформы — только `false`. Linux netfilter rules принимают SYN packets в пределах лимита и отклоняют превышение с TCP RST. PF формирует отдельные `inet`/`inet6` rules и использует native `max-src-conn-rate`; превышающие лимит state-creating packets молча отбрасываются. При отсутствии privileges, ошибке backend validation, очистки stale candidate или применения rules startup завершается до запуска accept loops. Любое изменение `synlimit*` требует перезапуска процесса. Комбинация включённого SYN limiting с `--run-as-user` или `--run-as-group` отклоняется до появления отдельного privileged firewall helper. Rules удаляются при graceful shutdown; после `SIGKILL` процесс не может их очистить. Linux требует CAP_NET_ADMIN. FreeBSD требует root и hook в основном PF ruleset, например `anchor "telemt_synlimit/*"`.
   - **Operator note**: Telemt не сохраняет rules через `iptables-persistent`, не пишет `/etc/sysctl.d`, не меняет systemd limits и не модифицирует `client_mss`. Host-level tuning применяется оператором вручную.
   - **Пример**:
 
@@ -2297,10 +2297,15 @@
     ip = "::"
     port = 443
     synlimit = "nftables"
+
+    [[server.listeners]]
+    ip = "0.0.0.0"
+    port = 443
+    synlimit = "pf"
     ```
 ## synlimit_seconds (server.listeners)
   - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `60`.
-  - **Описание**: Generic SYN-fix token-bucket interval. Rate равен `synlimit_hitcount / synlimit_seconds` и рендерится в native netfilter rate units (`second`, `minute`, `hour` или `day`). Этот bucket обрабатывает SYN packets, которые не совпали с iOS-like TTL/length classifier.
+  - **Описание**: Generic SYN-fix token-bucket interval. В Linux rate равен `synlimit_hitcount / synlimit_seconds` и рендерится в native netfilter rate units (`second`, `minute`, `hour` или `day`). Этот bucket обрабатывает SYN packets, которые не совпали с iOS-like TTL/length classifier. PF рендерит ту же пару как `max-src-conn-rate hitcount/seconds`.
   - **Пример**:
 
     ```toml
@@ -2312,7 +2317,7 @@
     ```
 ## synlimit_hitcount (server.listeners)
   - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `48`.
-  - **Описание**: Generic SYN-fix token-bucket rate amount. Вместе с `synlimit_seconds` задает разрешенный source-IP SYN rate до того, как excess SYN packets получат TCP RST.
+  - **Описание**: Generic SYN-fix token-bucket rate amount. Вместе с `synlimit_seconds` задаёт разрешённый source-IP SYN rate. Linux netfilter отклоняет превышение с TCP RST; PF молча отбрасывает превышающие лимит state-creating packets.
   - **Пример**:
 
     ```toml
@@ -2323,7 +2328,7 @@
     synlimit_hitcount = 48
     ```
 ## synlimit_burst (server.listeners)
-  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
+  - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `24`.
   - **Описание**: Generic SYN-fix token-bucket burst size. Более высокие значения разрешают short connection bursts с одного source IP перед применением steady-state rate `synlimit_hitcount / synlimit_seconds`.
   - **Пример**:
 
@@ -2332,7 +2337,7 @@
     ip = "0.0.0.0"
     port = 443
     synlimit = "iptables"
-    synlimit_burst = 1
+    synlimit_burst = 24
     ```
 ## synlimit_ios_seconds (server.listeners)
   - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `1`.
@@ -2372,7 +2377,7 @@
     ```
 ## synlimit_hashlimit_expire_ms (server.listeners)
   - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `60000`.
-  - **Описание**: Entry expiration в миллисекундах для iptables/ip6tables hashlimit buckets. nftables meters используют kernel-managed state и не имеют точного аналога этого knob.
+  - **Описание**: Entry expiration в миллисекундах для iptables/ip6tables hashlimit buckets. nftables meters и PF source tracking используют kernel-managed state и не имеют точного аналога этого knob.
   - **Пример**:
 
     ```toml
@@ -2384,7 +2389,7 @@
     ```
 ## synlimit_hashlimit_size (server.listeners)
   - **Ограничения / валидация**: `u32`, должно быть `> 0`. Значение по умолчанию: `32768`.
-  - **Описание**: Hash table size для iptables/ip6tables hashlimit buckets. nftables meters используют kernel-managed state и не имеют точного аналога этого knob.
+  - **Описание**: Hash table size для iptables/ip6tables hashlimit buckets. nftables meters и PF source tracking используют kernel-managed state и не имеют точного аналога этого knob.
   - **Пример**:
 
     ```toml
