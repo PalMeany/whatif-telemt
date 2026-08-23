@@ -265,7 +265,7 @@ A sparse JSON object containing only the top-level config sections to modify. Ea
 
 **Rejected keys:**
 - `access` → `400 access_not_editable` (users/secrets are managed via `POST/PATCH /v1/users`).
-- `network`, or any unknown top-level key → `400 section_not_editable`.
+- `network`, `web`, or any unknown top-level key → `400 section_not_editable`.
 - `server` with any key other than `listeners` (e.g. `port`, `api`, `admin_api`) → `400 field_not_editable`.
 - An object with no editable keys → `400 bad_request` (empty patch).
 
@@ -1418,7 +1418,7 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | Key | HTTP | `error.code` |
 | --- | --- | --- |
 | `access` | `400` | `access_not_editable` |
-| `network`, or any unknown top-level key | `400` | `section_not_editable` |
+| `network`, `web`, or any unknown top-level key | `400` | `section_not_editable` |
 | `server` with keys other than `listeners` | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
 
@@ -1521,6 +1521,29 @@ Runtime generation activation rebuilds statistics, upstream routing, replay and 
 Reload preparation requires every configured TLS-front domain to have a non-default cached profile and requires a ready Middle-End pool when direct fallback is disabled. A candidate that does not satisfy either readiness condition fails without replacing the active generation.
 
 The revision is verified again after preparation. With `failure_policy=rollback`, a changed revision or revision read failure rolls the candidate back; with `failure_policy=keep_new`, the condition is reported in `warnings` and activation continues.
+
+## WEB Proxy Management
+
+The API provides partial operational control for WEB mode; it does not expose a dedicated `/v1/web` resource.
+
+| Operation | Current contract |
+| --- | --- |
+| Read or patch `[web]`, vhosts, profiles, decoys, timeouts, or limits | Not exposed. `GET /v1/config` omits `[web]`; a `web` key in `PATCH /v1/config` returns `400 section_not_editable`. |
+| Persist `server.listeners` | Supported through `PATCH /v1/config`. Arrays replace wholesale. A changed WEB listener is process-owned and remains deferred until process restart. |
+| Apply an externally edited WEB config | Update the owning TOML source, call `POST /v1/system/reload`, then poll `GET /v1/system/reload/{id}`. |
+| Inspect restart requirements | Read `deferred_process_fields` from reload status. `server.listeners` and `web.limits` require process restart. |
+| Manage access users | Use `/v1/users`. Creating a user does not add it to `web.vhosts.profiles`; profile membership remains file-managed. |
+| Disable one user | `POST /v1/users/{username}/disable` updates admission immediately and cancels the user's active sessions. |
+| Rotate a profiled user's secret | Use `/v1/users/{username}/rotate-secret`; the config watcher rebuilds WEB capabilities from the new access snapshot. The API returns the secret, not a `tg://webproxy` link. |
+| Read WEB-specific runtime statistics | No WEB-specific endpoint exists in the current API surface. |
+
+`web.enabled`, `web.timeouts`, vhosts, profiles, and decoy snapshots are runtime-generation fields. WEB listener inventory and trust policy, plus all `[web.limits]`, are process-owned. A successful reload can therefore activate the runtime-owned subset while reporting the process-owned subset as deferred.
+
+Before deleting a user referenced by a WEB profile, remove and apply the profile first. User mutations validate the complete resulting configuration, so a dangling WEB profile is rejected rather than persisted.
+
+The API whitelist is evaluated against the direct TCP peer and does not use the WEB listener's `X-Forwarded-For` policy. Keep the API on a separate loopback or private bind, use a narrow whitelist and a non-empty exact `auth_header`, and do not expose it through the public WEB vhost.
+
+Deployment, TLS-terminator examples, links, and WEB-specific verification are documented in the [WEB proxy guide](../../WEB/WEB_PROXY.en.md).
 
 ## Mutation Semantics
 
