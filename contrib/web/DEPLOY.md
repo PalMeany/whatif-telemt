@@ -224,18 +224,22 @@ trusted_proxies = ["127.0.0.0/8", "::1/128"]
 `derive_user_profiles = true` gives every `[access.users]` entry WEB access
 with the secret it already has — no second credential to distribute.
 
-**Use `carrier_mode = "https"`.** The relay implements four carrier modes, but
-the current client implements exactly one: the HTTPS long-poll through its
-hidden WebView. Its own
+**Use `carrier_mode = "https"`.** The relay implements four carrier modes. The
+carrier itself lives in the bridge page's JavaScript, which is byte-identical to
+the reference relay's for all four, so a client needs no new transport code for
+any of them, and `https-lanes` is driven end to end by telemt's own tests.
+
+The two WebSocket carriers are **not yet verified against a shipping client**
+(as of 2026-08). The client's own
 [plan](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/web-proxy-plan.md)
 states that "the v1 HTTPS long-poll carrier is operational; the deployed bridge
 does not require a public WebSocket or another carrier", and the client performs
 no carrier negotiation — so it cannot tell you it does not speak the mode you
-chose. Selecting `https-lanes`, `websocket`, or `websocket-lanes` produces a
-deployment where the bridge page renders, the session is created, every
-server-side counter looks healthy, and the client sits on "connecting" forever
-while its 10-second bridge and 30-second write-progress deadlines drive an
-endless reconnect loop. telemt warns about this at start-up.
+chose. A mode a client cannot drive produces a deployment where the bridge page
+renders, the session is created, every server-side counter looks healthy, and
+the client sits on "connecting" forever while its 10-second bridge and 30-second
+write-progress deadlines drive an endless reconnect loop. telemt warns at
+start-up about a profile that selects a WebSocket carrier.
 
 ## 7. Caddy
 
@@ -394,7 +398,7 @@ The same series appear on telemt's own metrics endpoint prefixed
 | Every request returns 404 behind a CDN | the CDN forwards its own origin hostname, and `web.hostname` must be the name clients type | set `web.hostname` to the client-facing name and normalise `Host` at the origin proxy |
 | Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and the exact secret string the client uses |
 | Client connects, carrier looks healthy, no data ever flows | no mode a WEB client can speak is enabled | set `secure = true` and hand out the `dd…` secret; the reject shows as `direct_modes_disabled` in the bad-connect classes |
-| Client stays on "connecting" forever; sessions are created and counters look healthy; it connects instantly after switching to another proxy and back | `carrier_mode` is not `https`, and the client implements no other carrier | set `carrier_mode = "https"` and restart |
+| Client stays on "connecting" forever; sessions are created and counters look healthy; it connects instantly after switching to another proxy and back | `carrier_mode` selects a WebSocket carrier the client's WebView does not drive | set `carrier_mode = "https"` and restart |
 | Client rejects the secret in its proxy settings | an `ee` fake-TLS secret was handed out | WEB clients accept only plain and `dd` secrets |
 | `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `web.listen` |
 | Caddy exits with `permission denied` on a log file | `/var/log/caddy` missing or not writable by `caddy` | drop the `log` block, or `mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy` |
@@ -415,11 +419,22 @@ install -m 0755 target/release/telemt /usr/bin/telemt
 systemctl restart telemt
 ```
 
-Configuration-only changes are picked up by the config watcher, except
-`web.hostname`, `web.listen`, `web.admin_listen`, `public_dir`, and
-`public_upstream`, which are read once at start-up. Capability profiles —
-`[access.users]` and `[[web.profiles]]` — are re-derived after a reload within
-30 s, so adding a user needs no restart.
+Configuration-only changes are picked up by the config watcher, but under
+`[web]` only the capability profiles reload: `[access.users]`,
+`[[web.profiles]]`, and the keys that shape them (`derive_user_profiles`,
+`carrier_mode`, each profile's `backend` and `[web.profiles.limits]`). Adding a
+user therefore needs no restart, and a rotated or deleted secret loses the
+sessions it opened.
+
+The relay re-derives that set on a periodic refresh rather than as a step of the
+reload, so revocation is eventual, not immediate — restart telemt when a leaked
+secret has to stop relaying at a known moment.
+
+Every other `[web]` key is read once at start-up and needs a restart:
+`enabled`, `hostname`, `listen`, `admin_listen`, `public_dir`,
+`public_upstream`, `trusted_proxies`, `[web.limits]`, and `[web.timeouts]`.
+That includes `enabled`: a reload cannot turn the transport off, which is why
+step 15 restarts.
 
 ## 15. Rollback and uninstall
 
@@ -440,3 +455,21 @@ rm -rf /etc/telemt /var/lib/telemt
 systemctl daemon-reload
 userdel telemt && groupdel telemt
 ```
+
+## Appendix: deliberate differences from the reference relay
+
+telemt implements the reference relay's wire contract, and none of these is
+visible to a conforming client. They are listed because they will surprise
+anyone reading the reference's own documentation alongside this runbook.
+
+| Difference | Why |
+|---|---|
+| A `websocket-lanes` session may hold twice `max_streams_per_session` lanes, and a lane past the stream ceiling gets a per-stream `CLOSE` instead of a refused upgrade | the reference's refused upgrade is fatal for the whole bridge; a `CLOSE` is a failure every client already handles |
+| `Host` matching ignores case, a trailing dot, and any port | the reference is byte-exact on `hostname` or `hostname:443`, which 404s everything behind a non-443 origin port or a `Host`-rewriting CDN |
+| The bridge page carries a variable-length padding comment | without it `GET /` is the same length on every deployment, so its `Content-Length` alone separates a bridge fetch from an index fetch |
+| The downlink long poll is jittered | an idle carrier otherwise polls on an exact 25 s period forever; the jitter only ever shortens the park, so no client deadline moves |
+| Per-address ceilings count an IPv6 client per `/64` | a subscriber is routinely handed a whole `/64`, so exact-address keying would make those ceilings decorative; both are off by default |
+| The loopback-MTProxy backend is kept alongside in-process termination | it is the reference's only mode, so keeping it costs nothing; in-process stays the default and the recommended mode |
+
+Full reasoning is in
+[`WEB_PROXY.en.md`](../../docs/Advanced_settings/WEB_PROXY.en.md#deliberate-differences-from-the-reference-relay).

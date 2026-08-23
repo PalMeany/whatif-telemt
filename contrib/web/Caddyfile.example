@@ -8,7 +8,34 @@
 #   sed -i 's/proxy\.example\.com/YOUR.HOSTNAME/g' /etc/caddy/Caddyfile
 #   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
+{
+	# Caddy's admin API otherwise listens on 127.0.0.1:2019 on every installed
+	# host, and it can rewrite this configuration.
+	admin off
+	servers {
+		# Without this Caddy also serves HTTP/3: it binds UDP/443 and appends
+		# `Alt-Svc: h3=":443"` to every response including the bridge page,
+		# advertising an endpoint no firewall recipe here opens.
+		protocols h1 h2
+		# read_header sheds a header slowloris at this hop, before it reaches
+		# the relay's accept cap. read_body bounds a slow request body while
+		# staying well above web.timeouts.long_poll_ms — it limits reading the
+		# request, not the wait for the response, so parked polls are safe.
+		timeouts {
+			read_header 10s
+			read_body 60s
+		}
+	}
+}
+
 proxy.example.com {
+	# No `encode` and no Strict-Transport-Security, both deliberate. Compression
+	# adds a length side-channel over the operator's own responses and halves the
+	# amplitude of the relay's bridge-page padding; HSTS writes a permanent
+	# "this device contacted this host" record into the client's HSTS store, a
+	# device-side artefact a circumvention origin should not create. A valid
+	# certificate and the automatic 80->443 redirect already cover the threat.
+
 	# Every path goes to the relay: the bridge, the transport endpoints, and
 	# the operator's own site are all served by telemt through one origin.
 	# A separately hosted path would give an active prober something to
@@ -28,6 +55,21 @@ proxy.example.com {
 			read_timeout 0s
 			write_timeout 0s
 		}
+	}
+
+	# A stopped relay would otherwise answer with Caddy's own 502 page, which
+	# names the server. This gives every path the same short body an ordinary
+	# site returns while its backend is down; no path is special-cased.
+	handle_errors {
+		header {
+			Cache-Control "no-store"
+			Content-Security-Policy "default-src 'self'; style-src 'self'; img-src 'self'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+			Permissions-Policy "camera=(), microphone=(), geolocation=()"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+		}
+		respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
 	}
 }
 
