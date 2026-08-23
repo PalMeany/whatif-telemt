@@ -39,7 +39,7 @@ use body::{CollectBodyError, CollectedBody, collect_body};
 use decoy::serve_decoy;
 use request::{
     bearer_token_hash, binary_content_type, bridge_candidate, canonical_request_host,
-    canonical_u64_header, client_ip, match_profile,
+    canonical_u64_header, client_ip, compatible_cookie_header, match_profile,
 };
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -231,7 +231,7 @@ async fn handle_api(
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
 ) -> HttpResponse {
-    if request.uri().query().is_some() || request.headers().contains_key(header::COOKIE) {
+    if request.uri().query().is_some() || !compatible_cookie_header(&request) {
         return serve_decoy(request, vhost, true, &runtime).await;
     }
     let Some(client_ip) = client_ip(&request, peer, client_ip_source, trusted_proxy_cidrs) else {

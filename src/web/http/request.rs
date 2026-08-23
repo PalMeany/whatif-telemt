@@ -141,6 +141,16 @@ pub(super) fn binary_content_type<B>(request: &Request<B>) -> bool {
         && value.is_some_and(|value| value.eq_ignore_ascii_case("application/octet-stream"))
 }
 
+/// Accepts no Cookie or the one empty value emitted by restricted Windows WebView2.
+pub(super) fn compatible_cookie_header<B>(request: &Request<B>) -> bool {
+    let values = request.headers().get_all(header::COOKIE);
+    let mut values = values.iter();
+    match values.next() {
+        None => true,
+        Some(value) => value.as_bytes().is_empty() && values.next().is_none(),
+    }
+}
+
 /// Parses one canonical unsigned decimal carrier sequence header.
 pub(super) fn canonical_u64_header<B>(request: &Request<B>, name: &'static str) -> Option<u64> {
     let values = request.headers().get_all(name);
@@ -266,5 +276,47 @@ mod tests {
             .body(())
             .unwrap();
         assert!(canonical_u64_header(&leading_zero, "x-up-seq").is_none());
+    }
+
+    #[test]
+    fn cookie_header_accepts_only_absent_or_one_empty_value() {
+        let absent = Request::new(());
+        assert!(compatible_cookie_header(&absent));
+
+        let empty = Request::builder()
+            .header(header::COOKIE, "")
+            .body(())
+            .unwrap();
+        assert!(compatible_cookie_header(&empty));
+
+        let nonempty = Request::builder()
+            .header(header::COOKIE, "state=unexpected")
+            .body(())
+            .unwrap();
+        assert!(!compatible_cookie_header(&nonempty));
+
+        let whitespace = Request::builder()
+            .header(header::COOKIE, " ")
+            .body(())
+            .unwrap();
+        assert!(!compatible_cookie_header(&whitespace));
+
+        let mut duplicate_empty = Request::new(());
+        duplicate_empty
+            .headers_mut()
+            .append(header::COOKIE, "".parse().unwrap());
+        duplicate_empty
+            .headers_mut()
+            .append(header::COOKIE, "".parse().unwrap());
+        assert!(!compatible_cookie_header(&duplicate_empty));
+
+        let mut duplicate_mixed = Request::new(());
+        duplicate_mixed
+            .headers_mut()
+            .append(header::COOKIE, "".parse().unwrap());
+        duplicate_mixed
+            .headers_mut()
+            .append(header::COOKIE, "state=unexpected".parse().unwrap());
+        assert!(!compatible_cookie_header(&duplicate_mixed));
     }
 }
