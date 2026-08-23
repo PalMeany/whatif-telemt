@@ -4,11 +4,19 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn write_temp_config(contents: &str) -> PathBuf {
+    // The counter is not decoration: these tests run in parallel and a
+    // nanosecond clock is not guaranteed to differ between two of them, so a
+    // timestamp alone lets one test load another's configuration and fail with
+    // an error message from a file it never wrote.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time must be after unix epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("telemt-load-memory-envelope-{nonce}.toml"));
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "telemt-load-memory-envelope-{nonce}-{sequence}.toml"
+    ));
     fs::write(&path, contents).expect("temp config write must succeed");
     path
 }
