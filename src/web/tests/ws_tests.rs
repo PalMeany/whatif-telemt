@@ -160,6 +160,20 @@ async fn read_binary(stream: &mut TcpStream) -> Option<Vec<u8>> {
     None
 }
 
+/// Reads server frames until the close frame arrives, returning its code.
+async fn read_close_code(stream: &mut TcpStream) -> Option<u16> {
+    for _ in 0..40 {
+        let (opcode, payload) = read_frame(stream).await?;
+        if opcode == 0x8 {
+            if payload.len() < 2 {
+                return None;
+            }
+            return Some(u16::from_be_bytes([payload[0], payload[1]]));
+        }
+    }
+    None
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multiplexed_websocket_carrier_round_trip() {
     let fixture = start_fixture(CarrierMode::Websocket).await;
@@ -310,30 +324,23 @@ async fn a_ping_between_fragments_does_not_lose_the_message() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_empty_binary_message_does_not_tear_down_the_carrier() {
+async fn an_empty_binary_message_tears_down_the_carrier() {
+    // Every binary message on this carrier is a bounded batch of complete
+    // frames, so a batch of none is a grammar violation, exactly as the
+    // reference treats it. Keepalive is a protocol Ping, which is why nothing
+    // legitimate lands here.
     let fixture = start_fixture(CarrierMode::Websocket).await;
     let address = fixture.address;
     let token = create_session(address).await;
     let mut socket = open_socket(address, &format!("tproxy-v1.{token}")).await;
 
     send_binary(&mut socket, b"").await;
-    let payload = b"still-here".to_vec();
-    send_binary(
-        &mut socket,
-        &batch(&[
-            (FrameType::OPEN, 1, Vec::new()),
-            (FrameType::DATA, 1, payload.clone()),
-        ]),
-    )
-    .await;
-    let mut echoed = Vec::new();
-    while echoed.len() < payload.len() {
-        let Some(message) = read_binary(&mut socket).await else {
-            break;
-        };
-        echoed.extend_from_slice(&data_payloads(&message, 1));
-    }
-    assert_eq!(echoed, payload);
+
+    // The carrier ends, and it ends with a protocol close rather than a
+    // normal one: a client that respects close codes must be told it may
+    // reconnect instead of that the session finished cleanly.
+    let closed = read_close_code(&mut socket).await;
+    assert_eq!(closed, Some(1002));
 }
 
 /// Starts a relay whose streams terminate in this process, like a deployment.

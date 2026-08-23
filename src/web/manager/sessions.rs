@@ -102,20 +102,48 @@ impl Manager {
         client_ip: IpAddr,
         body: &[u8],
     ) -> std::result::Result<CreateOutcome, WebError> {
-        // The client's protocol version is read but not yet acted on: v1 is the
-        // only version this relay speaks, and answering a newer HELLO with the
-        // v1 WELCOME is the downgrade signal a later client needs. Refusing it
-        // outright would be a 404 that a client cannot tell apart from "this
-        // host is not a relay at all".
-        let client_version = frame::parse_hello(body).map_err(|_| WebError::Protocol)?;
+        // Validated before the bootstrap is touched, exactly as the reference
+        // orders it: the one-shot bootstrap keys its replay on the body digest,
+        // so consuming it on a malformed HELLO would make the client's retry
+        // with a correct one fail authentication instead of succeeding.
+        frame::parse_hello(body).map_err(|_| WebError::Protocol)?;
         let raw = decode_token(token).ok_or(WebError::Authentication)?;
         let hash = token_hash(&raw);
         let body_digest = sha256(body);
         let now = Instant::now();
         let bucket = ip_bucket(client_ip);
 
+        // The idempotent replay is answered first and on its own. A
+        // byte-identical retry of a committed creation is a pure no-op in the
+        // reference, and the bridge page reissues exactly that request after
+        // every 503 — so reaping ahead of this branch would let an ordinary
+        // retry close a neighbour's live session in the same address bucket.
+        {
+            let guard = self.state.lock();
+            let Some(entry) = guard.bootstraps.get(&hash) else {
+                return Err(WebError::Authentication);
+            };
+            if now > entry.expires {
+                return Err(WebError::Authentication);
+            }
+            if entry.used {
+                let digest_matches = bool::from(entry.body_digest.ct_eq(&body_digest));
+                let Some(session) = entry.session.clone() else {
+                    return Err(WebError::Authentication);
+                };
+                if !digest_matches {
+                    return Err(WebError::Authentication);
+                }
+                return Ok(CreateOutcome {
+                    token: entry.session_token.clone(),
+                    welcome: frame::encode(FrameType::WELCOME, 0, &[]),
+                    session,
+                });
+            }
+        }
+
         // Reclaim this address's own abandoned sessions before its ceiling is
-        // measured. Taken before the lock, because inspecting a session takes
+        // measured. Taken outside the lock, because inspecting a session takes
         // the session lock and the order is always session before manager.
         if self.limits.max_sessions_per_ip != 0 {
             self.reap_bucket(bucket);
@@ -123,25 +151,14 @@ impl Manager {
 
         let mut guard = self.state.lock();
         let state = &mut *guard;
+        // Re-read under the lock: the bootstrap may have expired, been revoked
+        // by a reload, or been committed by a racing creation while the reap
+        // ran without it.
         let Some(entry) = state.bootstraps.get(&hash) else {
             return Err(WebError::Authentication);
         };
-        if now > entry.expires {
+        if now > entry.expires || entry.used {
             return Err(WebError::Authentication);
-        }
-        if entry.used {
-            let digest_matches = bool::from(entry.body_digest.ct_eq(&body_digest));
-            let Some(session) = entry.session.clone() else {
-                return Err(WebError::Authentication);
-            };
-            if !digest_matches {
-                return Err(WebError::Authentication);
-            }
-            return Ok(CreateOutcome {
-                token: entry.session_token.clone(),
-                welcome: frame::encode(FrameType::WELCOME, 0, &[]),
-                session,
-            });
         }
         let profile = entry.profile.clone();
         let issuance_ip = entry.issuance_ip;
@@ -225,8 +242,7 @@ impl Manager {
             session = created.id,
             profile = %profile.name,
             carrier = created.carrier_mode().as_str(),
-            client_version,
-            negotiated = client_version.min(frame::PROTOCOL_VERSION),
+            version = frame::PROTOCOL_VERSION,
             "WEB session created"
         );
         Ok(CreateOutcome {
@@ -245,12 +261,13 @@ impl Manager {
     /// catches up — a grace period plus a cleanup interval later, which is
     /// exactly long enough to look like the proxy is simply broken.
     ///
-    /// Only sessions silent for twice the long-poll period are taken. A
-    /// healthy carrier re-polls, or pings, well inside that window, so a live
-    /// session belonging to a different client behind the same address is
-    /// never displaced.
+    /// Only sessions silent past the reconnect grace are taken. That is the
+    /// same window the idle reaper uses, and it is deliberately wider than the
+    /// long-poll period: a WebSocket carrier is kept alive by protocol
+    /// ping/pong rather than by a poll, so a healthy but quiet one can sit
+    /// well past `2 x long_poll_ms` without being abandoned.
     fn reap_bucket(&self, bucket: IpAddr) {
-        let idle = Duration::from_millis(self.timeouts.long_poll_ms.saturating_mul(2));
+        let idle = Duration::from_millis(self.timeouts.reconnect_grace_ms);
         let sessions: Vec<Arc<Session>> = {
             let guard = self.state.lock();
             guard

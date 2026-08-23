@@ -22,11 +22,21 @@ use crate::web::http::{Relay, WebBody, request_timeout_response};
 use crate::web::manager::Manager;
 use crate::web::runtime::WebRuntime;
 
-/// Concurrent carrier connections one relay accepts.
-const MAX_CARRIER_CONNECTIONS: usize = 4096;
-
 /// Concurrent admin connections one relay accepts.
 const MAX_ADMIN_CONNECTIONS: usize = 64;
+
+/// Deadline for the request head of an admin connection.
+const ADMIN_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connections held back to answer an exhausted carrier budget.
+///
+/// The refusal is itself bounded, so a flood cannot turn "out of connection
+/// slots" into unbounded work; past this the socket really is dropped.
+const MAX_CARRIER_OVERFLOW_CONNECTIONS: usize = 256;
+
+/// Deadline for reading the head of a connection that is only going to be
+/// refused, and for writing that refusal.
+const OVERFLOW_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Smallest read buffer hyper accepts.
 const MIN_HTTP_BUFFER: usize = 8 * 1024;
@@ -37,7 +47,8 @@ pub(crate) async fn serve_carrier(
     relay: Arc<Relay>,
     shutdown: CancellationToken,
 ) {
-    let permits = Arc::new(Semaphore::new(MAX_CARRIER_CONNECTIONS));
+    let permits = Arc::new(Semaphore::new(relay.limits.max_carrier_connections));
+    let overflow_permits = Arc::new(Semaphore::new(MAX_CARRIER_OVERFLOW_CONNECTIONS));
     // Hyper covers both the request-head deadline and the keep-alive idle wait
     // with one timer, so the larger of the two configured bounds is used: a
     // shorter one would close idle carrier connections the client still owns.
@@ -65,10 +76,29 @@ pub(crate) async fn serve_carrier(
                 continue;
             }
         };
-        let Ok(permit) = permits.clone().try_acquire_owned() else {
-            debug!(peer = %peer, "Dropping WEB carrier connection: budget exhausted");
-            relay.manager.count_carrier_connection_dropped();
-            continue;
+        let permit = match permits.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                // Capacity pressure is answered, not dropped. The bridge page
+                // retries only on 503; a closed socket reaches it as the front
+                // proxy's 502, which every carrier treats as fatal, so one
+                // dropped connection costs the client its whole session rather
+                // than a second of delay. This mirrors the reference, which has
+                // no accept ceiling at all and answers capacity with 503.
+                let Ok(overflow) = overflow_permits.clone().try_acquire_owned() else {
+                    debug!(peer = %peer, "Dropping WEB carrier connection: budget exhausted");
+                    relay.manager.count_carrier_connection_dropped();
+                    continue;
+                };
+                debug!(peer = %peer, "Refusing WEB carrier connection: budget exhausted");
+                relay.manager.count_retry_later();
+                let _ = stream.set_nodelay(true);
+                tokio::spawn(async move {
+                    let _overflow = overflow;
+                    let _ = tokio::time::timeout(OVERFLOW_DEADLINE, serve_overflow(stream)).await;
+                });
+                continue;
+            }
         };
         let _ = stream.set_nodelay(true);
         let relay = relay.clone();
@@ -160,8 +190,16 @@ pub(crate) async fn serve_admin(
                     )
                 }
             });
-            let connection = http1::Builder::new()
-                .serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+            // The same bound the carrier listener gets. Without it, sixty-four
+            // loopback connections that never finish a request head hold every
+            // admin slot and the health probes stop answering.
+            let mut builder = http1::Builder::new();
+            builder
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(ADMIN_HEADER_TIMEOUT)
+                .keep_alive(true);
+            let connection =
+                builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
             if let Err(error) = connection.await {
                 debug!(peer = %peer, error = %error, "WEB admin connection ended");
             }
@@ -181,4 +219,22 @@ pub(crate) async fn bind(address: SocketAddr, purpose: &str) -> Option<TcpListen
             None
         }
     }
+}
+
+/// Answers one connection that arrived past the carrier budget.
+///
+/// Keep-alive is off: the point is to hand back the retryable answer and free
+/// the socket, not to hold a slot the relay does not have.
+async fn serve_overflow(stream: tokio::net::TcpStream) {
+    let service = service_fn(|_request: Request<Incoming>| async move {
+        Ok::<Response<WebBody>, Infallible>(request_timeout_response())
+    });
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(OVERFLOW_DEADLINE)
+        .keep_alive(false);
+    let _ = builder
+        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+        .await;
 }

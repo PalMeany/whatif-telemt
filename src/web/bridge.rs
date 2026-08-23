@@ -111,6 +111,20 @@ fn padding(rng: &SecureRandom) -> String {
     out
 }
 
+/// SHA-256 of `DOCUMENT`, the template as written, before `render` substitutes
+/// the per-response nonce and padding.
+///
+/// Pinned against `internal/bridge/page.go` at tproxy-server revision
+/// `2873a08`. The only intended difference between the two documents is our
+/// `<!--__PADDING__-->` node; `contrib/web/check-bridge-parity.sh` is what
+/// proves nothing else has drifted when the reference is bumped.
+///
+/// Kept beside `DOCUMENT` rather than inside the test module: it documents an
+/// invariant about the constant below, and an editor of that constant has to
+/// see it.
+#[cfg(test)]
+const DOCUMENT_SHA256: &str = "f557658486175673e6a508d86826f1485f9292cd75055f224c64aaf5db9366e2";
+
 /// Reference bridge document, kept byte-identical to the upstream carrier.
 const DOCUMENT: &str = r####"<!doctype html>
 <html lang="en">
@@ -493,6 +507,45 @@ addEventListener('pagehide',()=>close(true),{once:true});
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_document_matches_the_pinned_reference_digest() {
+        // This document *is* the client: 18 KB of minified JavaScript that
+        // implements all four carriers in the WebView. A fork of it produces a
+        // client-visible failure with no server-side symptom — the relay keeps
+        // answering 200/204 while every session dies somewhere nobody can
+        // attach a debugger — so it is pinned rather than reviewed by eye.
+        // The template is hashed before `render` substitutes the nonce and the
+        // variable-length padding, both of which change on every response.
+        let digest = hex::encode(crate::crypto::sha256(DOCUMENT.as_bytes()));
+        assert_eq!(
+            digest, DOCUMENT_SHA256,
+            "the bridge document changed. It is kept byte-identical to \
+             internal/bridge/page.go at tproxy-server revision 2873a08, with \
+             the <!--__PADDING__--> node as the single intended difference. If \
+             this edit is deliberate, run contrib/web/check-bridge-parity.sh \
+             against a tproxy-server checkout and update DOCUMENT_SHA256 in \
+             the same commit; otherwise revert it."
+        );
+    }
+
+    #[test]
+    fn padding_node_is_the_only_difference_from_the_reference_document() {
+        // The parity script and the digest above both rest on this: exactly one
+        // line of ours has no counterpart upstream. If a second intentional
+        // divergence is ever added, both need updating together.
+        let ours: Vec<&str> = DOCUMENT.lines().collect();
+        let without_padding: Vec<&str> = ours
+            .iter()
+            .copied()
+            .filter(|line| *line != "<!--__PADDING__-->")
+            .collect();
+        assert_eq!(
+            ours.len() - without_padding.len(),
+            1,
+            "the padding comment must appear exactly once, on its own line"
+        );
+    }
 
     #[test]
     fn renders_all_placeholders() {

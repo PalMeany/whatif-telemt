@@ -127,7 +127,7 @@ impl StaticSite {
 /// A decoded byte that is not valid UTF-8, a NUL, or any other control
 /// character is refused outright rather than normalised, so the decoded form
 /// can be matched against the site map without a second escaping rule.
-fn percent_decode(value: &str) -> Option<String> {
+pub(crate) fn percent_decode(value: &str) -> Option<String> {
     if !value.contains('%') {
         return Some(value.to_string());
     }

@@ -991,6 +991,16 @@ async fn run_telemt_core(
         std::process::exit(1);
     }
 
+    // Everything about `[web]` that can be checked without binding is checked
+    // here, while the process can still report a useful error: after the drop
+    // below it may no longer be able to read the site directory it was told to
+    // serve, and after the listeners are live a failure is a restart loop.
+    let web_config_dir = config_path.parent().map(std::path::Path::to_path_buf);
+    if let Err(error) = crate::web::preflight(&config, web_config_dir.as_ref()) {
+        error!(%error, "WEB proxy configuration is invalid. Exiting.");
+        std::process::exit(1);
+    }
+
     // On Unix, caller supplies privilege drop after bind (may require root for port < 1024).
     drop_after_bind();
 
@@ -1019,15 +1029,15 @@ async fn run_telemt_core(
 
     // The WEB carrier resolves its runtime pieces per stream, so it follows
     // configuration reloads through the active generation like every listener.
-    crate::web::start(
-        &config,
-        config_path
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .as_ref(),
-        active_runtime.clone(),
-    )
-    .await;
+    if let Err(error) =
+        crate::web::start(&config, web_config_dir.as_ref(), active_runtime.clone()).await
+    {
+        // `web.enabled = true` is a request for a transport. Carrying on
+        // without it leaves the unit green while every client gets the front
+        // proxy's 502, which is the failure operators cannot see.
+        error!(%error, "WEB proxy failed to start. Exiting.");
+        std::process::exit(1);
+    }
 
     shutdown::wait_for_shutdown(
         process_started_at,
