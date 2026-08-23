@@ -23,6 +23,7 @@ mod logging;
 mod network;
 mod policies;
 mod server;
+mod web;
 
 pub use access::{AccessConfig, CidrRateLimitKey, RateLimitBps};
 #[allow(unused_imports)]
@@ -43,7 +44,17 @@ pub use policies::{
 pub use server::{
     CLIENT_MSS_2IN8, CLIENT_MSS_EXTREME_LOW, CLIENT_MSS_MAX, CLIENT_MSS_MIN, CLIENT_MSS_TSPU,
     ConntrackBackend, ConntrackControlConfig, ConntrackMode, ConntrackPressureProfile,
-    ListenerConfig, ServerConfig, SynLimitMode, TimeoutsConfig,
+    ListenerConfig, ListenerTransport, ServerConfig, SynLimitMode, TimeoutsConfig,
+    WebClientIpSource,
+};
+#[allow(unused_imports)]
+pub use web::{
+    WebCarrier, WebConfig, WebDecoyConfig, WebLimitsConfig, WebProfileConfig, WebSecretMode,
+    WebTimeoutsConfig, WebVhostConfig,
+};
+pub(crate) use web::{
+    WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeVhost, WebStaticAsset,
+    WebStaticSite,
 };
 
 fn default_quota_state_path() -> PathBuf {

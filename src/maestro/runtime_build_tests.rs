@@ -3,6 +3,7 @@ use super::*;
 fn test_listener(port: u16) -> crate::config::ListenerConfig {
     crate::config::ListenerConfig {
         ip: "127.0.0.1".parse().unwrap(),
+        transport: crate::config::ListenerTransport::Mtproxy,
         port: Some(port),
         client_mss: None,
         synlimit: crate::config::SynLimitMode::Off,
@@ -18,6 +19,8 @@ fn test_listener(port: u16) -> crate::config::ListenerConfig {
         announce_ip: None,
         proxy_protocol: None,
         reuse_allow: false,
+        web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
+        web_trusted_proxy_cidrs: Vec::new(),
     }
 }
 
@@ -80,6 +83,7 @@ fn listener_announcement_is_runtime_owned_when_bind_identity_is_stable() {
     let mut old = ProxyConfig::default();
     old.server.listeners.push(crate::config::ListenerConfig {
         ip: "0.0.0.0".parse().unwrap(),
+        transport: crate::config::ListenerTransport::Mtproxy,
         port: Some(443),
         client_mss: None,
         synlimit: crate::config::SynLimitMode::Off,
@@ -95,6 +99,8 @@ fn listener_announcement_is_runtime_owned_when_bind_identity_is_stable() {
         announce_ip: None,
         proxy_protocol: None,
         reuse_allow: false,
+        web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
+        web_trusted_proxy_cidrs: Vec::new(),
     });
     let mut desired = old.clone();
     desired.server.listeners[0].announce = Some("proxy.example".to_string());
@@ -141,6 +147,27 @@ fn runtime_only_change_does_not_require_process_rebind() {
     let mut new = old.clone();
     new.censorship.tls_domain = "reload.example".to_string();
     assert!(deferred_process_fields(&old, &new).is_empty());
+}
+
+#[test]
+fn web_allocation_limits_are_deferred_until_restart() {
+    let mut old = ProxyConfig::default();
+    old.rebuild_runtime_user_auth().unwrap();
+    old.rebuild_runtime_web().unwrap();
+    let mut desired = old.clone();
+    desired.web.limits.max_sessions_global += 1;
+
+    let resolved = resolve_reload_config(&old, &desired);
+
+    assert_eq!(
+        resolved.deferred_process_fields,
+        vec!["web.limits".to_string()]
+    );
+    assert_eq!(
+        resolved.effective.web.limits.max_sessions_global,
+        old.web.limits.max_sessions_global
+    );
+    assert!(!resolved.runtime_changed);
 }
 
 #[test]

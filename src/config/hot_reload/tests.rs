@@ -123,6 +123,7 @@ fn listener_synlimit_fields_are_process_owned() {
     let mut old = sample_config();
     old.server.listeners.push(ListenerConfig {
         ip: "0.0.0.0".parse().unwrap(),
+        transport: crate::config::ListenerTransport::Mtproxy,
         port: Some(443),
         client_mss: None,
         synlimit: SynLimitMode::Iptables,
@@ -138,6 +139,8 @@ fn listener_synlimit_fields_are_process_owned() {
         announce_ip: None,
         proxy_protocol: None,
         reuse_allow: false,
+        web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
+        web_trusted_proxy_cidrs: Vec::new(),
     });
     let mut new = old.clone();
     new.server.port = 8443;

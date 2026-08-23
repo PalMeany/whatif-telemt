@@ -120,6 +120,7 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
         if let Ok(ipv4) = ipv4_str.parse::<IpAddr>() {
             config.server.listeners.push(ListenerConfig {
                 ip: ipv4,
+                transport: ListenerTransport::Mtproxy,
                 port: Some(config.server.port),
                 client_mss: None,
                 synlimit: SynLimitMode::default(),
@@ -135,6 +136,8 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
                 announce_ip: None,
                 proxy_protocol: None,
                 reuse_allow: false,
+                web_client_ip_source: WebClientIpSource::XForwardedFor,
+                web_trusted_proxy_cidrs: Vec::new(),
             });
         }
         if let Some(ipv6_str) = &config.server.listen_addr_ipv6
@@ -142,6 +145,7 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
         {
             config.server.listeners.push(ListenerConfig {
                 ip: ipv6,
+                transport: ListenerTransport::Mtproxy,
                 port: Some(config.server.port),
                 client_mss: None,
                 synlimit: SynLimitMode::default(),
@@ -157,6 +161,8 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
                 announce_ip: None,
                 proxy_protocol: None,
                 reuse_allow: false,
+                web_client_ip_source: WebClientIpSource::XForwardedFor,
+                web_trusted_proxy_cidrs: Vec::new(),
             });
         }
     }
@@ -211,5 +217,6 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
     validate_logging_config(&config.logging)?;
     validate_upstreams(config)?;
     config.rebuild_runtime_user_auth()?;
+    config.rebuild_runtime_web()?;
     Ok(())
 }

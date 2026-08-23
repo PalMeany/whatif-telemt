@@ -131,6 +131,7 @@ mod tests {
     fn listener_with_synlimit(synlimit: SynLimitMode) -> ListenerConfig {
         ListenerConfig {
             ip: "127.0.0.1".parse().unwrap(),
+            transport: crate::config::ListenerTransport::Mtproxy,
             port: Some(443),
             client_mss: None,
             synlimit,
@@ -146,6 +147,8 @@ mod tests {
             announce_ip: None,
             proxy_protocol: None,
             reuse_allow: false,
+            web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
+            web_trusted_proxy_cidrs: Vec::new(),
         }
     }
 

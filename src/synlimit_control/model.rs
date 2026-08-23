@@ -260,6 +260,7 @@ mod tests {
     fn listener(ip: IpAddr, port: Option<u16>, synlimit: SynLimitMode) -> ListenerConfig {
         ListenerConfig {
             ip,
+            transport: crate::config::ListenerTransport::Mtproxy,
             port,
             client_mss: None,
             synlimit,
@@ -275,6 +276,8 @@ mod tests {
             announce_ip: None,
             proxy_protocol: None,
             reuse_allow: false,
+            web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
+            web_trusted_proxy_cidrs: Vec::new(),
         }
     }
 

@@ -24,6 +24,12 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
  - [server.conntrack_control](#serverconntrack_control)
  - [server.api](#serverapi)
  - [server.listeners](#serverlisteners)
+ - [web](#web)
+ - [web.limits](#weblimits)
+ - [web.timeouts](#webtimeouts)
+ - [web.vhosts](#webvhosts)
+ - [web.vhosts.decoy](#webvhostsdecoy)
+ - [web.vhosts.profiles](#webvhostsprofiles)
  - [timeouts](#timeouts)
  - [censorship](#censorship)
  - [censorship.tls_fetch](#censorshiptls_fetch)
@@ -2324,6 +2330,9 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
 | [`reuse_allow`](#reuse_allow) | `bool` | `false` | `✘` |
+| [`transport`](#transport-serverlisteners) | `"mtproxy"` oder `"web"` | `"mtproxy"` | `✘` |
+| [`web_client_ip_source`](#web_client_ip_source-serverlisteners) | `"x_forwarded_for"` | `"x_forwarded_for"` | `✘` |
+| [`web_trusted_proxy_cidrs`](#web_trusted_proxy_cidrs-serverlisteners) | `IpNetwork[]` | `[]` | `✘` |
 
 ## ip
   - **Einschränkungen / Validierung**: Erforderliches Feld. Muss ein `IpAddr` sein.
@@ -2516,6 +2525,142 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
     ip = "0.0.0.0"
     reuse_allow = false
     ```
+
+## transport (server.listeners)
+  - **Einschränkungen / Validierung**: `"mtproxy"` oder `"web"`.
+  - **Beschreibung**: Wählt das vom Listener akzeptierte Protokoll. Ein WEB-Listener empfängt unverschlüsseltes HTTP/1.1 von einem vertrauenswürdigen TLS-Terminator und erfordert einen Prozessneustart. Er muss `proxy_protocol = false` und `reuse_allow = false` verwenden; `client_mss`, `synlimit`, `announce` und `announce_ip` sind nicht zulässig.
+  - **Beispiel**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "127.0.0.1"
+    port = 18080
+    transport = "web"
+    proxy_protocol = false
+    web_trusted_proxy_cidrs = ["127.0.0.1/32"]
+    ```
+
+## web_client_ip_source (server.listeners)
+  - **Einschränkungen / Validierung**: Die erste WEB-Implementierung unterstützt ausschließlich `"x_forwarded_for"`.
+  - **Beschreibung**: Wählt die L7-Quelle der ursprünglichen Client-IP. Telemt akzeptiert genau eine kanonische `X-Forwarded-For`-Adresse und nur dann, wenn der direkte TCP-Peer zu `web_trusted_proxy_cidrs` gehört.
+
+## web_trusted_proxy_cidrs (server.listeners)
+  - **Einschränkungen / Validierung**: Nicht leeres CIDR-Array nur für WEB; ein `/0`-Netz wird abgelehnt. Für einen MTProxy-Listener ist das Feld ungültig.
+  - **Beschreibung**: Vertrauensgrenze für den unmittelbar vorgeschalteten NGINX- oder HAProxy-Peer. Tragen Sie nur Adressen ein, die diesen Listener direkt erreichen können, und veröffentlichen Sie den unverschlüsselten Listener niemals in einem nicht vertrauenswürdigen Netz.
+
+
+# [web]
+
+Der WEB-Modus transportiert MTProxy-Datenverkehr von Telegram Desktop über HTTPS, dessen TLS-Verbindung von einem externen NGINX oder HAProxy terminiert wird. Telemt empfängt unverschlüsseltes HTTP/1.1 auf einem privaten Listener mit `transport = "web"`. Lesen Sie vor der Aktivierung die [vollständige WEB-Bereitstellungsanleitung](../WEB/WEB_PROXY.de.md).
+
+| Schlüssel | Typ | Default | Hot-Reload |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `false` | `✔` |
+| `carrier` | `"https"` oder `"https-lanes"` | `"https"` | `✔` |
+| `limits` | Tabelle | begrenzte Defaults | `✘` |
+| `timeouts` | Tabelle | begrenzte Defaults | `✔` |
+| `vhosts` | Tabellen-Array | `[]` | `✔` |
+
+`enabled = true` erfordert mindestens einen durch die Netzwerkrichtlinie zugelassenen WEB-Listener, einen vhost und mindestens ein Profil in jedem vhost. `carrier = "https"` behält den serialisierten HTTPS-Transport bei. Mit `carrier = "https-lanes"` erhalten Stream null und jeder logische Stream eigene Uplink-Sequenzen, Downlink-Cursor, Wiederholungen und Long Polls; dieser Carrier erfordert `max_http_handlers >= 2` und öffentliches HTTP/2 am TLS-Terminator, um anwendungsseitiges Head-of-Line-Blocking zwischen Streams zu entfernen. Ein Reload wendet `carrier` nur auf neu ausgegebene Bridge-Sitzungen an. Das Deaktivieren von WEB beendet nach dem Reload die Ausgabe neuer Bridge- und Session-Zugangsdaten; zum Widerrufen aktiver Sitzungen eines einzelnen Benutzers verwenden Sie die Users-API.
+
+# [web.limits]
+
+Diese prozessweiten Obergrenzen begrenzen alle WEB-Register, Warteschlangen, Request-Bodys, statischen Snapshots und Admission-Pfade. Alle Werte werden gemeinsam validiert: Eigentümerbezogene Grenzen dürfen die globalen Grenzen nicht überschreiten, Queue-Reserven müssen den Fortschritt von Control Frames gewährleisten, Body-Reservierungen müssen in ihr globales Budget passen und alle deklarierten Byte-Grenzen müssen in `memory_envelope_bytes` passen. Jede Änderung in dieser Tabelle erfordert einen Prozessneustart.
+
+| Schlüssel | Typ | Default | Beschreibung |
+| --- | --- | --- | --- |
+| `max_header_bytes` | `usize` | `16384` | Maximale Bytes in einem HTTP-Request-Head. |
+| `max_body_bytes` | `usize` | `2097152` | Maximale Größe eines gesammelten Carrier-Request-Bodys. |
+| `max_frame_payload_bytes` | `usize` | `1048576` | Maximale Nutzlast eines WEB-Frames. |
+| `carrier_batch_bytes` | `usize` | `2097152` | Maximale Größe eines kodierten Downlink-Batches. |
+| `max_frames_per_body` | `usize` | `4096` | Maximale Zahl geparster oder ausgegebener Frames pro Carrier-Body. |
+| `max_http_connections` | `usize` | `1024` | Prozessweit akzeptierte WEB-HTTP-Verbindungen. |
+| `max_http_handlers` | `usize` | `512` | Prozessweit gleichzeitig ausgeführte HTTP-Handler; HTTPS-Lanes dürfen höchstens die Hälfte mit Long Polls belegen, der Rest bleibt für Session-, Uplink- und Steuerarbeit verfügbar. |
+| `max_body_readers` | `usize` | `32` | Prozessweit gleichzeitig gesammelte Request-Bodys. |
+| `max_body_bytes_global` | `usize` | `67108864` | Globales Byte-Budget für gesammelte Bodys. |
+| `max_sessions_global` | `usize` | `128` | Prozessweit aktive WEB-Sitzungen. |
+| `max_sessions_per_ip` | `usize` | `16` | Aktive Sitzungen pro weitergeleiteter Client-IP. |
+| `max_streams_per_session` | `usize` | `128` | Standardgrenze aktiver logischer Streams pro Sitzung. |
+| `max_streams_global` | `usize` | `4096` | Prozessweit aktive logische Streams. |
+| `max_stream_handshakes` | `usize` | `256` | Gleichzeitig ausgeführte innere MTProxy-Handshakes. |
+| `max_tombstones_per_session` | `usize` | `4096` | Pro Sitzung gespeicherte IDs geschlossener Streams. |
+| `pending_bytes_per_session` | `usize` | `33554432` | Eingereihte Daten- und Steuerbytes pro Sitzung. |
+| `pending_bytes_global` | `usize` | `536870912` | Prozessweit eingereihte Daten- und Steuerbytes. |
+| `pending_items_per_session` | `usize` | `16384` | Eingereihte Daten- und Steuerelemente pro Sitzung. |
+| `pending_items_global` | `usize` | `262144` | Prozessweit eingereihte Daten- und Steuerelemente. |
+| `control_bytes_per_session` | `usize` | `262144` | Nur für Control Frames verfügbares Byte-Budget pro Sitzung. |
+| `control_bytes_global` | `usize` | `16777216` | Prozessweites, nur für Control Frames verfügbares Byte-Budget. |
+| `max_bootstraps_global` | `usize` | `512` | Prozessweit aktive Bootstrap-Zugangsdaten. |
+| `max_bootstraps_per_ip` | `usize` | `64` | Aktive Bootstrap-Zugangsdaten pro Client-IP. |
+| `max_vhosts` | `usize` | `8` | Konfigurierte virtuelle WEB-Hosts. |
+| `max_profiles` | `usize` | `32` | WEB-Profile über alle vhosts. |
+| `max_static_files` | `usize` | `4096` | Einträge statischer Snapshots über alle vhosts. |
+| `max_static_file_bytes` | `usize` | `8388608` | Maximale Größe einer statischen Datei. |
+| `max_static_bytes` | `usize` | `67108864` | Bytes statischer Snapshots über alle vhosts. |
+| `memory_envelope_bytes` | `usize` | `805306368` | Deklarierter Rahmen für HTTP-Heads, Bodys, Queues und statische Snapshots; maximal 4 GiB. |
+| `new_bootstraps_per_minute` | `u32` | `1200` | Nachhaltige prozessweite Ausgaberate für Bootstraps. |
+| `new_bootstraps_burst` | `u32` | `256` | Prozessweiter Burst für die Bootstrap-Ausgabe. |
+| `new_sessions_per_minute` | `u32` | `600` | Nachhaltige prozessweite Erstellungsrate für Sitzungen. |
+| `new_sessions_burst` | `u32` | `128` | Prozessweiter Burst für die Sitzungserstellung. |
+| `new_streams_per_minute` | `u32` | `6000` | Nachhaltige Erstellungsrate für logische Streams. |
+| `new_streams_burst` | `u32` | `512` | Prozessweiter Burst für die Stream-Erstellung. |
+
+# [web.timeouts]
+
+Alle Timeouts werden in Sekunden angegeben und müssen im Bereich `1..=3600` liegen. Die längste Request-Deadline muss kleiner als `http_idle_secs` sein.
+
+| Schlüssel | Typ | Default | Hot-Reload | Beschreibung |
+| --- | --- | --- | --- | --- |
+| `header_secs` | `u64` | `10` | `✔` | Empfang eines vollständigen HTTP-Request-Heads. |
+| `body_secs` | `u64` | `30` | `✔` | Sammeln eines authentifizierten Carrier-Bodys. |
+| `stream_handshake_secs` | `u64` | `10` | `✔` | Abschluss eines inneren MTProxy-Handshakes. |
+| `long_poll_secs` | `u64` | `25` | `✔` | Maximale Dauer eines leeren Downlink-Long-Polls. |
+| `bootstrap_lifetime_secs` | `u64` | `120` | `✔` | Lebensdauer ungenutzter Bootstraps und geschlossener Token-Replay-Marker. |
+| `reconnect_grace_secs` | `u64` | `120` | `✔` | Maximale Carrier-Inaktivität bis zum Schließen der Sitzung. |
+| `http_idle_secs` | `u64` | `75` | `✔` | Idle-Lebensdauer einer WEB-HTTP-Keep-Alive-Verbindung. |
+| `shutdown_secs` | `u64` | `15` | `✔` | Deadline für das kontrollierte Beenden von WEB. |
+| `decoy_header_secs` | `u64` | `30` | `✔` | Deadline für Verbindung und Response-Head eines HTTP-Decoys. |
+
+# [[web.vhosts]]
+
+| Schlüssel | Typ | Erforderlich | Hot-Reload | Beschreibung |
+| --- | --- | --- | --- | --- |
+| `host` | `String` | ja | `✔` | Eindeutiger, kanonischer ACE-FQDN in Kleinbuchstaben ohne Port, Pfad, Zugangsdaten oder abschließenden Punkt. |
+| `public_addr` | `SocketAddr` | ja | `✔` | Konkrete öffentliche IP auf Port `443`; wird im Ziel-Tupel des inneren Relays verwendet. |
+| `decoy` | Tabelle | ja | `✔` | Gewöhnlicher Site-Fallback für nicht authentifizierten oder ungültigen Datenverkehr. |
+| `profiles` | Tabellen-Array | bei aktiviertem WEB | `✔` | Explizite Benutzer und Client-Secret-Modi für diesen Hostnamen. |
+
+Die weitergeleitete Client-Adresse und `public_addr` müssen dieselbe IP-Familie verwenden. Der Hostname wird bei der Validierung normalisiert und muss von Telegram Desktop akzeptiert werden.
+
+# [web.vhosts.decoy]
+
+Genau ein Decoy-Modus ist erforderlich:
+
+| Modus | Erforderliche Schlüssel | Validierung |
+| --- | --- | --- |
+| `http_upstream` | `upstream` | Ein `http://`-Origin mit Loopback-, Link-Local- oder privater IP-Adresse als Literal; keine Zugangsdaten, kein Pfad, Query oder Fragment. |
+| `static_directory` | `directory`; optional `index = "index.html"` | Absolutes reales Verzeichnis und ein sicherer Index-Dateiname. Symlinks und Pfade außerhalb des Verzeichnisses werden abgelehnt; der unveränderliche Snapshot wird innerhalb von `[web.limits]` geladen. |
+
+# [[web.vhosts.profiles]]
+
+| Schlüssel | Typ | Erforderlich | Default | Beschreibung |
+| --- | --- | --- | --- | --- |
+| `user` | `String` | ja | — | Vorhandener Schlüssel aus `[access.users]`. |
+| `secret_mode` | `"plain"` oder `"dd"` | ja | — | Exakte Secret-Darstellung für Telegram Desktop. `ee` wird nicht unterstützt. |
+| `max_sessions` | `usize` | nein | `web.limits.max_sessions_global` | Aktive Sitzungen für dieses Profil. |
+| `max_streams` | `usize` | nein | `web.limits.max_streams_global` | Aktive logische Streams für dieses Profil. |
+| `max_streams_per_session` | `usize` | nein | `web.limits.max_streams_per_session` | Aktive logische Streams in einer Profilsitzung. |
+
+Profilgrenzen müssen ungleich null sein und dürfen die zugehörigen globalen Grenzen nicht überschreiten. Doppelte `(user, secret_mode)`-Profile in einem vhost werden abgelehnt.
+
+## WEB-Lebenszyklus und API-Verwaltung
+
+- Config-Watcher und Generations-Reload wenden `web.enabled`, `web.carrier`, `web.timeouts`, vhosts, Profile und Decoy-Snapshots ohne Prozessneustart an. Bestehende Sitzungen behalten Carrier, Grenzen und Deadlines ihres Erstellungszeitpunkts; neu ausgegebene Bridge-Sitzungen verwenden die aktive Generation.
+- Bestand und Vertrauensrichtlinie der WEB-Listener unter `server.listeners` sowie alle Werte in `web.limits` sind prozesseigen und erfordern einen Neustart.
+- Es gibt keinen eigenen Endpunkt `/v1/web`. `GET /v1/config` lässt `[web]` aus und `PATCH /v1/config` lehnt einen Schlüssel `web` mit `400 section_not_editable` ab.
+- Zum entfernten Anwenden einer WEB-Richtlinie ändern Sie die zuständige TOML-Datei und rufen `POST /v1/system/reload` auf. Prüfen Sie anschließend `GET /v1/system/reload/{id}` und dessen `deferred_process_fields`. Starten Sie Telemt neu, wenn das Feld `server.listeners` oder `web.limits` enthält.
+- Vorhandene Access-Benutzer können über `/v1/users` erstellt, geändert, rotiert, aktiviert, deaktiviert und gelöscht werden. Das Erstellen eines Benutzers fügt kein WEB-Profil hinzu. Das Deaktivieren aktualisiert die Admission sofort und beendet die aktiven Sitzungen dieses Benutzers.
+- `PATCH /v1/config` kann `server.listeners` einschließlich der WEB-Listener-Felder speichern; ein geänderter WEB-Listener wird jedoch erst nach einem Prozessneustart aktiv.
 
 
 # [timeouts]

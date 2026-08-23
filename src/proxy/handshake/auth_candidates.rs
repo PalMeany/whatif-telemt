@@ -11,6 +11,12 @@ pub(super) struct MtprotoCandidateValidation {
     pub(super) encryptor: AesCtr,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum MtprotoModePolicy {
+    Configured,
+    Web(WebSecretMode),
+}
+
 pub(super) fn sni_hint_hash(sni: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     for byte in sni.bytes() {
@@ -146,6 +152,7 @@ pub(super) fn validate_mtproto_secret_candidate(
     secret: &[u8; ACCESS_SECRET_BYTES],
     config: &ProxyConfig,
     is_tls: bool,
+    mode_policy: MtprotoModePolicy,
 ) -> Option<MtprotoCandidateValidation> {
     let mut dec_key_input = Zeroizing::new(Vec::with_capacity(PREKEY_LEN + secret.len()));
     dec_key_input.extend_from_slice(dec_prekey);
@@ -163,7 +170,7 @@ pub(super) fn validate_mtproto_secret_candidate(
         decrypted[PROTO_TAG_POS + 3],
     ];
     let proto_tag = ProtoTag::from_bytes(tag_bytes)?;
-    if !mode_enabled_for_proto(config, proto_tag, is_tls) {
+    if !mode_enabled_for_proto_with_policy(config, proto_tag, is_tls, mode_policy) {
         return None;
     }
 
@@ -267,6 +274,28 @@ pub(super) fn mode_enabled_for_proto(
     proto_tag: ProtoTag,
     is_tls: bool,
 ) -> bool {
+    mode_enabled_for_proto_with_policy(
+        config,
+        proto_tag,
+        is_tls,
+        MtprotoModePolicy::Configured,
+    )
+}
+
+fn mode_enabled_for_proto_with_policy(
+    config: &ProxyConfig,
+    proto_tag: ProtoTag,
+    is_tls: bool,
+    policy: MtprotoModePolicy,
+) -> bool {
+    if let MtprotoModePolicy::Web(secret_mode) = policy {
+        return match secret_mode {
+            WebSecretMode::Plain => {
+                matches!(proto_tag, ProtoTag::Intermediate | ProtoTag::Abridged)
+            }
+            WebSecretMode::Dd => matches!(proto_tag, ProtoTag::Secure),
+        };
+    }
     match proto_tag {
         ProtoTag::Secure => {
             if is_tls {
@@ -276,6 +305,46 @@ pub(super) fn mode_enabled_for_proto(
             }
         }
         ProtoTag::Intermediate | ProtoTag::Abridged => config.general.modes.classic,
+    }
+}
+
+#[cfg(test)]
+mod web_mode_tests {
+    use super::*;
+
+    #[test]
+    fn web_secret_mode_isolates_inner_protocol_tags() {
+        let config = ProxyConfig::default();
+        assert!(mode_enabled_for_proto_with_policy(
+            &config,
+            ProtoTag::Abridged,
+            false,
+            MtprotoModePolicy::Web(WebSecretMode::Plain),
+        ));
+        assert!(mode_enabled_for_proto_with_policy(
+            &config,
+            ProtoTag::Intermediate,
+            false,
+            MtprotoModePolicy::Web(WebSecretMode::Plain),
+        ));
+        assert!(!mode_enabled_for_proto_with_policy(
+            &config,
+            ProtoTag::Secure,
+            false,
+            MtprotoModePolicy::Web(WebSecretMode::Plain),
+        ));
+        assert!(mode_enabled_for_proto_with_policy(
+            &config,
+            ProtoTag::Secure,
+            false,
+            MtprotoModePolicy::Web(WebSecretMode::Dd),
+        ));
+        assert!(!mode_enabled_for_proto_with_policy(
+            &config,
+            ProtoTag::Intermediate,
+            false,
+            MtprotoModePolicy::Web(WebSecretMode::Dd),
+        ));
     }
 }
 
