@@ -20,7 +20,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::{debug, info, trace, warn};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::config::{ProxyConfig, UnknownSniAction};
+use crate::config::{ProxyConfig, UnknownSniAction, WebSecretMode};
 use crate::crypto::{AesCtr, SecureRandom, sha256};
 use crate::error::{HandshakeResult, ProxyError};
 use crate::protocol::constants::*;
@@ -58,6 +58,7 @@ pub(crate) use self::auth_probe::{AuthProbeSaturationState, AuthProbeState};
 #[cfg(test)]
 pub use self::mtproto::handle_mtproto_handshake;
 pub use self::mtproto::handle_mtproto_handshake_with_shared;
+pub(crate) use self::mtproto::handle_mtproto_handshake_for_web_user;
 #[allow(unused_imports)]
 pub use self::nonce::{encrypt_tg_nonce, encrypt_tg_nonce_with_ciphers, generate_tg_nonce};
 pub use self::session::HandshakeSuccess;

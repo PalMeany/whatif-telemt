@@ -1,6 +1,6 @@
 use super::*;
 
-/// Handle MTProto obfuscation handshake
+/// Handles an MTProto obfuscation handshake with isolated test state.
 #[cfg(test)]
 pub async fn handle_mtproto_handshake<R, W>(
     handshake: &[u8; HANDSHAKE_LEN],
@@ -26,11 +26,14 @@ where
         replay_checker,
         is_tls,
         preferred_user,
+        None,
+        MtprotoModePolicy::Configured,
         shared.as_ref(),
     )
     .await
 }
 
+/// Handles an MTProto obfuscation handshake with process-shared defenses.
 pub async fn handle_mtproto_handshake_with_shared<R, W>(
     handshake: &[u8; HANDSHAKE_LEN],
     reader: R,
@@ -55,6 +58,40 @@ where
         replay_checker,
         is_tls,
         preferred_user,
+        None,
+        MtprotoModePolicy::Configured,
+        shared,
+    )
+    .await
+}
+
+/// Authenticates one WEB logical stream against exactly one user and secret mode.
+pub(crate) async fn handle_mtproto_handshake_for_web_user<R, W>(
+    handshake: &[u8; HANDSHAKE_LEN],
+    reader: R,
+    writer: W,
+    peer: SocketAddr,
+    config: &ProxyConfig,
+    replay_checker: &ReplayChecker,
+    exact_user: &str,
+    secret_mode: WebSecretMode,
+    shared: &ProxySharedState,
+) -> HandshakeResult<(CryptoReader<R>, CryptoWriter<W>, HandshakeSuccess), R, W>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    handle_mtproto_handshake_impl(
+        handshake,
+        reader,
+        writer,
+        peer,
+        config,
+        replay_checker,
+        false,
+        None,
+        Some(exact_user),
+        MtprotoModePolicy::Web(secret_mode),
         shared,
     )
     .await
@@ -69,6 +106,8 @@ async fn handle_mtproto_handshake_impl<R, W>(
     replay_checker: &ReplayChecker,
     is_tls: bool,
     preferred_user: Option<&str>,
+    exact_user: Option<&str>,
+    mode_policy: MtprotoModePolicy,
     shared: &ProxySharedState,
 ) -> HandshakeResult<(CryptoReader<R>, CryptoWriter<W>, HandshakeSuccess), R, W>
 where
@@ -113,8 +152,11 @@ where
         let sticky_ip_hint = sticky_hint_get_by_ip(shared, peer.ip());
         let sticky_prefix_hint = sticky_hint_get_by_ip_prefix(shared, peer.ip());
         let preferred_user_id = preferred_user.and_then(|user| snapshot.user_id_by_name(user));
-        let has_hint =
-            sticky_ip_hint.is_some() || sticky_prefix_hint.is_some() || preferred_user_id.is_some();
+        let exact_user_id = exact_user.and_then(|user| snapshot.user_id_by_name(user));
+        let has_hint = sticky_ip_hint.is_some()
+            || sticky_prefix_hint.is_some()
+            || preferred_user_id.is_some()
+            || exact_user_id.is_some();
         let overload = auth_probe_saturation_is_throttled_in(shared, Instant::now());
         let candidate_budget = budget_for_validation(snapshot.entries().len(), overload, has_hint);
 
@@ -145,6 +187,7 @@ where
                         &entry.secret,
                         config,
                         is_tls,
+                        mode_policy,
                     ) {
                         matched_user = entry.user.clone();
                         matched_user_id = Some($user_id);
@@ -159,20 +202,20 @@ where
             }};
         }
 
-        let mut matched = false;
-        if let Some(user_id) = sticky_ip_hint {
+        let mut matched = exact_user_id.is_some_and(|user_id| try_user_id!(user_id));
+        if exact_user.is_none() && let Some(user_id) = sticky_ip_hint {
             matched = try_user_id!(user_id);
         }
 
-        if !matched && let Some(user_id) = preferred_user_id {
+        if exact_user.is_none() && !matched && let Some(user_id) = preferred_user_id {
             matched = try_user_id!(user_id);
         }
 
-        if !matched && let Some(user_id) = sticky_prefix_hint {
+        if exact_user.is_none() && !matched && let Some(user_id) = sticky_prefix_hint {
             matched = try_user_id!(user_id);
         }
 
-        if !matched && !budget_exhausted {
+        if exact_user.is_none() && !matched && !budget_exhausted {
             let ring = &shared.handshake.recent_user_ring;
             if !ring.is_empty() {
                 let next_seq = shared
@@ -197,7 +240,7 @@ where
             }
         }
 
-        if !matched && !budget_exhausted {
+        if exact_user.is_none() && !matched && !budget_exhausted {
             for idx in 0..snapshot.entries().len() {
                 let Some(user_id) = u32::try_from(idx).ok() else {
                     break;
@@ -317,7 +360,16 @@ where
             success,
         ));
     } else {
-        let decoded_users = decode_user_secrets_in(shared, config, preferred_user);
+        let decoded_users = match exact_user {
+            Some(user) => config
+                .access
+                .users
+                .get(user)
+                .and_then(|secret| decode_user_secret(shared, user, secret))
+                .map(|secret| vec![(user.to_string(), secret)])
+                .unwrap_or_default(),
+            None => decode_user_secrets_in(shared, config, preferred_user),
+        };
         let mut validation_checks = 0usize;
 
         for (user, secret) in decoded_users {
@@ -337,6 +389,7 @@ where
                 &secret_arr,
                 config,
                 is_tls,
+                mode_policy,
             ) else {
                 continue;
             };
