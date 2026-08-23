@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use crate::proxy::shared_state::ConntrackClosePolicy;
 use crate::web::frame::FrameType;
 use crate::web::stream::WebLogicalStream;
-use crate::proxy::shared_state::ConntrackClosePolicy;
 
 use super::{WebSession, inbound_queue_cost};
 
@@ -70,9 +70,7 @@ impl WebSession {
             });
             (queued, reserved)
         };
-        if reserved
-            && let Some(manager) = self.manager.upgrade()
-        {
+        if reserved && let Some(manager) = self.manager.upgrade() {
             manager.release_stream(
                 self.profile_key,
                 self.client_ip,

@@ -314,7 +314,9 @@ impl WebSession {
         if !self.queue_window_locked(&mut state, stream_id, count as u32) {
             drop(state);
             self.close();
-            return Poll::Ready(Err(io::Error::other("WEB session control budget exhausted")));
+            return Poll::Ready(Err(io::Error::other(
+                "WEB session control budget exhausted",
+            )));
         }
         Poll::Ready(Ok(()))
     }
@@ -368,14 +370,14 @@ impl WebSession {
 
     /// Returns the process queue-capacity notification source while the manager lives.
     pub(super) fn budget_notify(&self) -> Option<Arc<Notify>> {
-        self.manager.upgrade().map(|manager| manager.budget_notify())
+        self.manager
+            .upgrade()
+            .map(|manager| manager.budget_notify())
     }
 
     fn release_stream_reservation(&self, peer_port: u16) {
         let removed = self.state.lock().active_peer_ports.remove(&peer_port);
-        if removed
-            && let Some(manager) = self.manager.upgrade()
-        {
+        if removed && let Some(manager) = self.manager.upgrade() {
             manager.release_stream(
                 self.profile_key,
                 self.client_ip,

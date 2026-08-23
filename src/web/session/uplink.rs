@@ -138,12 +138,8 @@ impl WebSession {
                 FrameType::Open => {
                     let Some(peer_port) = self.reserve_stream_locked(state) else {
                         self.remember_closed_locked(state, value.stream_id);
-                        if !self.queue_control_locked(
-                            state,
-                            FrameType::Close,
-                            value.stream_id,
-                            &[],
-                        ) {
+                        if !self.queue_control_locked(state, FrameType::Close, value.stream_id, &[])
+                        {
                             return false;
                         }
                         continue;
@@ -169,8 +165,8 @@ impl WebSession {
                         bytes: Bytes::copy_from_slice(value.payload),
                         offset: 0,
                     });
-                    *unused_bytes = unused_bytes
-                        .saturating_sub(value.payload.len() + QUEUE_ITEM_COST);
+                    *unused_bytes =
+                        unused_bytes.saturating_sub(value.payload.len() + QUEUE_ITEM_COST);
                     *unused_items = unused_items.saturating_sub(1);
                     if let Some(waker) = stream.read_waker.take() {
                         waker.wake();
@@ -256,8 +252,8 @@ pub(super) fn validate_batch(state: &SessionState, frames: &[Frame<'_>]) -> bool
             }
             continue;
         }
-        let was_closed = state.closed_streams.contains(&value.stream_id)
-            || closed.contains(&value.stream_id);
+        let was_closed =
+            state.closed_streams.contains(&value.stream_id) || closed.contains(&value.stream_id);
         match value.frame_type {
             FrameType::Open => {
                 if live.contains_key(&value.stream_id) || was_closed {
@@ -308,10 +304,7 @@ pub(super) fn validate_batch(state: &SessionState, frames: &[Frame<'_>]) -> bool
     true
 }
 
-pub(super) fn inbound_reservation(
-    state: &SessionState,
-    frames: &[Frame<'_>],
-) -> (usize, usize) {
+pub(super) fn inbound_reservation(state: &SessionState, frames: &[Frame<'_>]) -> (usize, usize) {
     let mut live = state.streams.keys().copied().collect::<HashSet<_>>();
     let mut bytes = 0usize;
     let mut items = 0usize;
@@ -338,9 +331,7 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
 
-    use crate::config::{
-        WebLimitsConfig, WebRuntimeProfile, WebSecretMode, WebTimeoutsConfig,
-    };
+    use crate::config::{WebLimitsConfig, WebRuntimeProfile, WebSecretMode, WebTimeoutsConfig};
     use crate::web::manager::WebProcessRuntime;
 
     fn session() -> Arc<WebSession> {
@@ -383,10 +374,7 @@ mod tests {
         let session = session();
         let body = frame::encode(FrameType::Pong, 0, &[]);
         session.up_active.store(true, Ordering::Release);
-        assert_eq!(
-            session.process_up(1, &body),
-            Err(ManagerError::Concurrent)
-        );
+        assert_eq!(session.process_up(1, &body), Err(ManagerError::Concurrent));
         assert_eq!(session.state.lock().last_up_sequence, 0);
         session.up_active.store(false, Ordering::Release);
         assert_eq!(session.process_up(1, &body), Ok(1));

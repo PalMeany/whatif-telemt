@@ -11,8 +11,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
 use super::{
-    BoxError, HttpBody, HttpResponse, bad_gateway, full_response, generic_not_found,
-    insert_header,
+    BoxError, HttpBody, HttpResponse, bad_gateway, full_response, generic_not_found, insert_header,
 };
 use crate::config::{WebRuntimeDecoy, WebRuntimeVhost};
 use crate::web::manager::WebProcessRuntime;
@@ -128,14 +127,13 @@ fn static_entry<B>(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    response.headers_mut().insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    response
+        .headers_mut()
+        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
 }
 
-fn resolve_static_path<'a>(
-    path: &str,
-    site: &'a crate::config::WebStaticSite,
-) -> Option<&'a str> {
+fn resolve_static_path<'a>(path: &str, site: &'a crate::config::WebStaticSite) -> Option<&'a str> {
     if !path.starts_with('/')
         || path.contains('\\')
         || path.contains("//")
@@ -151,7 +149,10 @@ fn resolve_static_path<'a>(
         path
     };
     if site.assets.contains_key(route) {
-        return site.assets.get_key_value(route).map(|(key, _)| key.as_str());
+        return site
+            .assets
+            .get_key_value(route)
+            .map(|(key, _)| key.as_str());
     }
     if route == "/favicon.ico" && site.assets.contains_key("/favicon.svg") {
         return Some("/favicon.svg");
@@ -198,23 +199,19 @@ async fn proxy_to_upstream(
         .max_header_bytes;
     let mut builder = hyper::client::conn::http1::Builder::new();
     builder.max_buf_size(max_header_bytes);
-    let (mut sender, connection) = match tokio::time::timeout(
-        header_timeout,
-        builder.handshake(TokioIo::new(stream)),
-    )
-    .await
-    {
-        Ok(Ok(parts)) => parts,
-        _ => return bad_gateway(),
-    };
+    let (mut sender, connection) =
+        match tokio::time::timeout(header_timeout, builder.handshake(TokioIo::new(stream))).await {
+            Ok(Ok(parts)) => parts,
+            _ => return bad_gateway(),
+        };
     runtime.spawn_auxiliary(async move {
         let _ = connection.await;
     });
-    let mut response = match tokio::time::timeout(header_timeout, sender.send_request(request)).await
-    {
-        Ok(Ok(response)) => response,
-        _ => return bad_gateway(),
-    };
+    let mut response =
+        match tokio::time::timeout(header_timeout, sender.send_request(request)).await {
+            Ok(Ok(response)) => response,
+            _ => return bad_gateway(),
+        };
     remove_hop_by_hop(response.headers_mut());
     response.map(|body| {
         body.map_err(|error| -> BoxError { Box::new(error) })

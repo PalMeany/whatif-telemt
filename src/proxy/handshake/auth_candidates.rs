@@ -274,12 +274,7 @@ pub(super) fn mode_enabled_for_proto(
     proto_tag: ProtoTag,
     is_tls: bool,
 ) -> bool {
-    mode_enabled_for_proto_with_policy(
-        config,
-        proto_tag,
-        is_tls,
-        MtprotoModePolicy::Configured,
-    )
+    mode_enabled_for_proto_with_policy(config, proto_tag, is_tls, MtprotoModePolicy::Configured)
 }
 
 fn mode_enabled_for_proto_with_policy(

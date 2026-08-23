@@ -4,9 +4,7 @@ use std::sync::Arc;
 use bytes::BytesMut;
 
 use super::*;
-use crate::config::{
-    WebRuntimeProfile, WebSecretMode, WebTimeoutsConfig,
-};
+use crate::config::{WebRuntimeProfile, WebSecretMode, WebTimeoutsConfig};
 use crate::web::manager::WebProcessRuntime;
 
 fn session_with_limits(limits: WebLimitsConfig) -> Arc<WebSession> {
@@ -103,15 +101,18 @@ fn tombstone_eviction_releases_lane_budget_and_accepts_late_frames() {
         state.carrier_lanes.insert(7, CarrierLane::new());
         let encoded = frame::encode(FrameType::Close, 7, &[]);
         let cost = encoded.len() + QUEUE_ITEM_COST;
-        state.carrier_lanes.get_mut(&7).unwrap().pending_frames.push_back(
-            QueuedFrame {
+        state
+            .carrier_lanes
+            .get_mut(&7)
+            .unwrap()
+            .pending_frames
+            .push_back(QueuedFrame {
                 encoded: BytesMut::from(encoded.as_ref()),
                 frame_type: FrameType::Close,
                 stream_id: 7,
                 control: true,
                 cost,
-            },
-        );
+            });
         state.pending_bytes = cost;
         state.pending_items = 1;
         state.pending_control_bytes = cost;

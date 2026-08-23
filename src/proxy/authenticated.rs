@@ -11,9 +11,7 @@ use crate::error::{ProxyError, Result};
 use crate::ip_tracker::UserIpTracker;
 use crate::proxy::direct_relay::handle_via_direct_with_shared_and_conntrack;
 use crate::proxy::handshake::HandshakeSuccess;
-use crate::proxy::middle_relay::{
-    handle_via_middle_proxy, handle_via_middle_proxy_with_conntrack,
-};
+use crate::proxy::middle_relay::{handle_via_middle_proxy, handle_via_middle_proxy_with_conntrack};
 use crate::proxy::route_mode::{RelayRouteMode, RouteRuntimeController};
 use crate::proxy::shared_state::{ConntrackClosePolicy, ProxySharedState};
 use crate::stats::Stats;

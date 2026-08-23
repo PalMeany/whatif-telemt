@@ -4,10 +4,8 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
+use super::state::{ClosedToken, decrement_map, remove_bootstrap_locked, remove_expired_locked};
 use super::{ProfileKey, TokenHash, WebProcessRuntime};
-use super::state::{
-    ClosedToken, decrement_map, remove_bootstrap_locked, remove_expired_locked,
-};
 
 impl WebProcessRuntime {
     /// Removes one closed session and retains a bounded host-bound replay marker.

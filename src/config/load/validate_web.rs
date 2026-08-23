@@ -59,9 +59,7 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
     }
 
     validate_limits(&config.web.limits)?;
-    if config.web.carrier == WebCarrier::HttpsLanes
-        && config.web.limits.max_http_handlers < 2
-    {
+    if config.web.carrier == WebCarrier::HttpsLanes && config.web.limits.max_http_handlers < 2 {
         return config_error("web.carrier=https-lanes requires web.limits.max_http_handlers >= 2");
     }
     validate_timeouts(&config.web.timeouts)?;
@@ -155,11 +153,20 @@ fn validate_limits(limits: &WebLimitsConfig) -> Result<()> {
         ("max_streams_per_session", limits.max_streams_per_session),
         ("max_streams_global", limits.max_streams_global),
         ("max_stream_handshakes", limits.max_stream_handshakes),
-        ("pending_bytes_per_session", limits.pending_bytes_per_session),
+        (
+            "pending_bytes_per_session",
+            limits.pending_bytes_per_session,
+        ),
         ("pending_bytes_global", limits.pending_bytes_global),
-        ("pending_items_per_session", limits.pending_items_per_session),
+        (
+            "pending_items_per_session",
+            limits.pending_items_per_session,
+        ),
         ("pending_items_global", limits.pending_items_global),
-        ("control_bytes_per_session", limits.control_bytes_per_session),
+        (
+            "control_bytes_per_session",
+            limits.control_bytes_per_session,
+        ),
         ("control_bytes_global", limits.control_bytes_global),
         ("max_bootstraps_global", limits.max_bootstraps_global),
         ("max_bootstraps_per_ip", limits.max_bootstraps_per_ip),
@@ -181,11 +188,16 @@ fn validate_limits(limits: &WebLimitsConfig) -> Result<()> {
         ("max_stream_handshakes", limits.max_stream_handshakes),
     ] {
         if value > tokio::sync::Semaphore::MAX_PERMITS {
-            return config_error(&format!("web.limits.{field} exceeds Tokio semaphore capacity"));
+            return config_error(&format!(
+                "web.limits.{field} exceeds Tokio semaphore capacity"
+            ));
         }
     }
     let rates = [
-        ("new_bootstraps_per_minute", limits.new_bootstraps_per_minute),
+        (
+            "new_bootstraps_per_minute",
+            limits.new_bootstraps_per_minute,
+        ),
         ("new_bootstraps_burst", limits.new_bootstraps_burst),
         ("new_sessions_per_minute", limits.new_sessions_per_minute),
         ("new_sessions_burst", limits.new_sessions_burst),
@@ -241,7 +253,9 @@ fn validate_limits(limits: &WebLimitsConfig) -> Result<()> {
     let required_control_bytes_global = control_items_global
         .checked_mul(control_frame_cost)
         .ok_or_else(|| {
-            ProxyError::Config("web.limits global control byte reservation overflowed usize".to_string())
+            ProxyError::Config(
+                "web.limits global control byte reservation overflowed usize".to_string(),
+            )
         })?;
     if control_items_per_session >= limits.pending_items_per_session
         || control_items_global >= limits.pending_items_global
@@ -367,10 +381,7 @@ fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
     let mut hosts = HashSet::with_capacity(config.web.vhosts.len());
     let mut profile_count = 0usize;
     for (vhost_idx, vhost) in config.web.vhosts.iter_mut().enumerate() {
-        vhost.host = normalize_web_host(
-            &vhost.host,
-            &format!("web.vhosts[{vhost_idx}].host"),
-        )?;
+        vhost.host = normalize_web_host(&vhost.host, &format!("web.vhosts[{vhost_idx}].host"))?;
         if !hosts.insert(vhost.host.clone()) {
             return config_error(&format!("duplicate WEB vhost host `{}`", vhost.host));
         }
@@ -404,7 +415,9 @@ fn validate_vhosts(config: &mut ProxyConfig) -> Result<()> {
                 .max_streams_per_session
                 .unwrap_or(limits.max_streams_per_session);
             if profile.max_sessions == Some(0)
-                || profile.max_sessions.is_some_and(|value| value > limits.max_sessions_global)
+                || profile
+                    .max_sessions
+                    .is_some_and(|value| value > limits.max_sessions_global)
                 || profile.max_streams == Some(0)
                 || profile
                     .max_streams

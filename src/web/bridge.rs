@@ -313,16 +313,22 @@ mod tests {
         assert!(page.body.contains("X-Lane-ID"));
         assert!(page.body.contains("const when=Date.parse(header)"));
         assert!(page.body.contains("},{once:false});"));
-        assert!(page.body.contains("if(!sessionToken)throw new Error('missing session token')"));
+        assert!(
+            page.body
+                .contains("if(!sessionToken)throw new Error('missing session token')")
+        );
         assert!(!page.body.contains("welcomeBytes"));
-        assert!(page
-            .body
-            .contains("for(const value of splitFrames(data))if(value.id!==lane.id)"));
-        assert!(page
-            .body
-            .contains("let frames;try{frames=splitFrames(value)}catch(error){fail();return}"));
-        assert!(page
-            .content_security_policy
-            .contains("frame-ancestors http://127.0.0.1:*"));
+        assert!(
+            page.body
+                .contains("for(const value of splitFrames(data))if(value.id!==lane.id)")
+        );
+        assert!(
+            page.body
+                .contains("let frames;try{frames=splitFrames(value)}catch(error){fail();return}")
+        );
+        assert!(
+            page.content_security_policy
+                .contains("frame-ancestors http://127.0.0.1:*")
+        );
     }
 }

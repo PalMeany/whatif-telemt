@@ -406,8 +406,7 @@ pub(crate) fn resolve_reload_config(
         fields.push("logging".to_string());
         effective.logging = old.logging.clone();
     }
-    if serde_json::to_value(&old.web.limits).ok()
-        != serde_json::to_value(&desired.web.limits).ok()
+    if serde_json::to_value(&old.web.limits).ok() != serde_json::to_value(&desired.web.limits).ok()
     {
         fields.push("web.limits".to_string());
         effective.web.limits = old.web.limits.clone();

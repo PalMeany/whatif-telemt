@@ -94,10 +94,7 @@ fn web_semaphore_limits_are_rejected_before_runtime_construction() {
 
 #[test]
 fn web_ipv6_decoy_uses_a_valid_http_authority() {
-    let ipv6 = WEB_CONFIG.replace(
-        "http://127.0.0.1:18081",
-        "http://[::1]:18081",
-    );
+    let ipv6 = WEB_CONFIG.replace("http://127.0.0.1:18081", "http://[::1]:18081");
     let config = load_config_from_temp_toml(&ipv6);
     let runtime = config.web.runtime.expect("WEB runtime snapshot");
     let vhost = runtime.vhosts.get("proxy.example.com").unwrap();

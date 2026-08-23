@@ -164,10 +164,8 @@ async fn https_carrier_bootstraps_and_closes_one_session() {
     let session = response_header(create_headers, "x-session-token");
     assert_eq!(session.len(), 43);
 
-    let replacement = test_runtime_generation(
-        2,
-        runtime_config(capability, WebCarrier::HttpsLanes),
-    );
+    let replacement =
+        test_runtime_generation(2, runtime_config(capability, WebCarrier::HttpsLanes));
     active_runtime.store(Arc::clone(&replacement));
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let retry_response = request(&listener, &runtime, create_retry).await;
@@ -183,10 +181,16 @@ async fn https_carrier_bootstraps_and_closes_one_session() {
     .into_bytes();
     let next_root_response = request(&listener, &runtime, next_root).await;
     let (_, next_root_body) = split_response(&next_root_response);
-    assert!(next_root_body.windows(11).any(|value| value == b"bootstrap='"));
-    assert!(next_root_body
-        .windows(21)
-        .any(|value| value == b"carrier='https-lanes'"));
+    assert!(
+        next_root_body
+            .windows(11)
+            .any(|value| value == b"bootstrap='")
+    );
+    assert!(
+        next_root_body
+            .windows(21)
+            .any(|value| value == b"carrier='https-lanes'")
+    );
 
     let close = format!(
         "DELETE /api/v1/session HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nAuthorization: Bearer {session}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -262,10 +266,7 @@ async fn unused_bootstrap_survives_equivalent_runtime_generation_swap() {
         .map(|(token, _)| token)
         .unwrap();
 
-    let replacement = test_runtime_generation(
-        2,
-        runtime_config(capability, WebCarrier::Https),
-    );
+    let replacement = test_runtime_generation(2, runtime_config(capability, WebCarrier::Https));
     active_runtime.store(Arc::clone(&replacement));
     let hello = frame::encode(FrameType::Hello, 0, &[1]);
     let mut create = format!(
@@ -305,10 +306,8 @@ async fn unused_bootstrap_is_rejected_after_profile_identity_change() {
         .map(|(token, _)| token)
         .unwrap();
 
-    let replacement = test_runtime_generation(
-        2,
-        runtime_config(capability, WebCarrier::HttpsLanes),
-    );
+    let replacement =
+        test_runtime_generation(2, runtime_config(capability, WebCarrier::HttpsLanes));
     active_runtime.store(Arc::clone(&replacement));
     let hello = frame::encode(FrameType::Hello, 0, &[1]);
     let mut create = format!(
@@ -330,10 +329,7 @@ async fn unused_bootstrap_is_rejected_after_profile_identity_change() {
 #[tokio::test]
 async fn https_lanes_is_advertised_and_requires_canonical_lane_headers() {
     let capability = [9u8; 32];
-    let generation = test_runtime_generation(
-        1,
-        runtime_config(capability, WebCarrier::HttpsLanes),
-    );
+    let generation = test_runtime_generation(1, runtime_config(capability, WebCarrier::HttpsLanes));
     let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&generation)));
     let runtime = WebProcessRuntime::start(active_runtime);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -361,7 +357,10 @@ async fn https_lanes_is_advertised_and_requires_canonical_lane_headers() {
     create.extend_from_slice(&hello);
     let create_response = request(&listener, &runtime, create).await;
     let (create_headers, _) = split_response(&create_response);
-    assert_eq!(response_header(create_headers, "x-carrier-mode"), "https-lanes");
+    assert_eq!(
+        response_header(create_headers, "x-carrier-mode"),
+        "https-lanes"
+    );
     let session = response_header(create_headers, "x-session-token").to_string();
 
     let pong = frame::encode(FrameType::Pong, 0, &[]);
@@ -375,10 +374,12 @@ async fn https_lanes_is_advertised_and_requires_canonical_lane_headers() {
     let (uplink_headers, _) = split_response(&uplink_response);
     assert!(uplink_headers.starts_with(b"HTTP/1.1 204"));
     assert_eq!(response_header(uplink_headers, "x-up-ack"), "1");
-    assert!(!std::str::from_utf8(uplink_headers)
-        .unwrap()
-        .lines()
-        .any(|line| line.to_ascii_lowercase().starts_with("content-length:")));
+    assert!(
+        !std::str::from_utf8(uplink_headers)
+            .unwrap()
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+    );
 
     let mut missing_lane = format!(
         "POST /api/v1/up HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nAuthorization: Bearer {session}\r\nContent-Type: application/octet-stream\r\nX-Up-Seq: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

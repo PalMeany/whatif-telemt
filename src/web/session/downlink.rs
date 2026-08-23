@@ -3,8 +3,7 @@ use std::time::{Duration, Instant};
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::{
-    DownBatch, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame, SessionState,
-    WebSession,
+    DownBatch, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame, SessionState, WebSession,
 };
 use crate::config::WebCarrier;
 use crate::web::frame::{self, FrameType};
@@ -117,9 +116,8 @@ impl WebSession {
             .limits
             .pending_bytes_per_session
             .saturating_sub(self.limits.control_bytes_per_session);
-        let item_reserve = 16usize.saturating_add(
-            self.limits.max_streams_per_session.saturating_mul(3),
-        );
+        let item_reserve =
+            16usize.saturating_add(self.limits.max_streams_per_session.saturating_mul(3));
         let data_item_limit = self
             .limits
             .pending_items_per_session
@@ -146,14 +144,11 @@ impl WebSession {
                 .pending_items
                 .saturating_sub(state.pending_control_items);
             let (byte_limit, item_limit) = if class == PendingClass::Downlink {
-                let uplink_bytes = self
-                    .limits
-                    .max_body_bytes
-                    .saturating_add(
-                        self.limits
-                            .max_frames_per_body
-                            .saturating_mul(QUEUE_ITEM_COST),
-                    );
+                let uplink_bytes = self.limits.max_body_bytes.saturating_add(
+                    self.limits
+                        .max_frames_per_body
+                        .saturating_mul(QUEUE_ITEM_COST),
+                );
                 (
                     data_byte_limit.saturating_sub(uplink_bytes),
                     data_item_limit.saturating_sub(self.limits.max_frames_per_body),
@@ -172,12 +167,7 @@ impl WebSession {
         let Some(manager) = self.manager.upgrade() else {
             return false;
         };
-        if !manager.try_reserve_pending(
-            bytes,
-            items,
-            control,
-            class == PendingClass::Downlink,
-        ) {
+        if !manager.try_reserve_pending(bytes, items, control, class == PendingClass::Downlink) {
             return false;
         }
         state.pending_bytes += bytes;
@@ -301,13 +291,7 @@ impl WebSession {
         control: bool,
     ) -> bool {
         if self.carrier() == WebCarrier::HttpsLanes {
-            return self.queue_lane_frame_locked(
-                state,
-                frame_type,
-                stream_id,
-                payload,
-                control,
-            );
+            return self.queue_lane_frame_locked(state, frame_type, stream_id, payload, control);
         }
         let cost = frame::HEADER_BYTES + payload.len() + QUEUE_ITEM_COST;
         let class = if control {
@@ -425,9 +409,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
-    use crate::config::{
-        WebLimitsConfig, WebRuntimeProfile, WebSecretMode, WebTimeoutsConfig,
-    };
+    use crate::config::{WebLimitsConfig, WebRuntimeProfile, WebSecretMode, WebTimeoutsConfig};
     use crate::web::manager::WebProcessRuntime;
 
     fn session() -> Arc<WebSession> {

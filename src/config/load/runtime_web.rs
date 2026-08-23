@@ -47,10 +47,8 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
             })?;
             let (client_secret, client_secret_len) =
                 client_secret(auth_entry.secret, profile.secret_mode);
-            let capability = derive_web_capability(
-                &client_secret[..client_secret_len],
-                vhost.host.as_bytes(),
-            )?;
+            let capability =
+                derive_web_capability(&client_secret[..client_secret_len], vhost.host.as_bytes())?;
             if !capabilities.insert(capability) {
                 return Err(ProxyError::Config(format!(
                     "WEB vhost `{}` contains profiles with the same client capability",
@@ -97,9 +95,8 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
 
 /// Derives the Telegram Desktop WEB capability for one exact secret and host.
 pub(crate) fn derive_web_capability(secret: &[u8], host: &[u8]) -> Result<[u8; 32]> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret).map_err(|_| {
-        ProxyError::Config("WEB capability secret must not be empty".to_string())
-    })?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret)
+        .map_err(|_| ProxyError::Config("WEB capability secret must not be empty".to_string()))?;
     mac.update(WEB_CAPABILITY_CONTEXT);
     mac.update(host);
     Ok(mac.finalize().into_bytes().into())
@@ -159,13 +156,7 @@ fn build_decoy(
             })
         }
         WebDecoyConfig::StaticDirectory { directory, index } => {
-            let site = load_static_site(
-                directory,
-                index,
-                limits,
-                static_files,
-                static_bytes,
-            )?;
+            let site = load_static_site(directory, index, limits, static_files, static_bytes)?;
             Ok(WebRuntimeDecoy::StaticDirectory(Arc::new(site)))
         }
     }
@@ -239,8 +230,7 @@ fn load_static_directory(
         })?;
         if *total_files >= limits.max_static_files {
             return Err(ProxyError::Config(
-                "WEB static entries exceed process-wide web.limits.max_static_files"
-                    .to_string(),
+                "WEB static entries exceed process-wide web.limits.max_static_files".to_string(),
             ));
         }
         *total_files += 1;
@@ -317,8 +307,7 @@ fn load_static_directory(
         })?;
         if *total_bytes > limits.max_static_bytes {
             return Err(ProxyError::Config(
-                "WEB static snapshots exceed process-wide web.limits.max_static_bytes"
-                    .to_string(),
+                "WEB static snapshots exceed process-wide web.limits.max_static_bytes".to_string(),
             ));
         }
         let relative = path.strip_prefix(root).map_err(|_| {

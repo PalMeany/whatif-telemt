@@ -135,17 +135,11 @@ pub(super) fn matching_profile(
 }
 
 /// Applies one token-bucket admission decision at a caller-supplied monotonic time.
-pub(super) fn allow_rate(
-    state: &mut RateState,
-    now: Instant,
-    per_minute: u32,
-    burst: u32,
-) -> bool {
+pub(super) fn allow_rate(state: &mut RateState, now: Instant, per_minute: u32, burst: u32) -> bool {
     let burst = f64::from(burst);
     if let Some(last) = state.last {
         let elapsed = now.saturating_duration_since(last).as_secs_f64();
-        state.tokens =
-            (state.tokens + elapsed * f64::from(per_minute) / 60.0).min(burst);
+        state.tokens = (state.tokens + elapsed * f64::from(per_minute) / 60.0).min(burst);
     } else {
         state.tokens = burst;
     }
@@ -216,9 +210,9 @@ where
 
 /// Computes the process-wide item reserve required for session control progress.
 pub(super) fn control_item_reserve(limits: &WebLimitsConfig) -> usize {
-    limits.max_sessions_global.saturating_mul(
-        16usize.saturating_add(limits.max_streams_per_session.saturating_mul(3)),
-    )
+    limits
+        .max_sessions_global
+        .saturating_mul(16usize.saturating_add(limits.max_streams_per_session.saturating_mul(3)))
 }
 
 /// Allocates a non-zero source port unique among live streams for one KDF route.
