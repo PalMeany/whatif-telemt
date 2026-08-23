@@ -442,12 +442,8 @@ async fn windows_restricted_webview_empty_cookie_preserves_the_carrier_flow() {
             request.extend_from_slice(&hello);
             request
         };
-        let nonempty_cookie = request(
-            &listener,
-            &runtime,
-            create("Cookie: state=unexpected\r\n"),
-        )
-        .await;
+        let nonempty_cookie =
+            request(&listener, &runtime, create("Cookie: state=unexpected\r\n")).await;
         assert!(!nonempty_cookie.starts_with(b"HTTP/1.1 200"));
         let duplicate_cookie = request(
             &listener,
