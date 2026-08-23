@@ -14,7 +14,7 @@ WEB mode carries ordinary MTProxy streams through bounded HTTPS carriers compati
 Telegram Desktop
     | HTTPS :443
     v
-NGINX or HAProxy (TLS termination, canonical Host and X-Forwarded-For)
+NGINX or HAProxy (TLS termination, canonical Host and one X-Forwarded-For address)
     | plain HTTP/1.1 on a private network
     v
 Telemt WEB listener
@@ -30,6 +30,7 @@ Route the complete public vhost to Telemt. Splitting only recognized carrier pat
 - `plain` and `dd` 16-byte MTProxy secrets are supported. `ee` FakeTLS secrets are not supported by WEB mode.
 - `web.carrier = "https"` selects serialized HTTPS uplink and long polling. `web.carrier = "https-lanes"` selects independent HTTPS sequencing and polling per logical stream. WebSocket carriers are not advertised.
 - Capability, bootstrap, and session credentials are separate bounded-lifetime values. Carrier credentials must be treated as secrets and must not appear in access logs.
+- A bootstrap is a bearer credential, not a source-address-bound token. The client address and IP family may change between bridge loading and session creation. The issuing address retains unused-bootstrap accounting, while the address on the first valid creation request owns the session.
 - Inner MTProxy authentication is restricted to the user and secret mode selected by the vhost profile. Invalid inner handshakes close only their logical stream and never enter the TCP masking path.
 
 Telegram Desktop WEB links omit a port because the client requires port 443:
@@ -49,7 +50,7 @@ Telemt prints links for WEB profiles selected by `[general.links].show` through 
 - A normal decoy site, either a private HTTP origin or an immutable local directory snapshot.
 - A compatible Telegram Desktop build with the `WEB` proxy type.
 
-If one hostname is served through both IPv4 and IPv6, use separate Telemt deployments or separate hostnames in this first implementation. The forwarded client address and `public_addr` must use the same IP family.
+The forwarded client address may differ in family from `public_addr` and may change while a bootstrap is live. `public_addr` must still identify the exact public endpoint used by the inner MTProxy route.
 
 ## Minimal Telemt configuration
 
@@ -151,7 +152,7 @@ server {
 }
 ```
 
-`client_max_body_size` must be at least `web.limits.max_body_bytes`. `proxy_read_timeout` and `proxy_send_timeout` must exceed `web.timeouts.long_poll_secs`, which defaults to 25 seconds. Overwrite, rather than append to, `X-Forwarded-For`. Do not enable upstream retries: the bridge performs byte-identical retries through its own sequence protocol.
+`client_max_body_size` must be at least `web.limits.max_body_bytes`. `proxy_read_timeout` and `proxy_send_timeout` must exceed `web.timeouts.long_poll_secs`, which defaults to 25 seconds. Overwrite, rather than append to, `X-Forwarded-For`. Telemt accepts one parseable IP address; if a trusted terminator omits the header, Telemt falls back to the direct peer address, but per-client limits and source policy then see the terminator rather than the real client. Do not enable upstream retries: the bridge performs byte-identical retries through its own sequence protocol.
 
 Public HTTP/2 is mandatory for `https-lanes`; use the equivalent HTTP/2 directive supported by the installed NGINX release. The private NGINX-to-Telemt hop intentionally remains HTTP/1.1. Ensure the upstream connection capacity can sustain the expected simultaneous lane polls; `keepalive` controls the idle pool and is not a concurrency limit.
 
@@ -253,13 +254,14 @@ See the complete [Control API contract](../Architecture/API/API.md) for request 
 - Disable request-target and authorization logging at the TLS terminator, or use a verified redacted format. Raw queries contain bridge capabilities and `Authorization` contains bootstrap or session bearer credentials.
 - Keep one stable public address per vhost. If DNS returns several ingress addresses, each deployment must use the address matching its external path.
 - Bootstrap and session registries are process-local. A multi-process or multi-host upstream pool requires affinity for the complete vhost: bridge GET, session creation, uplink, downlink, and DELETE. A single Telemt process needs no extra affinity.
+- An unused bootstrap survives a configuration reload only when the exact profile identity remains active: host, `public_addr`, user, secret mode, carrier, and capability. Existing created sessions retain their immutable carrier and profile identity and remain lifecycle-bounded.
 - The decoy is part of the anti-probing contract. Verify its ordinary 404 behavior and response timing through the public TLS endpoint before distributing links.
 
 ## Initial verification
 
 1. Start the rebuilt Telemt binary with the WEB configuration and confirm that the private listener is bound.
 2. Confirm through the public TLS endpoint that `GET /`, an unknown path, and an invalid `bridge` query return the configured decoy site.
-3. Confirm that Telemt receives one canonical `X-Forwarded-For` address and `Host: proxy.example.com` or `Host: proxy.example.com:443`.
+3. Confirm that Telemt receives one parseable `X-Forwarded-For` address and `Host: proxy.example.com` or `Host: proxy.example.com:443`.
 4. Import the printed `tg://webproxy` link in the intended Telegram Desktop build and establish a proxy connection.
 5. For `https-lanes`, confirm that the public connection negotiated HTTP/2 and exercise at least two simultaneous logical streams; the private Telemt hop remains HTTP/1.1.
 6. Exercise reconnect and at least one long poll beyond 25 seconds to prove the frontend timeouts do not truncate the carrier.
@@ -270,7 +272,7 @@ See the complete [Control API contract](../Architecture/API/API.md) for request 
 | Symptom | Check |
 | --- | --- |
 | WEB configuration is valid on disk but listener behavior did not change | Inspect reload `deferred_process_fields`; listener and `[web.limits]` changes require restart. |
-| Carrier requests reach the decoy | Verify exact vhost, link secret mode, direct proxy CIDR, and one canonical `X-Forwarded-For` value. |
+| Carrier requests reach the decoy | Verify exact vhost, link secret mode, direct proxy CIDR, and one parseable `X-Forwarded-For` value. |
 | Long polls disconnect near a fixed interval | Raise NGINX/HAProxy client, server, send, and read timeouts above `web.timeouts.long_poll_secs`. |
 | `https-lanes` works but streams still block each other | Confirm public HTTP/2 negotiation, preserve `X-Lane-ID`, and provide enough TLS-terminator upstream connections for concurrent private HTTP/1.1 polls. |
 | Telegram Desktop rejects the link | Omit the port, use a valid FQDN, port 443 externally, and only `plain` or `dd` secret mode. |

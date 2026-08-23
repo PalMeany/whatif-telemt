@@ -14,7 +14,7 @@ WEB-режим переносит обычные MTProxy-потоки через
 Telegram Desktop
     | HTTPS :443
     v
-NGINX или HAProxy (TLS termination, канонические Host и X-Forwarded-For)
+NGINX или HAProxy (TLS termination, канонический Host и один адрес X-Forwarded-For)
     | обычный HTTP/1.1 в приватной сети
     v
 WEB-listener Telemt
@@ -30,6 +30,7 @@ WEB-listener Telemt
 - Поддерживаются 16-байтовые MTProxy-секреты `plain` и `dd`. FakeTLS-секреты `ee` в WEB-режиме не поддерживаются.
 - `web.carrier = "https"` выбирает сериализованные HTTPS uplink и long polling. `web.carrier = "https-lanes"` выбирает независимые HTTPS sequencing и polling для каждого logical stream. WebSocket carriers не анонсируются.
 - Capability, bootstrap и session credentials — отдельные значения с ограниченным сроком жизни. Carrier credentials считаются секретами и не должны попадать в access logs.
+- Bootstrap является bearer credential, а не token с привязкой к source address. Адрес клиента и его IP-семейство могут измениться между загрузкой bridge и созданием session. Адрес выдачи продолжает учитываться в лимите неиспользованных bootstrap, а владельцем session становится адрес первого корректного запроса создания.
 - Внутренняя MTProxy-аутентификация ограничена пользователем и режимом секрета, выбранными профилем vhost. Некорректный внутренний handshake закрывает только свой logical stream и никогда не попадает в TCP masking path.
 
 В WEB-ссылках Telegram Desktop нет порта, потому что клиент требует порт 443:
@@ -49,7 +50,7 @@ Telemt печатает ссылки для WEB-профилей, выбранн
 - Обычный decoy site: приватный HTTP origin либо immutable snapshot локального каталога.
 - Совместимая сборка Telegram Desktop с типом прокси `WEB`.
 
-Если один hostname обслуживается одновременно по IPv4 и IPv6, в первой реализации используйте отдельные hostname или отдельные экземпляры Telemt. Forwarded client address и `public_addr` должны принадлежать одному семейству IP.
+Forwarded client address может принадлежать другому IP-семейству, чем `public_addr`, и изменяться в течение срока жизни bootstrap. При этом `public_addr` должен по-прежнему указывать точный публичный endpoint внутреннего MTProxy route.
 
 ## Минимальная конфигурация Telemt
 
@@ -151,7 +152,7 @@ server {
 }
 ```
 
-`client_max_body_size` должен быть не меньше `web.limits.max_body_bytes`. Значения `proxy_read_timeout` и `proxy_send_timeout` должны превышать `web.timeouts.long_poll_secs`, по умолчанию равный 25 секундам. Перезаписывайте `X-Forwarded-For`, а не дополняйте его. Не включайте upstream retries: byte-identical retry выполняет сам bridge по своему sequence protocol.
+`client_max_body_size` должен быть не меньше `web.limits.max_body_bytes`. Значения `proxy_read_timeout` и `proxy_send_timeout` должны превышать `web.timeouts.long_poll_secs`, по умолчанию равный 25 секундам. Перезаписывайте `X-Forwarded-For`, а не дополняйте его. Telemt принимает один корректно разбираемый IP-адрес; если доверенный TLS-терминатор не передал header, Telemt использует адрес непосредственного peer, но per-client limits и source policy тогда видят терминатор вместо реального клиента. Не включайте upstream retries: byte-identical retry выполняет сам bridge по своему sequence protocol.
 
 Для `https-lanes` обязателен публичный HTTP/2; используйте эквивалентную HTTP/2-директиву, поддерживаемую установленной версией NGINX. Приватный hop NGINX-to-Telemt намеренно остаётся HTTP/1.1. Upstream connection capacity должна выдерживать ожидаемое число одновременных lane polls; `keepalive` управляет idle pool и не является лимитом concurrency.
 
@@ -253,13 +254,14 @@ curl -sS -X POST http://127.0.0.1:9091/v1/users/web-user/rotate-secret \
 - Отключите логирование request target и authorization на TLS-терминаторе либо используйте проверенный формат с редактированием. Raw queries содержат bridge capabilities, а `Authorization` — bootstrap или session bearer credentials.
 - Сохраняйте один стабильный публичный адрес на vhost. Если DNS возвращает несколько ingress addresses, каждый deployment должен использовать адрес своего внешнего пути.
 - Bootstrap- и session-registries локальны для процесса. Для multi-process или multi-host upstream pool нужна affinity всего vhost: bridge GET, создание сессии, uplink, downlink и DELETE. Одному процессу Telemt дополнительная affinity не нужна.
+- Неиспользованный bootstrap переживает reload конфигурации, только если остаётся активной точная identity профиля: host, `public_addr`, user, secret mode, carrier и capability. Уже созданные sessions сохраняют неизменные carrier и identity профиля и остаются lifecycle-bounded.
 - Decoy входит в anti-probing contract. До распространения ссылок проверьте через публичный TLS endpoint его обычный ответ 404 и response timing.
 
 ## Первичная проверка
 
 1. Запустите пересобранный Telemt с WEB-конфигурацией и убедитесь, что приватный listener привязан.
 2. Через публичный TLS endpoint проверьте, что `GET /`, неизвестный path и некорректный query `bridge` возвращают настроенный decoy site.
-3. Убедитесь, что Telemt получает один канонический адрес `X-Forwarded-For` и `Host: proxy.example.com` либо `Host: proxy.example.com:443`.
+3. Убедитесь, что Telemt получает один корректно разбираемый адрес `X-Forwarded-For` и `Host: proxy.example.com` либо `Host: proxy.example.com:443`.
 4. Импортируйте напечатанную ссылку `tg://webproxy` в целевую сборку Telegram Desktop и установите соединение через прокси.
 5. Для `https-lanes` подтвердите согласование HTTP/2 на публичном connection и проверьте как минимум два одновременных logical streams; приватный hop к Telemt остаётся HTTP/1.1.
 6. Проверьте reconnect и как минимум один long poll длительнее 25 секунд, чтобы frontend timeouts не обрывали carrier.
@@ -270,7 +272,7 @@ curl -sS -X POST http://127.0.0.1:9091/v1/users/web-user/rotate-secret \
 | Симптом | Что проверить |
 | --- | --- |
 | WEB-конфигурация валидна на диске, но поведение listener’а не изменилось | Проверьте `deferred_process_fields`; listener и `[web.limits]` требуют перезапуска. |
-| Carrier-запросы попадают в decoy | Проверьте точный vhost, secret mode ссылки, CIDR непосредственного proxy и единственное каноническое значение `X-Forwarded-For`. |
+| Carrier-запросы попадают в decoy | Проверьте точный vhost, secret mode ссылки, CIDR непосредственного proxy и единственное корректно разбираемое значение `X-Forwarded-For`. |
 | Long polls разрываются через фиксированный интервал | Поднимите client, server, send и read timeouts NGINX/HAProxy выше `web.timeouts.long_poll_secs`. |
 | `https-lanes` работает, но streams всё ещё блокируют друг друга | Проверьте согласование публичного HTTP/2, сохранение `X-Lane-ID` и достаточное число upstream connections TLS-терминатора для параллельных приватных HTTP/1.1 polls. |
 | Telegram Desktop отклоняет ссылку | Не указывайте порт, используйте валидный FQDN, внешний порт 443 и только `plain` или `dd`. |

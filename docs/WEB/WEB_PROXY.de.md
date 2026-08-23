@@ -14,7 +14,7 @@ Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über begrenzte HTTPS-C
 Telegram Desktop
     | HTTPS :443
     v
-NGINX oder HAProxy (TLS-Terminierung, kanonische Werte für Host und X-Forwarded-For)
+NGINX oder HAProxy (TLS-Terminierung, kanonischer Host und eine X-Forwarded-For-Adresse)
     | unverschlüsseltes HTTP/1.1 in einem privaten Netz
     v
 Telemt-WEB-Listener
@@ -30,6 +30,7 @@ Leiten Sie den vollständigen öffentlichen vhost an Telemt weiter. Wenn der TLS
 - Unterstützt werden 16-Byte-MTProxy-Secrets in den Modi `plain` und `dd`. FakeTLS-Secrets mit `ee` werden im WEB-Modus nicht unterstützt.
 - `web.carrier = "https"` wählt serialisierte HTTPS-Uplinks und Long Polling. `web.carrier = "https-lanes"` wählt unabhängige HTTPS-Sequenzen und Polls pro logischem Stream. WebSocket-Carrier werden nicht angeboten.
 - Capability-, Bootstrap- und Session-Zugangsdaten sind getrennte Werte mit begrenzter Lebensdauer. Carrier-Zugangsdaten sind geheim und dürfen nicht in Access-Logs erscheinen.
+- Ein Bootstrap ist ein Bearer-Token und nicht an eine Quelladresse gebunden. Client-Adresse und IP-Familie dürfen sich zwischen dem Laden der Bridge und der Sitzungserstellung ändern. Die Ausstellungsadresse bleibt dem Limit ungenutzter Bootstraps zugeordnet; die Adresse des ersten gültigen Erstellungs-Requests wird der Sitzung zugeordnet.
 - Die innere MTProxy-Authentifizierung ist auf den Benutzer und Secret-Modus des vhost-Profils beschränkt. Ein ungültiger innerer Handshake schließt nur seinen logischen Stream und gelangt niemals in den TCP-Masking-Pfad.
 
 Telegram-Desktop-WEB-Links enthalten keinen Port, da der Client Port 443 voraussetzt:
@@ -49,7 +50,7 @@ Telemt gibt Links für die durch `[general.links].show` ausgewählten WEB-Profil
 - Eine gewöhnliche Decoy-Site als privater HTTP-Origin oder unveränderlicher Snapshot eines lokalen Verzeichnisses.
 - Ein kompatibler Telegram-Desktop-Build mit dem Proxy-Typ `WEB`.
 
-Wenn ein Hostname sowohl über IPv4 als auch IPv6 bedient wird, verwenden Sie in dieser ersten Implementierung getrennte Hostnamen oder Telemt-Instanzen. Die weitergeleitete Client-Adresse und `public_addr` müssen dieselbe IP-Familie verwenden.
+Die weitergeleitete Client-Adresse darf eine andere IP-Familie als `public_addr` verwenden und sich während der Bootstrap-Lebensdauer ändern. `public_addr` muss weiterhin den exakten öffentlichen Endpoint der inneren MTProxy-Route bezeichnen.
 
 ## Minimale Telemt-Konfiguration
 
@@ -151,7 +152,7 @@ server {
 }
 ```
 
-`client_max_body_size` muss mindestens `web.limits.max_body_bytes` entsprechen. `proxy_read_timeout` und `proxy_send_timeout` müssen größer als `web.timeouts.long_poll_secs` sein, dessen Default 25 Sekunden beträgt. Überschreiben Sie `X-Forwarded-For`, statt einen Wert anzuhängen. Aktivieren Sie keine Upstream-Wiederholungen: Der Bridge-Transport führt byte-identische Wiederholungen über sein eigenes Sequenzprotokoll aus.
+`client_max_body_size` muss mindestens `web.limits.max_body_bytes` entsprechen. `proxy_read_timeout` und `proxy_send_timeout` müssen größer als `web.timeouts.long_poll_secs` sein, dessen Default 25 Sekunden beträgt. Überschreiben Sie `X-Forwarded-For`, statt einen Wert anzuhängen. Telemt akzeptiert eine syntaktisch gültige IP-Adresse; fehlt der Header bei einem vertrauenswürdigen TLS-Terminator, verwendet Telemt die Adresse des direkten Peers, doch clientbezogene Limits und Quellrichtlinien sehen dann den Terminator statt des echten Clients. Aktivieren Sie keine Upstream-Wiederholungen: Der Bridge-Transport führt byte-identische Wiederholungen über sein eigenes Sequenzprotokoll aus.
 
 Öffentliches HTTP/2 ist für `https-lanes` obligatorisch; verwenden Sie die entsprechende HTTP/2-Direktive der installierten NGINX-Version. Der private Hop von NGINX zu Telemt bleibt absichtlich HTTP/1.1. Die Upstream-Verbindungskapazität muss die erwarteten gleichzeitigen Lane-Polls tragen; `keepalive` steuert den Idle-Pool und ist keine Nebenläufigkeitsgrenze.
 
@@ -253,13 +254,14 @@ Der vollständige Vertrag für Requests, Revisionen, Fehler und alle Benutzer-En
 - Deaktivieren Sie am TLS-Terminator die Protokollierung von Request-Target und Authorization oder verwenden Sie ein geprüftes, redigiertes Format. Raw Queries enthalten Bridge-Capabilities und `Authorization` enthält Bootstrap- oder Session-Bearer-Zugangsdaten.
 - Verwenden Sie pro vhost eine stabile öffentliche Adresse. Wenn DNS mehrere Ingress-Adressen liefert, muss jede Bereitstellung die Adresse ihres externen Pfads verwenden.
 - Bootstrap- und Session-Register sind prozesslokal. Ein Multi-Prozess- oder Multi-Host-Upstream-Pool benötigt Affinität für den vollständigen vhost: Bridge-GET, Sitzungserstellung, Uplink, Downlink und DELETE. Ein einzelner Telemt-Prozess benötigt keine zusätzliche Affinität.
+- Ein ungenutzter Bootstrap übersteht einen Konfigurations-Reload nur, wenn die exakte Profilidentität aktiv bleibt: Host, `public_addr`, Benutzer, Secret-Modus, Carrier und Capability. Bereits erstellte Sitzungen behalten ihren unveränderlichen Carrier und ihre Profilidentität und bleiben lifecycle-bounded.
 - Der Decoy gehört zum Anti-Probing-Vertrag. Prüfen Sie sein gewöhnliches 404-Verhalten und die Antwortzeiten über den öffentlichen TLS-Endpunkt, bevor Sie Links verteilen.
 
 ## Erstprüfung
 
 1. Starten Sie das neu erstellte Telemt-Binary mit der WEB-Konfiguration und prüfen Sie, dass der private Listener gebunden ist.
 2. Prüfen Sie über den öffentlichen TLS-Endpunkt, dass `GET /`, ein unbekannter Pfad und eine ungültige `bridge`-Query die konfigurierte Decoy-Site zurückgeben.
-3. Prüfen Sie, dass Telemt genau eine kanonische `X-Forwarded-For`-Adresse und `Host: proxy.example.com` oder `Host: proxy.example.com:443` erhält.
+3. Prüfen Sie, dass Telemt genau eine syntaktisch gültige `X-Forwarded-For`-Adresse und `Host: proxy.example.com` oder `Host: proxy.example.com:443` erhält.
 4. Importieren Sie den ausgegebenen `tg://webproxy`-Link in den vorgesehenen Telegram-Desktop-Build und stellen Sie eine Proxy-Verbindung her.
 5. Bestätigen Sie für `https-lanes`, dass die öffentliche Verbindung HTTP/2 ausgehandelt hat, und testen Sie mindestens zwei gleichzeitige logische Streams; der private Hop zu Telemt bleibt HTTP/1.1.
 6. Testen Sie einen Reconnect und mindestens einen Long Poll über 25 Sekunden, um sicherzustellen, dass Frontend-Timeouts den Carrier nicht abbrechen.
@@ -270,7 +272,7 @@ Der vollständige Vertrag für Requests, Revisionen, Fehler und alle Benutzer-En
 | Symptom | Prüfung |
 | --- | --- |
 | WEB-Konfiguration ist auf dem Datenträger gültig, aber das Listener-Verhalten hat sich nicht geändert | Prüfen Sie `deferred_process_fields`; Listener- und `[web.limits]`-Änderungen erfordern einen Neustart. |
-| Carrier-Requests erreichen den Decoy | Prüfen Sie den exakten vhost, den Secret-Modus des Links, das CIDR des direkten Proxys und genau einen kanonischen `X-Forwarded-For`-Wert. |
+| Carrier-Requests erreichen den Decoy | Prüfen Sie den exakten vhost, den Secret-Modus des Links, das CIDR des direkten Proxys und genau einen syntaktisch gültigen `X-Forwarded-For`-Wert. |
 | Long Polls werden nach einem festen Intervall getrennt | Setzen Sie Client-, Server-, Sende- und Lese-Timeouts von NGINX/HAProxy über `web.timeouts.long_poll_secs`. |
 | `https-lanes` funktioniert, Streams blockieren sich aber weiterhin | Prüfen Sie die öffentliche HTTP/2-Aushandlung, die unveränderte Weitergabe von `X-Lane-ID` und genügend TLS-Terminator-Upstream-Verbindungen für parallele private HTTP/1.1-Polls. |
 | Telegram Desktop lehnt den Link ab | Lassen Sie den Port weg und verwenden Sie einen gültigen FQDN, extern Port 443 sowie ausschließlich `plain` oder `dd`. |

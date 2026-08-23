@@ -2468,7 +2468,7 @@
 
 ## web_client_ip_source (server.listeners)
   - **Ограничения / валидация**: Первая реализация WEB поддерживает только `"x_forwarded_for"`.
-  - **Описание**: Выбирает L7-источник исходного IP клиента. Telemt принимает ровно один канонический адрес `X-Forwarded-For`, только если прямой TCP peer входит в `web_trusted_proxy_cidrs`.
+  - **Описание**: Выбирает L7-источник исходного IP клиента. От прямого TCP peer из `web_trusted_proxy_cidrs` Telemt принимает один корректно разбираемый адрес `X-Forwarded-For`. Если доверенный peer не передал header, Telemt использует его адрес; настройте TLS-терминатор на передачу header, чтобы per-client limits и source policy применялись к реальному адресу клиента.
 
 ## web_trusted_proxy_cidrs (server.listeners)
   - **Ограничения / валидация**: Непустой массив CIDR только для WEB. Сеть `/0` запрещена. Параметр недопустим для MTProxy-listener’а.
@@ -2556,7 +2556,7 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `decoy` | таблица | да | `✔` | Обычный сайт для неаутентифицированного или некорректного трафика. |
 | `profiles` | массив таблиц | при включённом WEB | `✔` | Явные пользователи и client secret modes для этого hostname. |
 
-Forwarded client address и `public_addr` должны относиться к одному семейству IP. Hostname нормализуется при валидации и должен приниматься Telegram Desktop.
+Hostname нормализуется при валидации и должен приниматься Telegram Desktop. Bootstrap является bearer credential: адрес клиента и его IP-семейство могут измениться до создания session. Неиспользованный bootstrap остаётся действительным после reload конфигурации, только пока активен профиль с той же identity.
 
 # [web.vhosts.decoy]
 

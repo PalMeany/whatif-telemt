@@ -2542,7 +2542,7 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
 
 ## web_client_ip_source (server.listeners)
   - **Einschränkungen / Validierung**: Die erste WEB-Implementierung unterstützt ausschließlich `"x_forwarded_for"`.
-  - **Beschreibung**: Wählt die L7-Quelle der ursprünglichen Client-IP. Telemt akzeptiert genau eine kanonische `X-Forwarded-For`-Adresse und nur dann, wenn der direkte TCP-Peer zu `web_trusted_proxy_cidrs` gehört.
+  - **Beschreibung**: Wählt die L7-Quelle der ursprünglichen Client-IP. Von einem direkten TCP-Peer in `web_trusted_proxy_cidrs` akzeptiert Telemt genau eine syntaktisch gültige `X-Forwarded-For`-Adresse. Fehlt der Header bei einem vertrauenswürdigen Peer, verwendet Telemt dessen Adresse; konfigurieren Sie den TLS-Terminator so, dass der Header gesetzt wird, damit clientbezogene Limits und Quellrichtlinien die echte Client-Adresse verwenden.
 
 ## web_trusted_proxy_cidrs (server.listeners)
   - **Einschränkungen / Validierung**: Nicht leeres CIDR-Array nur für WEB; ein `/0`-Netz wird abgelehnt. Für einen MTProxy-Listener ist das Feld ungültig.
@@ -2630,7 +2630,7 @@ Alle Timeouts werden in Sekunden angegeben und müssen im Bereich `1..=3600` lie
 | `decoy` | Tabelle | ja | `✔` | Gewöhnlicher Site-Fallback für nicht authentifizierten oder ungültigen Datenverkehr. |
 | `profiles` | Tabellen-Array | bei aktiviertem WEB | `✔` | Explizite Benutzer und Client-Secret-Modi für diesen Hostnamen. |
 
-Die weitergeleitete Client-Adresse und `public_addr` müssen dieselbe IP-Familie verwenden. Der Hostname wird bei der Validierung normalisiert und muss von Telegram Desktop akzeptiert werden.
+Der Hostname wird bei der Validierung normalisiert und muss von Telegram Desktop akzeptiert werden. Ein Bootstrap ist ein Bearer-Token: Client-Adresse und IP-Familie dürfen sich vor der Sitzungserstellung ändern. Ein ungenutzter Bootstrap bleibt über einen Konfigurations-Reload hinweg nur gültig, solange dieselbe Profilidentität aktiv bleibt.
 
 # [web.vhosts.decoy]
 
