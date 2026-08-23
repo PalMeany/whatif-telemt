@@ -2556,11 +2556,12 @@ Der WEB-Modus transportiert MTProxy-Datenverkehr von Telegram Desktop über HTTP
 | Schlüssel | Typ | Default | Hot-Reload |
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | `✔` |
+| `carrier` | `"https"` oder `"https-lanes"` | `"https"` | `✔` |
 | `limits` | Tabelle | begrenzte Defaults | `✘` |
 | `timeouts` | Tabelle | begrenzte Defaults | `✔` |
 | `vhosts` | Tabellen-Array | `[]` | `✔` |
 
-`enabled = true` erfordert mindestens einen durch die Netzwerkrichtlinie zugelassenen WEB-Listener, einen vhost und mindestens ein Profil in jedem vhost. Das Deaktivieren von WEB beendet nach dem Reload die Ausgabe neuer Bridge- und Session-Zugangsdaten; zum Widerrufen aktiver Sitzungen eines einzelnen Benutzers verwenden Sie die Users-API.
+`enabled = true` erfordert mindestens einen durch die Netzwerkrichtlinie zugelassenen WEB-Listener, einen vhost und mindestens ein Profil in jedem vhost. `carrier = "https"` behält den serialisierten HTTPS-Transport bei. Mit `carrier = "https-lanes"` erhalten Stream null und jeder logische Stream eigene Uplink-Sequenzen, Downlink-Cursor, Wiederholungen und Long Polls; dieser Carrier erfordert `max_http_handlers >= 2` und öffentliches HTTP/2 am TLS-Terminator, um anwendungsseitiges Head-of-Line-Blocking zwischen Streams zu entfernen. Ein Reload wendet `carrier` nur auf neu ausgegebene Bridge-Sitzungen an. Das Deaktivieren von WEB beendet nach dem Reload die Ausgabe neuer Bridge- und Session-Zugangsdaten; zum Widerrufen aktiver Sitzungen eines einzelnen Benutzers verwenden Sie die Users-API.
 
 # [web.limits]
 
@@ -2574,7 +2575,7 @@ Diese prozessweiten Obergrenzen begrenzen alle WEB-Register, Warteschlangen, Req
 | `carrier_batch_bytes` | `usize` | `2097152` | Maximale Größe eines kodierten Downlink-Batches. |
 | `max_frames_per_body` | `usize` | `4096` | Maximale Zahl geparster oder ausgegebener Frames pro Carrier-Body. |
 | `max_http_connections` | `usize` | `1024` | Prozessweit akzeptierte WEB-HTTP-Verbindungen. |
-| `max_http_handlers` | `usize` | `512` | Prozessweit gleichzeitig ausgeführte HTTP-Handler. |
+| `max_http_handlers` | `usize` | `512` | Prozessweit gleichzeitig ausgeführte HTTP-Handler; HTTPS-Lanes dürfen höchstens die Hälfte mit Long Polls belegen, der Rest bleibt für Session-, Uplink- und Steuerarbeit verfügbar. |
 | `max_body_readers` | `usize` | `32` | Prozessweit gleichzeitig gesammelte Request-Bodys. |
 | `max_body_bytes_global` | `usize` | `67108864` | Globales Byte-Budget für gesammelte Bodys. |
 | `max_sessions_global` | `usize` | `128` | Prozessweit aktive WEB-Sitzungen. |
@@ -2654,7 +2655,7 @@ Profilgrenzen müssen ungleich null sein und dürfen die zugehörigen globalen G
 
 ## WEB-Lebenszyklus und API-Verwaltung
 
-- Config-Watcher und Generations-Reload wenden `web.enabled`, `web.timeouts`, vhosts, Profile und Decoy-Snapshots ohne Prozessneustart an. Bestehende Sitzungen behalten die bei ihrer Erstellung übernommenen Grenzen und Deadlines; neue Arbeit verwendet die aktive Generation.
+- Config-Watcher und Generations-Reload wenden `web.enabled`, `web.carrier`, `web.timeouts`, vhosts, Profile und Decoy-Snapshots ohne Prozessneustart an. Bestehende Sitzungen behalten Carrier, Grenzen und Deadlines ihres Erstellungszeitpunkts; neu ausgegebene Bridge-Sitzungen verwenden die aktive Generation.
 - Bestand und Vertrauensrichtlinie der WEB-Listener unter `server.listeners` sowie alle Werte in `web.limits` sind prozesseigen und erfordern einen Neustart.
 - Es gibt keinen eigenen Endpunkt `/v1/web`. `GET /v1/config` lässt `[web]` aus und `PATCH /v1/config` lehnt einen Schlüssel `web` mit `400 section_not_editable` ab.
 - Zum entfernten Anwenden einer WEB-Richtlinie ändern Sie die zuständige TOML-Datei und rufen `POST /v1/system/reload` auf. Prüfen Sie anschließend `GET /v1/system/reload/{id}` und dessen `deferred_process_fields`. Starten Sie Telemt neu, wenn das Feld `server.listeners` oder `web.limits` enthält.

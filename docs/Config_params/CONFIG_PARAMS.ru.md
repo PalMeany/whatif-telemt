@@ -2482,11 +2482,12 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | Ключ | Тип | По умолчанию | Hot-Reload |
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | `✔` |
+| `carrier` | `"https"` или `"https-lanes"` | `"https"` | `✔` |
 | `limits` | таблица | ограниченные defaults | `✘` |
 | `timeouts` | таблица | ограниченные defaults | `✔` |
 | `vhosts` | массив таблиц | `[]` | `✔` |
 
-Для `enabled = true` нужен как минимум один доступный по сетевой политике WEB-listener, один vhost и один профиль в каждом vhost. Отключение WEB после reload прекращает выдачу новых bridge- и session-credentials; для отзыва активных сессий отдельного пользователя используйте users API.
+Для `enabled = true` нужен как минимум один доступный по сетевой политике WEB-listener, один vhost и один профиль в каждом vhost. `carrier = "https"` сохраняет сериализованный HTTPS transport. При `carrier = "https-lanes"` stream zero и каждый logical stream получают независимые uplink sequence, downlink cursor, retry и long poll; этот carrier требует `max_http_handlers >= 2` и публичного HTTP/2 на TLS-терминаторе, чтобы убрать application-level inter-stream head-of-line blocking. Reload применяет `carrier` только к новым bridge sessions. Отключение WEB после reload прекращает выдачу новых bridge- и session-credentials; для отзыва активных сессий отдельного пользователя используйте users API.
 
 # [web.limits]
 
@@ -2500,7 +2501,7 @@ WEB-режим переносит MTProxy-трафик Telegram Desktop внут
 | `carrier_batch_bytes` | `usize` | `2097152` | Максимальный закодированный downlink batch. |
 | `max_frames_per_body` | `usize` | `4096` | Максимальное число frames в одном carrier body. |
 | `max_http_connections` | `usize` | `1024` | Принятые WEB HTTP connections на весь процесс. |
-| `max_http_handlers` | `usize` | `512` | Одновременно выполняемые HTTP handlers на весь процесс. |
+| `max_http_handlers` | `usize` | `512` | Одновременно выполняемые HTTP handlers на весь процесс; HTTPS lanes могут занять long polls не более половины лимита, оставляя остаток для session, uplink и control work. |
 | `max_body_readers` | `usize` | `32` | Одновременно собираемые request bodies на весь процесс. |
 | `max_body_bytes_global` | `usize` | `67108864` | Глобальный байтовый резерв для собранных bodies. |
 | `max_sessions_global` | `usize` | `128` | Активные WEB-сессии на весь процесс. |
@@ -2580,7 +2581,7 @@ Forwarded client address и `public_addr` должны относиться к �
 
 ## Lifecycle WEB и управление через API
 
-- Config watcher и generation reload применяют `web.enabled`, `web.timeouts`, vhosts, profiles и decoy snapshots без перезапуска процесса. Существующие сессии сохраняют лимиты и deadlines своего момента создания; новая работа использует активное поколение.
+- Config watcher и generation reload применяют `web.enabled`, `web.carrier`, `web.timeouts`, vhosts, profiles и decoy snapshots без перезапуска процесса. Существующие сессии сохраняют carrier, лимиты и deadlines своего момента создания; новые bridge sessions используют активное поколение.
 - Состав WEB-listeners и их trust policy в `server.listeners`, а также все значения `web.limits` принадлежат процессу и требуют перезапуска.
 - Отдельного endpoint `/v1/web` нет. `GET /v1/config` не возвращает `[web]`, а `PATCH /v1/config` отклоняет ключ `web` с `400 section_not_editable`.
 - Для удалённого применения WEB policy измените соответствующий TOML-файл и вызовите `POST /v1/system/reload`; проверьте `GET /v1/system/reload/{id}` и поле `deferred_process_fields`. Если оно содержит `server.listeners` или `web.limits`, перезапустите Telemt.

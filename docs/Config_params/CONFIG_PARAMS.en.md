@@ -2556,11 +2556,12 @@ WEB mode carries Telegram Desktop MTProxy traffic through HTTPS terminated by an
 | Key | Type | Default | Hot-Reload |
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `false` | `✔` |
+| `carrier` | `"https"` or `"https-lanes"` | `"https"` | `✔` |
 | `limits` | table | bounded defaults | `✘` |
 | `timeouts` | table | bounded defaults | `✔` |
 | `vhosts` | array of tables | `[]` | `✔` |
 
-`enabled = true` requires at least one network-eligible WEB listener, at least one vhost, and at least one profile in every vhost. Disabling WEB stops issuance of new bridge and session credentials after reload; use the users API to revoke one user's active sessions.
+`enabled = true` requires at least one network-eligible WEB listener, at least one vhost, and at least one profile in every vhost. `carrier = "https"` preserves the serialized HTTPS transport. `carrier = "https-lanes"` gives stream zero and every logical stream independent uplink sequencing, downlink cursors, retries, and long polls; it requires `max_http_handlers >= 2` and public HTTP/2 on the TLS terminator to remove application-level inter-stream head-of-line blocking. A reload applies `carrier` only to newly issued bridge sessions. Disabling WEB stops issuance of new bridge and session credentials after reload; use the users API to revoke one user's active sessions.
 
 # [web.limits]
 
@@ -2574,7 +2575,7 @@ These process-wide ceilings make every WEB registry, queue, request body, static
 | `carrier_batch_bytes` | `usize` | `2097152` | Maximum encoded downlink batch. |
 | `max_frames_per_body` | `usize` | `4096` | Maximum frames parsed or emitted per carrier body. |
 | `max_http_connections` | `usize` | `1024` | Accepted WEB HTTP connections process-wide. |
-| `max_http_handlers` | `usize` | `512` | Concurrent HTTP handlers process-wide. |
+| `max_http_handlers` | `usize` | `512` | Concurrent HTTP handlers process-wide; HTTPS lanes may park at most half, preserving the remainder for session, uplink, and control work. |
 | `max_body_readers` | `usize` | `32` | Concurrent collected request bodies process-wide. |
 | `max_body_bytes_global` | `usize` | `67108864` | Global byte reservation for collected bodies. |
 | `max_sessions_global` | `usize` | `128` | Live WEB sessions process-wide. |
@@ -2654,7 +2655,7 @@ Profile limits must be non-zero and no greater than their corresponding global l
 
 ## WEB lifecycle and API management
 
-- The config watcher and generation reload apply `web.enabled`, `web.timeouts`, vhosts, profiles, and decoy snapshots without a process restart. Existing sessions keep their acquisition-time limits and deadlines; new work uses the active generation.
+- The config watcher and generation reload apply `web.enabled`, `web.carrier`, `web.timeouts`, vhosts, profiles, and decoy snapshots without a process restart. Existing sessions keep their acquisition-time carrier, limits, and deadlines; newly issued bridge sessions use the active generation.
 - WEB listener inventory and trust policy under `server.listeners`, and every `web.limits` value, are process-owned and restart-required.
 - There is no dedicated `/v1/web` endpoint. `GET /v1/config` omits `[web]`, and `PATCH /v1/config` rejects a `web` key with `400 section_not_editable`.
 - To manage WEB policy remotely, update the owned TOML file and call `POST /v1/system/reload`; inspect `GET /v1/system/reload/{id}` and its `deferred_process_fields`. Restart Telemt when it contains `server.listeners` or `web.limits`.

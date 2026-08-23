@@ -2,7 +2,7 @@
 
 [English](WEB_PROXY.en.md) | [Русский](WEB_PROXY.ru.md) | [Deutsch](WEB_PROXY.de.md)
 
-Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über einen begrenzten HTTPS-Long-Poll-Transport, der mit dem Proxy-Typ `WEB` von Telegram Desktop kompatibel ist. In der ersten Implementierung terminiert Telemt TLS nicht selbst: NGINX oder HAProxy verwaltet das öffentliche Zertifikat und leitet unverschlüsseltes HTTP/1.1 an einen privaten Telemt-Listener weiter.
+Der WEB-Modus transportiert gewöhnliche MTProxy-Streams über begrenzte HTTPS-Carrier, die mit dem Proxy-Typ `WEB` von Telegram Desktop kompatibel sind. Telemt terminiert TLS nicht selbst: NGINX oder HAProxy verwaltet das öffentliche Zertifikat und leitet unverschlüsseltes HTTP/1.1 an einen privaten Telemt-Listener weiter.
 
 > [!IMPORTANT]
 >
@@ -28,7 +28,7 @@ Leiten Sie den vollständigen öffentlichen vhost an Telemt weiter. Wenn der TLS
 
 - Der öffentliche Endpunkt ist immer `https://HOST:443`.
 - Unterstützt werden 16-Byte-MTProxy-Secrets in den Modi `plain` und `dd`. FakeTLS-Secrets mit `ee` werden im WEB-Modus nicht unterstützt.
-- Der erste Carrier verwendet serialisierte HTTPS-Uplink-Requests und HTTPS-Long-Polling. WebSocket- und Lane-Carrier werden nicht angeboten.
+- `web.carrier = "https"` wählt serialisierte HTTPS-Uplinks und Long Polling. `web.carrier = "https-lanes"` wählt unabhängige HTTPS-Sequenzen und Polls pro logischem Stream. WebSocket-Carrier werden nicht angeboten.
 - Capability-, Bootstrap- und Session-Zugangsdaten sind getrennte Werte mit begrenzter Lebensdauer. Carrier-Zugangsdaten sind geheim und dürfen nicht in Access-Logs erscheinen.
 - Die innere MTProxy-Authentifizierung ist auf den Benutzer und Secret-Modus des vhost-Profils beschränkt. Ein ungültiger innerer Handshake schließt nur seinen logischen Stream und gelangt niemals in den TCP-Masking-Pfad.
 
@@ -72,6 +72,7 @@ web_trusted_proxy_cidrs = ["127.0.0.1/32"]
 
 [web]
 enabled = true
+carrier = "https-lanes"
 
 [[web.vhosts]]
 host = "proxy.example.com"
@@ -88,6 +89,14 @@ max_sessions = 8
 max_streams = 512
 max_streams_per_session = 64
 ```
+
+`https` bleibt der Default und behält das ursprüngliche serialisierte Verhalten bei. Bei `https-lanes` ist Lane null für Session-Steuerung reserviert, und jeder logische Stream ungleich null erhält eine eigene Lane. Jede Lane besitzt eigene Uplink-Sequenzen, Retry-Digests, Downlink-Cursor, nicht bestätigte Replay-Batches, Queues und einen Newest-Poll-Wins-Lebenszyklus. Ein langsamer Stream blockiert daher keinen anderen Stream auf der WEB-Protokollebene.
+
+Damit entfällt die Serialisierung zwischen WEB-Streams auf Anwendungsebene. Öffentliches HTTP/2 läuft weiterhin über eine oder mehrere TCP-Verbindungen, sodass Paketverlust Head-of-Line-Blocking auf Transportebene verursachen kann; `https-lanes` ist kein HTTP/3- oder QUIC-Carrier.
+
+Alle Lane-Queues bleiben innerhalb der vorhandenen Byte-/Item-Budgets pro Sitzung und Prozess. Die Bridge begrenzt jede Lane zusätzlich auf 8 MiB und 1024 eingereihte Elemente. Lane-Long-Polls dürfen höchstens die Hälfte von `web.limits.max_http_handlers` belegen, sodass Handler-Kapazität für Sitzungserstellung, Uplink, DELETE und andere Steuerarbeit verbleibt. `https-lanes` erfordert `max_http_handlers >= 2`.
+
+Die Pfade `/api/v1/up` und `/api/v1/down` ändern sich nicht. Bei `https-lanes` enthält jeder Request an diese Pfade genau einen kanonischen dezimalen `X-Lane-ID`-Header. Die Uplink-Sequenz beginnt pro Lane unabhängig bei `1`, der Downlink-Cursor bei `0`. Lane null akzeptiert nur Session-`PONG`; jeder Frame einer Lane ungleich null muss dieselbe Stream-ID tragen, und eine neue Lane muss mit `OPEN` beginnen. Nachdem eingereihte und nicht bestätigte Downlink-Daten einer geschlossenen Lane vollständig abgearbeitet sind, antwortet Telemt leer mit `X-Lane-Closed: 1`, und die Bridge beendet deren Polling. Wiederholungen bleiben byte-identisch und spielen die ursprüngliche Bestätigung oder den Downlink-Batch erneut aus.
 
 Der WEB-Listener muss `proxy_protocol = false` und `reuse_allow = false` verwenden. `client_mss`, `synlimit`, `announce` und `announce_ip` sind nicht zulässig. `web_trusted_proxy_cidrs` muss nicht leer sein und darf nur die unmittelbar vorgeschalteten NGINX- oder HAProxy-Peers enthalten; `/0`-Netze werden abgelehnt.
 
@@ -116,6 +125,7 @@ upstream telemt_web {
 
 server {
     listen 443 ssl;
+    http2 on;
     server_name proxy.example.com;
     access_log off;
 
@@ -143,6 +153,8 @@ server {
 
 `client_max_body_size` muss mindestens `web.limits.max_body_bytes` entsprechen. `proxy_read_timeout` und `proxy_send_timeout` müssen größer als `web.timeouts.long_poll_secs` sein, dessen Default 25 Sekunden beträgt. Überschreiben Sie `X-Forwarded-For`, statt einen Wert anzuhängen. Aktivieren Sie keine Upstream-Wiederholungen: Der Bridge-Transport führt byte-identische Wiederholungen über sein eigenes Sequenzprotokoll aus.
 
+Öffentliches HTTP/2 ist für `https-lanes` obligatorisch; verwenden Sie die entsprechende HTTP/2-Direktive der installierten NGINX-Version. Der private Hop von NGINX zu Telemt bleibt absichtlich HTTP/1.1. Die Upstream-Verbindungskapazität muss die erwarteten gleichzeitigen Lane-Polls tragen; `keepalive` steuert den Idle-Pool und ist keine Nebenläufigkeitsgrenze.
+
 ## TLS-Terminierung mit HAProxy
 
 ```haproxy
@@ -165,7 +177,7 @@ backend telemt_web
     server telemt_web_1 127.0.0.1:18080 check
 ```
 
-Im Frontend oder im Abschnitt `defaults` muss auch `timeout client` oberhalb der Long-Poll-Deadline liegen. Pfad, Raw Query, Body sowie die Carrier-Header `Authorization`, `Content-Type`, `X-Up-Seq` und `X-Down-Cursor` dürfen nicht umgeschrieben werden.
+Im Frontend oder im Abschnitt `defaults` muss auch `timeout client` oberhalb der Long-Poll-Deadline liegen. Für `https-lanes` muss das öffentliche HAProxy-ALPN `h2` enthalten. Pfad, Raw Query, Body sowie die Carrier-Header `Authorization`, `Content-Type`, `X-Up-Seq`, `X-Down-Cursor` und `X-Lane-ID` dürfen nicht umgeschrieben werden.
 
 ## Lebenszyklus und Reload-Verhalten
 
@@ -173,8 +185,8 @@ Im Frontend oder im Abschnitt `defaults` muss auch `timeout client` oberhalb der
 | --- | --- |
 | Bestand der WEB-Listener, Bind-Adresse und Vertrauensrichtlinie | Prozesseigen; Telemt neu starten. |
 | Jeder Wert in `[web.limits]` | Prozesseigener Speicher- und Ressourcenvertrag; Telemt neu starten. |
-| `web.enabled`, Timeouts, vhosts, Profile und Decoys | Werden vom Config-Watcher oder durch einen Runtime-Generations-Reload angewendet. |
-| Bestehende HTTP-Verbindungen und WEB-Sitzungen | Behalten die bei ihrer Erstellung übernommenen Grenzen und Deadlines; neue logische Streams verwenden die aktive Runtime-Generation. |
+| `web.enabled`, `web.carrier`, Timeouts, vhosts, Profile und Decoys | Werden vom Config-Watcher oder durch einen Runtime-Generations-Reload angewendet. |
+| Bestehende HTTP-Verbindungen und WEB-Sitzungen | Behalten Carrier, Grenzen und Deadlines ihres Erstellungszeitpunkts; neu ausgegebene Bridge-Sitzungen verwenden den aktiven Carrier. Neue logische Streams verwenden die aktive Relay-Generation. |
 | Beenden des Prozesses | Verwendet den zuletzt geladenen Wert von `web.timeouts.shutdown_secs`. |
 
 Jeder logische Stream behält die Client-IP seiner Sitzung und besitzt während der gesamten Relay-Lebensdauer einen prozessweit eindeutigen, von null verschiedenen synthetischen Quellport. Damit bleibt für Direct- und Middle-End-KDF-Routing ein stabiles, kollisionsfreies Quell-/Ziel-Tupel erhalten.
@@ -217,7 +229,7 @@ curl -sS http://127.0.0.1:9091/v1/system/reload/RELOAD_ID \
   -H "Authorization: ${TELEMT_API_AUTH}"
 ```
 
-Der terminale Status `succeeded` bestätigt die Runtime-Aktivierung. Enthält `deferred_process_fields` den Wert `server.listeners` oder `web.limits`, ist die Datei gültig und gespeichert, diese Einstellungen erfordern aber weiterhin einen Telemt-Neustart.
+Der terminale Status `succeeded` bestätigt die Runtime-Aktivierung. Ein geänderter `web.carrier` wird von neu ausgegebenen Bridge-Sitzungen verwendet; bestehende Sitzungen werden nicht migriert. Enthält `deferred_process_fields` den Wert `server.listeners` oder `web.limits`, ist die Datei gültig und gespeichert, diese Einstellungen erfordern aber weiterhin einen Telemt-Neustart.
 
 Operationen für Access-Benutzer verwenden die vorhandenen Endpunkte, zum Beispiel:
 
@@ -249,8 +261,9 @@ Der vollständige Vertrag für Requests, Revisionen, Fehler und alle Benutzer-En
 2. Prüfen Sie über den öffentlichen TLS-Endpunkt, dass `GET /`, ein unbekannter Pfad und eine ungültige `bridge`-Query die konfigurierte Decoy-Site zurückgeben.
 3. Prüfen Sie, dass Telemt genau eine kanonische `X-Forwarded-For`-Adresse und `Host: proxy.example.com` oder `Host: proxy.example.com:443` erhält.
 4. Importieren Sie den ausgegebenen `tg://webproxy`-Link in den vorgesehenen Telegram-Desktop-Build und stellen Sie eine Proxy-Verbindung her.
-5. Testen Sie einen Reconnect und mindestens einen Long Poll über 25 Sekunden, um sicherzustellen, dass Frontend-Timeouts den Carrier nicht abbrechen.
-6. Prüfen Sie Benutzer- und logische MTProxy-Verbindungslimits anhand der Logical-Stream-Zähler und nicht anhand der Zahl der HTTP-Verbindungen.
+5. Bestätigen Sie für `https-lanes`, dass die öffentliche Verbindung HTTP/2 ausgehandelt hat, und testen Sie mindestens zwei gleichzeitige logische Streams; der private Hop zu Telemt bleibt HTTP/1.1.
+6. Testen Sie einen Reconnect und mindestens einen Long Poll über 25 Sekunden, um sicherzustellen, dass Frontend-Timeouts den Carrier nicht abbrechen.
+7. Prüfen Sie Benutzer- und logische MTProxy-Verbindungslimits anhand der Logical-Stream-Zähler und nicht anhand der Zahl der HTTP-Verbindungen.
 
 ## Fehlerbehebung
 
@@ -259,5 +272,6 @@ Der vollständige Vertrag für Requests, Revisionen, Fehler und alle Benutzer-En
 | WEB-Konfiguration ist auf dem Datenträger gültig, aber das Listener-Verhalten hat sich nicht geändert | Prüfen Sie `deferred_process_fields`; Listener- und `[web.limits]`-Änderungen erfordern einen Neustart. |
 | Carrier-Requests erreichen den Decoy | Prüfen Sie den exakten vhost, den Secret-Modus des Links, das CIDR des direkten Proxys und genau einen kanonischen `X-Forwarded-For`-Wert. |
 | Long Polls werden nach einem festen Intervall getrennt | Setzen Sie Client-, Server-, Sende- und Lese-Timeouts von NGINX/HAProxy über `web.timeouts.long_poll_secs`. |
+| `https-lanes` funktioniert, Streams blockieren sich aber weiterhin | Prüfen Sie die öffentliche HTTP/2-Aushandlung, die unveränderte Weitergabe von `X-Lane-ID` und genügend TLS-Terminator-Upstream-Verbindungen für parallele private HTTP/1.1-Polls. |
 | Telegram Desktop lehnt den Link ab | Lassen Sie den Port weg und verwenden Sie einen gültigen FQDN, extern Port 443 sowie ausschließlich `plain` oder `dd`. |
 | Ein Knoten funktioniert, ein Load-Balancing-Pool aber nur sporadisch | Konfigurieren Sie Affinität für den gesamten vhost; WEB-Zugangsdatenregister sind prozesslokal. |

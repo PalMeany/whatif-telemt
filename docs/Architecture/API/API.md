@@ -1537,7 +1537,7 @@ The API provides partial operational control for WEB mode; it does not expose a 
 | Rotate a profiled user's secret | Use `/v1/users/{username}/rotate-secret`; the config watcher rebuilds WEB capabilities from the new access snapshot. The API returns the secret, not a `tg://webproxy` link. |
 | Read WEB-specific runtime statistics | No WEB-specific endpoint exists in the current API surface. |
 
-`web.enabled`, `web.timeouts`, vhosts, profiles, and decoy snapshots are runtime-generation fields. WEB listener inventory and trust policy, plus all `[web.limits]`, are process-owned. A successful reload can therefore activate the runtime-owned subset while reporting the process-owned subset as deferred.
+`web.enabled`, `web.carrier`, `web.timeouts`, vhosts, profiles, and decoy snapshots are runtime-generation fields. A changed carrier applies only to newly issued bridge sessions; existing sessions retain their creation-time carrier. WEB listener inventory and trust policy, plus all `[web.limits]`, are process-owned. A successful reload can therefore activate the runtime-owned subset while reporting the process-owned subset as deferred.
 
 Before deleting a user referenced by a WEB profile, remove and apply the profile first. User mutations validate the complete resulting configuration, so a dangling WEB profile is rejected rather than persisted.
 
