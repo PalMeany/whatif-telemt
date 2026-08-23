@@ -59,6 +59,11 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
     }
 
     validate_limits(&config.web.limits)?;
+    if config.web.carrier == WebCarrier::HttpsLanes
+        && config.web.limits.max_http_handlers < 2
+    {
+        return config_error("web.carrier=https-lanes requires web.limits.max_http_handlers >= 2");
+    }
     validate_timeouts(&config.web.timeouts)?;
     validate_vhosts(config)?;
     Ok(())

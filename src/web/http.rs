@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{WebClientIpSource, WebRuntimeVhost};
+use crate::config::{WebCarrier, WebClientIpSource, WebRuntimeVhost};
 use crate::web::bridge;
 use crate::web::frame::{self, FrameType};
 use crate::web::manager::{ManagerError, WebProcessRuntime};
@@ -183,18 +183,19 @@ async fn handle_root(
         strip_query(&mut request);
         return serve_decoy(request, vhost, true, &runtime).await;
     };
+    let carrier = profile.carrier;
     let Ok(bootstrap) = runtime.issue_bootstrap(profile, client_ip) else {
         strip_query(&mut request);
         return serve_decoy(request, vhost, true, &runtime).await;
     };
     let generation = runtime.active_generation();
-    let config = generation.config();
     let page = bridge::render(
         &vhost.host,
         &bootstrap,
-        config.web.limits.carrier_batch_bytes,
-        config.web.limits.pending_bytes_per_session,
-        config.web.limits.pending_items_per_session,
+        generation.config().web.limits.carrier_batch_bytes,
+        generation.config().web.limits.pending_bytes_per_session,
+        generation.config().web.limits.pending_items_per_session,
+        carrier,
         &generation.rng,
     );
     let mut response = full_response(StatusCode::OK, Bytes::from(page.body));
@@ -238,10 +239,7 @@ async fn handle_api(
     runtime: Arc<WebProcessRuntime>,
     vhost: Arc<WebRuntimeVhost>,
 ) -> HttpResponse {
-    if request.uri().query().is_some()
-        || request.headers().contains_key(header::COOKIE)
-        || request.headers().contains_key("x-lane-id")
-    {
+    if request.uri().query().is_some() || request.headers().contains_key(header::COOKIE) {
         return serve_decoy(request, vhost, true, &runtime).await;
     }
     let Some(client_ip) = client_ip(
@@ -272,6 +270,9 @@ async fn handle_session(
     token_hash: crate::web::manager::TokenHash,
     client_ip: IpAddr,
 ) -> HttpResponse {
+    if request.headers().contains_key("x-lane-id") {
+        return serve_decoy(request, vhost, true, &runtime).await;
+    }
     if request.method() == Method::DELETE {
         if request.headers().contains_key(header::CONTENT_TYPE) {
             return serve_decoy(request, vhost, true, &runtime).await;
@@ -321,7 +322,7 @@ async fn handle_session(
             );
             response.headers_mut().insert(
                 HeaderName::from_static("x-carrier-mode"),
-                HeaderValue::from_static("https"),
+                HeaderValue::from_static(result.carrier.as_str()),
             );
             response.headers_mut().insert(
                 HeaderName::from_static("x-down-cursor"),
@@ -352,6 +353,9 @@ async fn handle_up(
     let Ok(session) = runtime.get_session(token_hash, &vhost.host) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
+    let Some(lane_id) = carrier_lane(&request, session.carrier()) else {
+        return serve_decoy(request, vhost, true, &runtime).await;
+    };
     let limit = runtime.active_generation().config().web.limits.max_body_bytes;
     let CollectedBody {
         request,
@@ -364,7 +368,11 @@ async fn handle_up(
             return serve_decoy(request, vhost, true, &runtime).await;
         }
     };
-    match session.process_up(sequence, &body) {
+    let result = match lane_id {
+        Some(lane_id) => session.process_up_lane(lane_id, sequence, &body),
+        None => session.process_up(sequence, &body),
+    };
+    match result {
         Ok(ack) => {
             let mut response = carrier_empty(StatusCode::NO_CONTENT);
             insert_header(
@@ -396,6 +404,9 @@ async fn handle_down(
     let Ok(session) = runtime.get_session(token_hash, &vhost.host) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
+    let Some(lane_id) = carrier_lane(&request, session.carrier()) else {
+        return serve_decoy(request, vhost, true, &runtime).await;
+    };
     let CollectedBody {
         request,
         body,
@@ -410,7 +421,19 @@ async fn handle_down(
     if !body.is_empty() {
         return serve_decoy(request, vhost, true, &runtime).await;
     }
-    match session.poll_down(cursor).await {
+    let _lane_poll = if lane_id.is_some() {
+        let Some(permit) = runtime.try_lane_poll() else {
+            return service_unavailable();
+        };
+        Some(permit)
+    } else {
+        None
+    };
+    let result = match lane_id {
+        Some(lane_id) => session.poll_down_lane(lane_id, cursor).await,
+        None => session.poll_down(cursor).await,
+    };
+    match result {
         Ok(result) if result.body.is_empty() => {
             let mut response = carrier_empty(StatusCode::NO_CONTENT);
             insert_header(
@@ -418,6 +441,12 @@ async fn handle_down(
                 HeaderName::from_static("x-down-cursor"),
                 &result.next_cursor.to_string(),
             );
+            if result.lane_closed {
+                response.headers_mut().insert(
+                    HeaderName::from_static("x-lane-closed"),
+                    HeaderValue::from_static("1"),
+                );
+            }
             response
         }
         Ok(result) => {
@@ -434,6 +463,16 @@ async fn handle_down(
             service_unavailable()
         }
         Err(_) => serve_decoy(request, vhost, true, &runtime).await,
+    }
+}
+
+fn carrier_lane<B>(request: &Request<B>, carrier: WebCarrier) -> Option<Option<u32>> {
+    match carrier {
+        WebCarrier::Https => (!request.headers().contains_key("x-lane-id")).then_some(None),
+        WebCarrier::HttpsLanes => canonical_u64_header(request, "x-lane-id")
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value <= frame::MAX_STREAM_ID)
+            .map(Some),
     }
 }
 

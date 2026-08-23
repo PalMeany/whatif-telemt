@@ -14,6 +14,7 @@ web_trusted_proxy_cidrs = ["127.0.0.1/32"]
 
 [web]
 enabled = true
+carrier = "https-lanes"
 
 [[web.vhosts]]
 host = "Proxy.Example.COM"
@@ -42,9 +43,20 @@ fn web_config_builds_canonical_runtime_snapshot() {
     assert_eq!(vhost.profiles.len(), 1);
     assert_eq!(vhost.profiles[0].user, "alice");
     assert_eq!(vhost.profiles[0].secret_mode, WebSecretMode::Dd);
+    assert_eq!(vhost.profiles[0].carrier, WebCarrier::HttpsLanes);
     assert_eq!(vhost.profiles[0].max_sessions, 4);
     assert_eq!(vhost.profiles[0].max_streams, 64);
     assert_eq!(vhost.profiles[0].max_streams_per_session, 16);
+}
+
+#[test]
+fn https_lanes_requires_separate_poll_and_control_handler_capacity() {
+    let invalid = WEB_CONFIG.replace(
+        "carrier = \"https-lanes\"",
+        "carrier = \"https-lanes\"\n\n[web.limits]\nmax_http_handlers = 1\nmax_body_readers = 1",
+    );
+    let error = load_config_error_from_temp_toml(&invalid);
+    assert!(error.contains("web.carrier=https-lanes requires"));
 }
 
 #[test]
@@ -60,8 +72,8 @@ fn web_listener_requires_an_explicit_trusted_proxy() {
 #[test]
 fn web_queue_limits_preserve_control_and_uplink_progress() {
     let invalid = WEB_CONFIG.replace(
-        "[web]\nenabled = true",
-        "[web]\nenabled = true\n\n[web.limits]\ncontrol_bytes_per_session = 1",
+        "carrier = \"https-lanes\"",
+        "carrier = \"https-lanes\"\n\n[web.limits]\ncontrol_bytes_per_session = 1",
     );
     let error = load_config_error_from_temp_toml(&invalid);
     assert!(error.contains("control reserves must cover bounded control frames"));
@@ -70,9 +82,9 @@ fn web_queue_limits_preserve_control_and_uplink_progress() {
 #[test]
 fn web_semaphore_limits_are_rejected_before_runtime_construction() {
     let invalid = WEB_CONFIG.replace(
-        "[web]\nenabled = true",
+        "carrier = \"https-lanes\"",
         &format!(
-            "[web]\nenabled = true\n\n[web.limits]\nmax_http_connections = {}",
+            "carrier = \"https-lanes\"\n\n[web.limits]\nmax_http_connections = {}",
             tokio::sync::Semaphore::MAX_PERMITS + 1,
         ),
     );

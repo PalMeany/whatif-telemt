@@ -49,7 +49,7 @@ pub use server::{
 };
 #[allow(unused_imports)]
 pub use web::{
-    WebConfig, WebDecoyConfig, WebLimitsConfig, WebProfileConfig, WebSecretMode,
+    WebCarrier, WebConfig, WebDecoyConfig, WebLimitsConfig, WebProfileConfig, WebSecretMode,
     WebTimeoutsConfig, WebVhostConfig,
 };
 pub(crate) use web::{

@@ -130,6 +130,7 @@ pub(super) fn matching_profile(
                 && profile.public_addr == expected.public_addr
                 && profile.user == expected.user
                 && profile.secret_mode == expected.secret_mode
+                && profile.carrier == expected.carrier
                 && profile.capability == expected.capability
         })
         .cloned()

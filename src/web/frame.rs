@@ -4,6 +4,8 @@ use crate::config::WebLimitsConfig;
 
 /// Fixed WEB frame header size.
 pub(crate) const HEADER_BYTES: usize = 8;
+/// Largest stream identifier representable by the WEB frame header.
+pub(crate) const MAX_STREAM_ID: u32 = 0x00ff_ffff;
 /// Initial bidirectional stream credit.
 pub(crate) const INITIAL_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 /// Maximum data chunk emitted by the server.

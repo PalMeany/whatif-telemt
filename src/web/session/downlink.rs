@@ -6,12 +6,16 @@ use super::{
     DownBatch, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame, SessionState,
     WebSession,
 };
+use crate::config::WebCarrier;
 use crate::web::frame::{self, FrameType};
 use crate::web::manager::ManagerError;
 
 impl WebSession {
     /// Polls pending downlink frames with cursor replay and newest-poll-wins semantics.
     pub(crate) async fn poll_down(&self, cursor: u64) -> Result<PollResult, ManagerError> {
+        if self.carrier() != WebCarrier::Https {
+            return Err(ManagerError::Protocol);
+        }
         let epoch = {
             let mut state = self.state.lock();
             if state.closed {
@@ -23,6 +27,7 @@ impl WebSession {
                     return Ok(PollResult {
                         body: unacked.body.clone(),
                         next_cursor: unacked.next_cursor,
+                        lane_closed: false,
                     });
                 }
                 if cursor != unacked.next_cursor {
@@ -51,6 +56,7 @@ impl WebSession {
                         return Ok(PollResult {
                             body: Bytes::new(),
                             next_cursor: cursor,
+                            lane_closed: false,
                         });
                     }
                     if !state.pending_frames.is_empty() {
@@ -65,6 +71,7 @@ impl WebSession {
                         let result = PollResult {
                             body: batch.body.clone(),
                             next_cursor: batch.next_cursor,
+                            lane_closed: false,
                         };
                         if let Some(manager) = self.manager.upgrade() {
                             manager.record_down(result.body.len());
@@ -89,6 +96,7 @@ impl WebSession {
                 Ok(PollResult {
                     body: Bytes::new(),
                     next_cursor: cursor,
+                    lane_closed: false,
                 })
             }
         }
@@ -210,6 +218,14 @@ impl WebSession {
         if amount == 0 {
             return true;
         }
+        if self.carrier() == WebCarrier::HttpsLanes {
+            return self.queue_control_locked(
+                state,
+                FrameType::Window,
+                stream_id,
+                &frame::window_payload(amount),
+            );
+        }
         if let Some(index) = state.pending_windows.get(&stream_id).copied()
             && let Some(queued) = state.pending_frames.get_mut(index)
         {
@@ -251,6 +267,9 @@ impl WebSession {
         stream_id: u32,
         payload: &[u8],
     ) -> bool {
+        if self.carrier() == WebCarrier::HttpsLanes {
+            return self.queue_frame_locked(state, FrameType::Data, stream_id, payload, false);
+        }
         let can_coalesce = state.pending_frames.back().is_some_and(|last| {
             last.frame_type == FrameType::Data
                 && last.stream_id == stream_id
@@ -281,6 +300,15 @@ impl WebSession {
         payload: &[u8],
         control: bool,
     ) -> bool {
+        if self.carrier() == WebCarrier::HttpsLanes {
+            return self.queue_lane_frame_locked(
+                state,
+                frame_type,
+                stream_id,
+                payload,
+                control,
+            );
+        }
         let cost = frame::HEADER_BYTES + payload.len() + QUEUE_ITEM_COST;
         let class = if control {
             PendingClass::Control
@@ -408,6 +436,7 @@ mod tests {
             public_addr: SocketAddr::from(([203, 0, 113, 10], 443)),
             user: "alice".to_string(),
             secret_mode: WebSecretMode::Plain,
+            carrier: WebCarrier::Https,
             capability: [0; 32],
             max_sessions: 1,
             max_streams: 1,

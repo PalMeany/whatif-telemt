@@ -259,7 +259,7 @@ const LISTENER_CONFIG_KEYS: &[&str] = &[
     "web_trusted_proxy_cidrs",
 ];
 
-const WEB_CONFIG_KEYS: &[&str] = &["enabled", "limits", "timeouts", "vhosts"];
+const WEB_CONFIG_KEYS: &[&str] = &["enabled", "carrier", "limits", "timeouts", "vhosts"];
 
 const WEB_LIMITS_CONFIG_KEYS: &[&str] = &[
     "max_header_bytes",

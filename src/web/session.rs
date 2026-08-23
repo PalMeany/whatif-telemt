@@ -12,7 +12,7 @@ use tokio::io::ReadBuf;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{WebLimitsConfig, WebRuntimeProfile, WebTimeoutsConfig};
+use crate::config::{WebCarrier, WebLimitsConfig, WebRuntimeProfile, WebTimeoutsConfig};
 use crate::web::frame::{self, FrameType};
 use crate::web::manager::{ProfileKey, TokenHash, WebProcessRuntime};
 
@@ -20,6 +20,8 @@ use crate::web::manager::{ProfileKey, TokenHash, WebProcessRuntime};
 mod backend;
 // Downlink queues own cursor replay, flow control, and memory reservations.
 mod downlink;
+// Lane carrier state isolates request sequencing and downlink replay per logical stream.
+mod lanes;
 // Uplink batches own exactly-once sequencing and client-frame validation.
 mod uplink;
 
@@ -64,6 +66,34 @@ struct DownBatch {
     control_items: usize,
 }
 
+struct CarrierLane {
+    pending_frames: VecDeque<QueuedFrame>,
+    pending_windows: HashMap<u32, usize>,
+    unacked: Option<DownBatch>,
+    down_cursor: u64,
+    down_epoch: u64,
+    last_up_sequence: u64,
+    last_up_digest: TokenHash,
+    up_active: bool,
+    notify: Arc<Notify>,
+}
+
+impl CarrierLane {
+    fn new() -> Self {
+        Self {
+            pending_frames: VecDeque::new(),
+            pending_windows: HashMap::new(),
+            unacked: None,
+            down_cursor: 0,
+            down_epoch: 0,
+            last_up_sequence: 0,
+            last_up_digest: [0; 32],
+            up_active: false,
+            notify: Arc::new(Notify::new()),
+        }
+    }
+}
+
 struct SessionState {
     streams: HashMap<u32, StreamState>,
     active_peer_ports: HashSet<u16>,
@@ -76,6 +106,7 @@ struct SessionState {
     down_epoch: u64,
     last_up_sequence: u64,
     last_up_digest: TokenHash,
+    carrier_lanes: HashMap<u32, CarrierLane>,
     pending_bytes: usize,
     pending_items: usize,
     pending_control_bytes: usize,
@@ -108,6 +139,8 @@ pub(crate) struct PollResult {
     pub(crate) body: Bytes,
     /// Cursor the client must present on its next downlink request.
     pub(crate) next_cursor: u64,
+    /// Indicates that a drained non-zero lane no longer needs polling.
+    pub(crate) lane_closed: bool,
 }
 
 impl WebSession {
@@ -122,6 +155,10 @@ impl WebSession {
         limits: WebLimitsConfig,
         timeouts: WebTimeoutsConfig,
     ) -> Arc<Self> {
+        let mut carrier_lanes = HashMap::new();
+        if profile.carrier == WebCarrier::HttpsLanes {
+            carrier_lanes.insert(0, CarrierLane::new());
+        }
         Arc::new(Self {
             manager,
             token_hash,
@@ -142,6 +179,7 @@ impl WebSession {
                 down_epoch: 0,
                 last_up_sequence: 0,
                 last_up_digest: [0; 32],
+                carrier_lanes,
                 pending_bytes: 0,
                 pending_items: 0,
                 pending_control_bytes: 0,
@@ -168,6 +206,11 @@ impl WebSession {
         self.profile.host == host
     }
 
+    /// Returns the immutable carrier selected when this session was created.
+    pub(crate) fn carrier(&self) -> WebCarrier {
+        self.profile.carrier
+    }
+
     /// Closes carrier state while relay tasks retain their admission until exit.
     pub(crate) fn close(&self) {
         let (data_bytes, data_items, control_bytes, control_items) = {
@@ -188,6 +231,10 @@ impl WebSession {
             state.pending_frames.clear();
             state.pending_windows.clear();
             state.unacked = None;
+            for lane in state.carrier_lanes.values() {
+                lane.notify.notify_waiters();
+            }
+            state.carrier_lanes.clear();
             let control_bytes = state.pending_control_bytes;
             let control_items = state.pending_control_items;
             let data_bytes = state.pending_bytes.saturating_sub(control_bytes);
@@ -199,7 +246,9 @@ impl WebSession {
             (data_bytes, data_items, control_bytes, control_items)
         };
         self.cancel.cancel();
-        self.down_notify.notify_waiters();
+        if self.carrier() == WebCarrier::Https {
+            self.down_notify.notify_waiters();
+        }
         if let Some(manager) = self.manager.upgrade() {
             manager.release_pending(data_bytes, data_items, false);
             manager.release_pending(control_bytes, control_items, true);
@@ -311,7 +360,9 @@ impl WebSession {
         stream.send_credit -= count as u64;
         state.last_activity = Instant::now();
         drop(state);
-        self.down_notify.notify_waiters();
+        if self.carrier() == WebCarrier::Https {
+            self.down_notify.notify_waiters();
+        }
         Poll::Ready(Ok(count))
     }
 
@@ -342,14 +393,17 @@ fn inbound_queue_cost(queue: &VecDeque<InboundChunk>) -> (usize, usize) {
     (bytes, queue.len())
 }
 
-fn remember_closed(state: &mut SessionState, stream_id: u32, limit: usize) {
+fn remember_closed(state: &mut SessionState, stream_id: u32, limit: usize) -> Option<u32> {
     if !state.closed_streams.insert(stream_id) {
-        return;
+        return None;
     }
     state.closed_order.push_back(stream_id);
+    let mut evicted = None;
     while state.closed_order.len() > limit {
         if let Some(oldest) = state.closed_order.pop_front() {
             state.closed_streams.remove(&oldest);
+            evicted = Some(oldest);
         }
     }
+    evicted
 }

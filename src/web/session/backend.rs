@@ -7,7 +7,7 @@ use crate::web::frame::FrameType;
 use crate::web::stream::WebLogicalStream;
 use crate::proxy::shared_state::ConntrackClosePolicy;
 
-use super::{WebSession, inbound_queue_cost, remember_closed};
+use super::{WebSession, inbound_queue_cost};
 
 impl WebSession {
     /// Starts one owned inner handshake and relay task for an admitted stream.
@@ -65,11 +65,7 @@ impl WebSession {
             let queued = state.streams.remove(&stream_id).map(|stream| {
                 let (bytes, items) = inbound_queue_cost(&stream.inbound);
                 self.release_locked(&mut state, bytes, items, false);
-                remember_closed(
-                    &mut state,
-                    stream_id,
-                    self.limits.max_tombstones_per_session,
-                );
+                self.remember_closed_locked(&mut state, stream_id);
                 self.queue_control_locked(&mut state, FrameType::Close, stream_id, &[])
             });
             (queued, reserved)
@@ -88,7 +84,9 @@ impl WebSession {
             if !queued {
                 self.close();
             }
-            self.down_notify.notify_waiters();
+            if self.carrier() == crate::config::WebCarrier::Https {
+                self.down_notify.notify_waiters();
+            }
         }
     }
 }

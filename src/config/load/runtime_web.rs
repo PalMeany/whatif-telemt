@@ -62,6 +62,7 @@ pub(super) fn rebuild(config: &mut ProxyConfig) -> Result<()> {
                 public_addr: vhost.public_addr,
                 user: profile.user.clone(),
                 secret_mode: profile.secret_mode,
+                carrier: config.web.carrier,
                 capability,
                 max_sessions: profile
                     .max_sessions

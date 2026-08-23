@@ -16,6 +16,27 @@ pub enum WebSecretMode {
     Dd,
 }
 
+/// HTTP carrier selected for newly issued WEB bridge sessions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebCarrier {
+    /// Serialize all logical streams through one uplink and one downlink sequence.
+    #[default]
+    Https,
+    /// Give every logical stream independent HTTPS sequencing and polling state.
+    HttpsLanes,
+}
+
+impl WebCarrier {
+    /// Returns the exact carrier token advertised to the browser bridge.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Https => "https",
+            Self::HttpsLanes => "https-lanes",
+        }
+    }
+}
+
 /// One access user explicitly exposed through a WEB virtual host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebProfileConfig {
@@ -273,6 +294,9 @@ pub struct WebConfig {
     /// Enables issuance of new WEB bridge and session credentials.
     #[serde(default)]
     pub enabled: bool,
+    /// Carrier selected for newly issued WEB bridge sessions.
+    #[serde(default)]
+    pub carrier: WebCarrier,
     /// Hard process and protocol limits.
     #[serde(default)]
     pub limits: WebLimitsConfig,
@@ -320,6 +344,8 @@ pub(crate) struct WebRuntimeProfile {
     pub(crate) user: String,
     /// Client secret representation and inner protocol policy.
     pub(crate) secret_mode: WebSecretMode,
+    /// Carrier frozen into bridge and session state at issuance time.
+    pub(crate) carrier: WebCarrier,
     /// HMAC-derived bridge capability.
     pub(crate) capability: [u8; 32],
     /// Per-profile live session ceiling.

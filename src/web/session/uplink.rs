@@ -9,8 +9,9 @@ use subtle::ConstantTimeEq;
 
 use super::{
     InboundChunk, PendingClass, QUEUE_ITEM_COST, SessionState, StreamState, WebSession,
-    inbound_queue_cost, remember_closed,
+    inbound_queue_cost,
 };
+use crate::config::WebCarrier;
 use crate::web::frame::{self, Frame, FrameType};
 use crate::web::manager::{ManagerError, TokenHash};
 
@@ -21,6 +22,9 @@ impl WebSession {
         sequence: u64,
         body: &[u8],
     ) -> Result<u64, ManagerError> {
+        if self.carrier() != WebCarrier::Https {
+            return Err(ManagerError::Protocol);
+        }
         if self
             .up_active
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -117,7 +121,7 @@ impl WebSession {
         result
     }
 
-    fn apply_batch_locked(
+    pub(super) fn apply_batch_locked(
         &self,
         state: &mut SessionState,
         frames: &[Frame<'_>],
@@ -133,11 +137,7 @@ impl WebSession {
             match value.frame_type {
                 FrameType::Open => {
                     let Some(peer_port) = self.reserve_stream_locked(state) else {
-                        remember_closed(
-                            state,
-                            value.stream_id,
-                            self.limits.max_tombstones_per_session,
-                        );
+                        self.remember_closed_locked(state, value.stream_id);
                         if !self.queue_control_locked(
                             state,
                             FrameType::Close,
@@ -195,11 +195,7 @@ impl WebSession {
                     };
                     let (bytes, items) = inbound_queue_cost(&stream.inbound);
                     self.release_locked(state, bytes, items, false);
-                    remember_closed(
-                        state,
-                        value.stream_id,
-                        self.limits.max_tombstones_per_session,
-                    );
+                    self.remember_closed_locked(state, value.stream_id);
                     if let Some(waker) = stream.read_waker {
                         waker.wake();
                     }
@@ -246,7 +242,7 @@ impl Drop for UplinkGuard<'_> {
     }
 }
 
-fn validate_batch(state: &SessionState, frames: &[Frame<'_>]) -> bool {
+pub(super) fn validate_batch(state: &SessionState, frames: &[Frame<'_>]) -> bool {
     let mut live = state
         .streams
         .iter()
@@ -312,7 +308,10 @@ fn validate_batch(state: &SessionState, frames: &[Frame<'_>]) -> bool {
     true
 }
 
-fn inbound_reservation(state: &SessionState, frames: &[Frame<'_>]) -> (usize, usize) {
+pub(super) fn inbound_reservation(
+    state: &SessionState,
+    frames: &[Frame<'_>],
+) -> (usize, usize) {
     let mut live = state.streams.keys().copied().collect::<HashSet<_>>();
     let mut bytes = 0usize;
     let mut items = 0usize;
@@ -350,6 +349,7 @@ mod tests {
             public_addr: SocketAddr::from(([203, 0, 113, 10], 443)),
             user: "alice".to_string(),
             secret_mode: WebSecretMode::Plain,
+            carrier: WebCarrier::Https,
             capability: [0; 32],
             max_sessions: 1,
             max_streams: 1,

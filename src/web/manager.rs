@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use zeroize::Zeroizing;
 
-use crate::config::{WebLimitsConfig, WebRuntimeProfile};
+use crate::config::{WebCarrier, WebLimitsConfig, WebRuntimeProfile};
 use crate::maestro::generation::RuntimeGeneration;
 use crate::web::frame;
 use crate::web::session::WebSession;
@@ -59,6 +59,8 @@ pub(crate) enum ManagerError {
 pub(crate) struct CreateResult {
     /// Opaque bearer token for the created or replayed session.
     pub(crate) token: String,
+    /// Carrier frozen into the created or replayed session.
+    pub(crate) carrier: WebCarrier,
 }
 
 /// Process-owned bounded WEB credential, session, and memory coordinator.
@@ -68,6 +70,7 @@ pub(crate) struct WebProcessRuntime {
     state: Mutex<ManagerState>,
     http_connections: Arc<Semaphore>,
     http_handlers: Arc<Semaphore>,
+    lane_polls: Arc<Semaphore>,
     body_readers: Arc<Semaphore>,
     body_bytes: Arc<Semaphore>,
     stream_handshakes: Arc<Semaphore>,
@@ -94,6 +97,7 @@ impl WebProcessRuntime {
             active_runtime,
             http_connections: Arc::new(Semaphore::new(limits.max_http_connections)),
             http_handlers: Arc::new(Semaphore::new(limits.max_http_handlers)),
+            lane_polls: Arc::new(Semaphore::new((limits.max_http_handlers / 2).max(1))),
             body_readers: Arc::new(Semaphore::new(limits.max_body_readers)),
             body_bytes: Arc::new(Semaphore::new(limits.max_body_bytes_global)),
             stream_handshakes: Arc::new(Semaphore::new(limits.max_stream_handshakes)),
@@ -148,6 +152,15 @@ impl WebProcessRuntime {
     /// Reserves one concurrently executing HTTP request handler.
     pub(crate) fn try_http_handler(&self) -> Option<OwnedSemaphorePermit> {
         let permit = Arc::clone(&self.http_handlers).try_acquire_owned().ok();
+        if permit.is_none() {
+            self.record_limit_hit();
+        }
+        permit
+    }
+
+    /// Reserves one parked lane poll without exhausting all HTTP handlers.
+    pub(crate) fn try_lane_poll(&self) -> Option<OwnedSemaphorePermit> {
+        let permit = Arc::clone(&self.lane_polls).try_acquire_owned().ok();
         if permit.is_none() {
             self.record_limit_hit();
         }
@@ -307,11 +320,13 @@ impl WebProcessRuntime {
             if !digest_matches {
                 return Err(ManagerError::Authentication);
             }
-            if entry.session.is_none() {
-                return Err(ManagerError::Authentication);
-            }
+            let session = entry
+                .session
+                .as_ref()
+                .ok_or(ManagerError::Authentication)?;
             return Ok(CreateResult {
                 token: entry.session_token.as_str().to_owned(),
+                carrier: session.carrier(),
             });
         }
         if entry.generation_id != generation.id {
@@ -379,6 +394,7 @@ impl WebProcessRuntime {
         self.sessions_created.fetch_add(1, Ordering::Relaxed);
         Ok(CreateResult {
             token: session_token,
+            carrier: session.carrier(),
         })
     }
 
