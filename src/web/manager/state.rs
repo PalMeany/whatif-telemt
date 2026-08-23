@@ -14,13 +14,11 @@ use crate::web::session::WebSession;
 
 /// One issued bootstrap and optional idempotent session-creation replay state.
 pub(super) struct Bootstrap {
-    /// Generation that issued the bootstrap.
-    pub(super) generation_id: u64,
     /// Credential and replay-state expiry deadline.
     pub(super) expires_at: Instant,
     /// Stable ordering point used for bounded eviction.
     pub(super) issued_at: Instant,
-    /// Forwarded client address that owns this credential.
+    /// Issuing address charged for the unused-bootstrap quota.
     pub(super) issuance_ip: IpAddr,
     /// Immutable profile selected during capability validation.
     pub(super) profile: Arc<WebRuntimeProfile>,

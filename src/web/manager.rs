@@ -215,7 +215,7 @@ impl WebProcessRuntime {
         Some((reader, body))
     }
 
-    /// Issues a one-use bootstrap credential for the active generation.
+    /// Issues a one-use bootstrap credential for an active compatible profile.
     pub(crate) fn issue_bootstrap(
         &self,
         profile: Arc<WebRuntimeProfile>,
@@ -229,10 +229,7 @@ impl WebProcessRuntime {
             .as_ref()
             .and_then(|runtime| matching_profile(runtime, &profile))
             .ok_or(ManagerError::Authentication)?;
-        if !config.web.enabled
-            || profile.public_addr.is_ipv4() != client_ip.is_ipv4()
-            || !generation.proxy_shared.is_user_enabled(&profile.user)
-        {
+        if !config.web.enabled || !generation.proxy_shared.is_user_enabled(&profile.user) {
             return Err(ManagerError::Closed);
         }
         let now = Instant::now();
@@ -264,7 +261,6 @@ impl WebProcessRuntime {
         state.bootstraps.insert(
             hash,
             Bootstrap {
-                generation_id: generation.id,
                 expires_at: now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs),
                 issued_at: now,
                 issuance_ip: client_ip,
@@ -281,15 +277,12 @@ impl WebProcessRuntime {
 
     /// Checks whether a bootstrap token is live before reading a request body.
     pub(crate) fn has_bootstrap(&self, hash: TokenHash, host: &str) -> bool {
-        let generation_id = self.active_runtime.load().id;
         let now = Instant::now();
         let state = self.state.lock();
-        state.bootstraps.get(&hash).is_some_and(|entry| {
-            entry.profile.host == host
-                && now <= entry.expires_at
-                && (entry.generation_id == generation_id
-                    || entry.used && entry.session.is_some())
-        })
+        state
+            .bootstraps
+            .get(&hash)
+            .is_some_and(|entry| entry.profile.host == host && now <= entry.expires_at)
     }
 
     /// Creates a session exactly once or replays the original successful result.
@@ -329,9 +322,6 @@ impl WebProcessRuntime {
                 carrier: session.carrier(),
             });
         }
-        if entry.generation_id != generation.id {
-            return Err(ManagerError::Authentication);
-        }
         if state.closed || !config.web.enabled {
             return Err(ManagerError::Closed);
         }
@@ -340,10 +330,7 @@ impl WebProcessRuntime {
             .runtime
             .as_ref()
             .and_then(|runtime| matching_profile(runtime, &entry.profile))
-            .filter(|profile| {
-                profile.public_addr.is_ipv4() == client_ip.is_ipv4()
-                    && generation.proxy_shared.is_user_enabled(&profile.user)
-            })
+            .filter(|profile| generation.proxy_shared.is_user_enabled(&profile.user))
             .ok_or(ManagerError::Authentication)?;
         let profile_key = profile_key(&profile);
         if state.sessions.len() >= self.limits.max_sessions_global

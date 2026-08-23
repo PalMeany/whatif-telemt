@@ -122,15 +122,6 @@ async fn https_carrier_bootstraps_and_closes_one_session() {
     let runtime = WebProcessRuntime::start(Arc::clone(&active_runtime));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(capability);
-    let wrong_family = format!(
-        "GET /?bridge={encoded} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 2001:db8::10\r\nConnection: close\r\n\r\n"
-    )
-    .into_bytes();
-    let wrong_family_response = request(&listener, &runtime, wrong_family).await;
-    let (_, wrong_family_body) = split_response(&wrong_family_response);
-    assert!(!wrong_family_body
-        .windows(11)
-        .any(|value| value == b"bootstrap='"));
     let root = format!(
         "GET /?bridge={encoded} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nConnection: close\r\n\r\n"
     )
@@ -215,6 +206,128 @@ async fn https_carrier_bootstraps_and_closes_one_session() {
 }
 
 #[tokio::test]
+async fn bootstrap_survives_client_address_family_change() {
+    let capability = [8u8; 32];
+    let generation = test_runtime_generation(1, runtime_config(capability, WebCarrier::Https));
+    let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&generation)));
+    let runtime = WebProcessRuntime::start(active_runtime);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(capability);
+    let root = format!(
+        "GET /?bridge={encoded} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 2001:db8::10\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    let root_response = request(&listener, &runtime, root).await;
+    let (_, root_body) = split_response(&root_response);
+    let root_body = std::str::from_utf8(root_body).unwrap();
+    let bootstrap = root_body
+        .split_once("bootstrap='")
+        .and_then(|(_, suffix)| suffix.split_once('\''))
+        .map(|(token, _)| token)
+        .unwrap();
+
+    let hello = frame::encode(FrameType::Hello, 0, &[1]);
+    let mut create = format!(
+        "POST /api/v1/session HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nAuthorization: Bearer {bootstrap}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        hello.len()
+    )
+    .into_bytes();
+    create.extend_from_slice(&hello);
+    let create_response = request(&listener, &runtime, create).await;
+    assert!(create_response.starts_with(b"HTTP/1.1 200"));
+
+    runtime.shutdown().await;
+    generation.stop_sessions().await;
+    generation.stop_background_tasks().await;
+}
+
+#[tokio::test]
+async fn unused_bootstrap_survives_equivalent_runtime_generation_swap() {
+    let capability = [10u8; 32];
+    let generation = test_runtime_generation(1, runtime_config(capability, WebCarrier::Https));
+    let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&generation)));
+    let runtime = WebProcessRuntime::start(Arc::clone(&active_runtime));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(capability);
+    let root = format!(
+        "GET /?bridge={encoded} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    let root_response = request(&listener, &runtime, root).await;
+    let (_, root_body) = split_response(&root_response);
+    let root_body = std::str::from_utf8(root_body).unwrap();
+    let bootstrap = root_body
+        .split_once("bootstrap='")
+        .and_then(|(_, suffix)| suffix.split_once('\''))
+        .map(|(token, _)| token)
+        .unwrap();
+
+    let replacement = test_runtime_generation(
+        2,
+        runtime_config(capability, WebCarrier::Https),
+    );
+    active_runtime.store(Arc::clone(&replacement));
+    let hello = frame::encode(FrameType::Hello, 0, &[1]);
+    let mut create = format!(
+        "POST /api/v1/session HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nAuthorization: Bearer {bootstrap}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        hello.len()
+    )
+    .into_bytes();
+    create.extend_from_slice(&hello);
+    let create_response = request(&listener, &runtime, create).await;
+    assert!(create_response.starts_with(b"HTTP/1.1 200"));
+
+    runtime.shutdown().await;
+    generation.stop_sessions().await;
+    generation.stop_background_tasks().await;
+    replacement.stop_sessions().await;
+    replacement.stop_background_tasks().await;
+}
+
+#[tokio::test]
+async fn unused_bootstrap_is_rejected_after_profile_identity_change() {
+    let capability = [11u8; 32];
+    let generation = test_runtime_generation(1, runtime_config(capability, WebCarrier::Https));
+    let active_runtime = Arc::new(ArcSwap::from(Arc::clone(&generation)));
+    let runtime = WebProcessRuntime::start(Arc::clone(&active_runtime));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(capability);
+    let root = format!(
+        "GET /?bridge={encoded} HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes();
+    let root_response = request(&listener, &runtime, root).await;
+    let (_, root_body) = split_response(&root_response);
+    let root_body = std::str::from_utf8(root_body).unwrap();
+    let bootstrap = root_body
+        .split_once("bootstrap='")
+        .and_then(|(_, suffix)| suffix.split_once('\''))
+        .map(|(token, _)| token)
+        .unwrap();
+
+    let replacement = test_runtime_generation(
+        2,
+        runtime_config(capability, WebCarrier::HttpsLanes),
+    );
+    active_runtime.store(Arc::clone(&replacement));
+    let hello = frame::encode(FrameType::Hello, 0, &[1]);
+    let mut create = format!(
+        "POST /api/v1/session HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nAuthorization: Bearer {bootstrap}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        hello.len()
+    )
+    .into_bytes();
+    create.extend_from_slice(&hello);
+    let create_response = request(&listener, &runtime, create).await;
+    assert!(!create_response.starts_with(b"HTTP/1.1 200"));
+
+    runtime.shutdown().await;
+    generation.stop_sessions().await;
+    generation.stop_background_tasks().await;
+    replacement.stop_sessions().await;
+    replacement.stop_background_tasks().await;
+}
+
+#[tokio::test]
 async fn https_lanes_is_advertised_and_requires_canonical_lane_headers() {
     let capability = [9u8; 32];
     let generation = test_runtime_generation(
@@ -262,6 +375,10 @@ async fn https_lanes_is_advertised_and_requires_canonical_lane_headers() {
     let (uplink_headers, _) = split_response(&uplink_response);
     assert!(uplink_headers.starts_with(b"HTTP/1.1 204"));
     assert_eq!(response_header(uplink_headers, "x-up-ack"), "1");
+    assert!(!std::str::from_utf8(uplink_headers)
+        .unwrap()
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("content-length:")));
 
     let mut missing_lane = format!(
         "POST /api/v1/up HTTP/1.1\r\nHost: proxy.example.com\r\nX-Forwarded-For: 192.0.2.10\r\nAuthorization: Bearer {session}\r\nContent-Type: application/octet-stream\r\nX-Up-Seq: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

@@ -33,7 +33,7 @@ pub(super) fn canonical_request_host<B>(request: &Request<B>) -> Option<&str> {
     Some(host)
 }
 
-/// Accepts one canonical forwarded client address from an explicitly trusted peer.
+/// Accepts one forwarded client address or the direct address of a trusted peer.
 pub(super) fn client_ip<B>(
     request: &Request<B>,
     peer: SocketAddr,
@@ -51,16 +51,17 @@ pub(super) fn client_ip<B>(
     };
     let values = request.headers().get_all(header_name);
     let mut values = values.iter();
-    let value = values.next()?.to_str().ok()?;
-    if values.next().is_some()
-        || value.is_empty()
-        || value.trim() != value
-        || value.contains(',')
-    {
+    let Some(value) = values.next() else {
+        return Some(peer.ip());
+    };
+    let value = value.to_str().ok()?;
+    if values.next().is_some() || value.trim() != value || value.contains(',') {
         return None;
     }
-    let ip = value.parse::<IpAddr>().ok()?;
-    (ip.to_string() == value).then_some(ip)
+    if value.is_empty() {
+        return Some(peer.ip());
+    }
+    value.parse::<IpAddr>().ok()
 }
 
 /// Decodes an exact canonical bridge query without allocating credential strings.
@@ -176,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn host_and_forwarded_identity_require_canonical_single_values() {
+    fn host_is_canonical_and_forwarded_identity_is_single_parseable_ip() {
         let request = Request::builder()
             .header(header::HOST, "proxy.example.com:443")
             .header("x-forwarded-for", "192.0.2.10")
@@ -195,6 +196,45 @@ mod tests {
                 &trusted,
             ),
             Some("192.0.2.10".parse().unwrap())
+        );
+
+        let expanded_ipv6 = Request::builder()
+            .header("x-forwarded-for", "2001:0db8:0:0:0:0:0:10")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            client_ip(
+                &expanded_ipv6,
+                "127.0.0.1:40000".parse().unwrap(),
+                WebClientIpSource::XForwardedFor,
+                &trusted,
+            ),
+            Some("2001:db8::10".parse().unwrap())
+        );
+
+        let without_forwarded_address = Request::builder().body(()).unwrap();
+        assert_eq!(
+            client_ip(
+                &without_forwarded_address,
+                "127.0.0.1:40000".parse().unwrap(),
+                WebClientIpSource::XForwardedFor,
+                &trusted,
+            ),
+            Some("127.0.0.1".parse().unwrap())
+        );
+
+        let empty_forwarded_address = Request::builder()
+            .header("x-forwarded-for", "")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            client_ip(
+                &empty_forwarded_address,
+                "127.0.0.1:40000".parse().unwrap(),
+                WebClientIpSource::XForwardedFor,
+                &trusted,
+            ),
+            Some("127.0.0.1".parse().unwrap())
         );
 
         let uppercase = Request::builder()

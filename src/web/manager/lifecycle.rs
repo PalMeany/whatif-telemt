@@ -124,22 +124,10 @@ impl WebProcessRuntime {
 
     /// Expires credentials and closes idle sessions without holding locks across callbacks.
     pub(super) fn cleanup(&self) {
-        let generation_id = self.active_runtime.load().id;
         let now = Instant::now();
         let sessions = {
             let mut state = self.state.lock();
             remove_expired_locked(&mut state, now);
-            let stale_bootstraps = state
-                .bootstraps
-                .iter()
-                .filter_map(|(hash, bootstrap)| {
-                    (bootstrap.generation_id != generation_id && !bootstrap.used)
-                        .then_some(*hash)
-                })
-                .collect::<Vec<_>>();
-            for hash in stale_bootstraps {
-                remove_bootstrap_locked(&mut state, hash);
-            }
             state.sessions.values().cloned().collect::<Vec<_>>()
         };
         for session in sessions.into_iter().filter(|session| session.is_idle(now)) {
