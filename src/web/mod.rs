@@ -58,7 +58,7 @@ pub(crate) mod upstream;
 pub(crate) mod websocket;
 
 use http::Relay;
-use manager::{Manager, WebProfile};
+use manager::{Manager, ProfileSet, WebProfile};
 use runtime::WebRuntime;
 use site::StaticSite;
 use upstream::UpstreamProxy;
@@ -87,21 +87,62 @@ pub(crate) fn shutdown() {
     }
 }
 
-/// Starts the WEB relay when it is enabled, leaving the proxy running if the
-/// relay cannot bind.
+/// Checks everything about `[web]` that can be checked without binding.
+///
+/// Run before the process drops privileges, so a missing `public_dir`, an
+/// unreadable `index.html`, an unresolvable profile secret or a pending-budget
+/// split that starves every data frame is a start-up failure rather than a
+/// warning behind a unit that reports itself healthy. The reference validates
+/// the same things at load time and exits; the operator-visible symptom of not
+/// doing so is a green `systemctl is-active` and a 502 for every client.
+pub(crate) fn preflight(config: &ProxyConfig, config_dir: Option<&PathBuf>) -> Result<()> {
+    let web = &config.web;
+    if !web.enabled {
+        return Ok(());
+    }
+    web.validate()?;
+    let profiles = build_profiles(web, &config.access.users)?;
+    web.listen
+        .parse::<SocketAddr>()
+        .map_err(|_| ProxyError::Config("web.listen must be ip:port".to_string()))?;
+    if !web.admin_listen.is_empty() {
+        web.admin_listen.parse::<SocketAddr>().map_err(|_| {
+            ProxyError::Config("web.admin_listen must be ip:port or empty".to_string())
+        })?;
+    }
+    if let Some(directory) = web.public_dir.as_deref().filter(|value| !value.is_empty()) {
+        StaticSite::load(&resolve_path(directory, config_dir))?;
+    }
+    if let Some(value) = web
+        .public_upstream
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        value
+            .trim_start_matches("http://")
+            .parse::<SocketAddr>()
+            .map_err(|_| ProxyError::Config("web.public_upstream must be ip:port".into()))?;
+    }
+    manager::validate_pending_split(&web.limits)?;
+    ProfileSet::new(profiles)?;
+    Ok(())
+}
+
+/// Starts the WEB relay when it is enabled.
+///
+/// A failure here is fatal: `web.enabled = true` is a request for a transport,
+/// and a process that keeps running without it answers every carrier request
+/// with the front proxy's 502 while reporting itself healthy.
 pub(crate) async fn start(
     config: &ProxyConfig,
     config_dir: Option<&PathBuf>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
-) {
+) -> Result<()> {
     let web = &config.web;
     if !web.enabled {
-        return;
+        return Ok(());
     }
-    match build(config, config_dir, active_runtime).await {
-        Ok(()) => {}
-        Err(error) => warn!(error = %error, "WEB proxy disabled: startup failed"),
-    }
+    build(config, config_dir, active_runtime).await
 }
 
 async fn build(
@@ -187,10 +228,18 @@ async fn build(
         shutdown.clone(),
     ));
 
-    if !web.admin_listen.is_empty()
-        && let Ok(admin_address) = web.admin_listen.parse::<SocketAddr>()
-        && let Some(admin_listener) = listener::bind(admin_address, "admin").await
-    {
+    if !web.admin_listen.is_empty() {
+        let admin_address = web.admin_listen.parse::<SocketAddr>().map_err(|_| {
+            ProxyError::Config("web.admin_listen must be ip:port or empty".to_string())
+        })?;
+        // Not best-effort. `/healthz` and `/readyz` are how a deployment finds
+        // out it is broken, and an installer or an orchestrator that cannot
+        // reach them concludes the relay is fine.
+        let Some(admin_listener) = listener::bind(admin_address, "admin").await else {
+            return Err(ProxyError::Config(format!(
+                "web.admin_listen {admin_address} could not be bound"
+            )));
+        };
         tokio::spawn(listener::serve_admin(
             admin_listener,
             manager.clone(),
@@ -345,22 +394,34 @@ fn hash_profile_limits(limits: &WebProfileLimits, hasher: &mut impl std::hash::H
 /// into an endless reconnect loop, which the user sees as a proxy that stays
 /// on "connecting" forever while every server-side counter looks healthy.
 fn warn_on_unsupported_carrier(web: &WebConfig, profiles: &[Arc<WebProfile>]) {
-    let unsupported: Vec<&str> = profiles
+    // `https-lanes` is not listed. The reference documents that a client needs
+    // no new transport code for it, our bridge document is byte-identical to
+    // the reference's for every mode, and `http_tests` drives a real MTProto
+    // handshake through a lane -- so warning about it was over-broad. The two
+    // WebSocket carriers are named because they are not yet verified against a
+    // shipping client, which is a narrower claim than "not implemented".
+    let unverified: Vec<&str> = profiles
         .iter()
-        .filter(|profile| profile.carrier != CarrierMode::Https)
+        .filter(|profile| {
+            matches!(
+                profile.carrier,
+                CarrierMode::Websocket | CarrierMode::WebsocketLanes
+            )
+        })
         .map(|profile| profile.name.as_str())
         .collect();
-    if unsupported.is_empty() {
+    if unverified.is_empty() {
         return;
     }
     warn!(
         default_mode = web.carrier_mode.as_str(),
-        profiles = unsupported.len(),
-        example = unsupported.first().copied().unwrap_or_default(),
-        "WEB proxy: a carrier mode other than `https` is selected. The current client speaks \
-         only the HTTPS long-poll carrier and does not negotiate, so it will render the bridge, \
-         create a session, and then hang on \"connecting\" forever. Set web.carrier_mode = \
-         \"https\" unless you are testing a client that implements the mode."
+        profiles = unverified.len(),
+        example = unverified.first().copied().unwrap_or_default(),
+        "WEB proxy: a WebSocket carrier mode is selected. It implements the reference contract, \
+         but no shipping client has been verified against it here (checked 2026-08), so a client \
+         that does not speak it will render the bridge, create a session, and then hang on \
+         \"connecting\". Use web.carrier_mode = \"https\" or \"https-lanes\" unless you are \
+         testing a client that implements the mode."
     );
 }
 
@@ -417,7 +478,7 @@ fn build_profiles(
                 name: user.clone(),
                 backend: WebBackend::Internal,
                 carrier: web.carrier_mode,
-                capabilities: capabilities_for(&web.hostname, &decoded),
+                capabilities: capabilities_for(&web.hostname, &decoded, true),
                 limits: WebProfileLimits::default().with_defaults(&web.limits),
             }));
         }
@@ -426,6 +487,17 @@ fn build_profiles(
         return Err(ProxyError::Config(
             "web is enabled but no profile could be built".to_string(),
         ));
+    }
+    // `WebConfig::validate` can only count the explicit entries, so the ceiling
+    // is enforced here where the derived ones exist too. Otherwise
+    // `derive_user_profiles` silently mints one capability per `[access.users]`
+    // entry with no bound at all.
+    if profiles.len() > web.limits.max_profiles {
+        return Err(ProxyError::Config(format!(
+            "web resolves {} profiles, above web.limits.max_profiles = {}",
+            profiles.len(),
+            web.limits.max_profiles
+        )));
     }
     Ok(profiles)
 }
@@ -437,7 +509,7 @@ fn explicit_profile(web: &WebConfig, entry: &WebProfileConfig) -> Result<WebProf
         name: entry.name.clone(),
         backend: WebBackend::parse(&entry.backend)?,
         carrier: web.profile_carrier_mode(entry),
-        capabilities: capabilities_for(&web.hostname, &secret),
+        capabilities: capabilities_for(&web.hostname, &secret, false),
         limits: entry.limits.with_defaults(&web.limits),
     })
 }
@@ -447,9 +519,16 @@ fn explicit_profile(web: &WebConfig, entry: &WebProfileConfig) -> Result<WebProf
 /// A WEB client accepts a plain 16-byte or `dd` random-padding secret and
 /// rejects `ee` fake-TLS secrets outright, so those two forms are the only
 /// ones whose capability can ever be presented.
-fn capabilities_for(hostname: &str, secret: &[u8]) -> Vec<[u8; 32]> {
+///
+/// `alias` adds the `dd` form beside the plain one, which is what a profile
+/// derived from `[access.users]` needs: the operator never chose a secret form
+/// there, so a client handed either one has to work. An explicit
+/// `[[web.profiles]]` entry states its own form and gets only that, so a
+/// profiles file the reference accepts — one profile on `0001..0f` and another
+/// on `dd0001..0f` — is not turned into a startup abort here.
+fn capabilities_for(hostname: &str, secret: &[u8], alias: bool) -> Vec<[u8; 32]> {
     let mut result = vec![capability::derive_capability(hostname, secret)];
-    if secret.len() == capability::SECRET_BYTES {
+    if alias && secret.len() == capability::SECRET_BYTES {
         let mut padded = Vec::with_capacity(1 + secret.len());
         padded.push(0xdd);
         padded.extend_from_slice(secret);
@@ -512,6 +591,9 @@ mod profile_tests {
             enabled: true,
             hostname: "proxy.example.com".to_string(),
             public_dir: Some("site".to_string()),
+            // Opt-in: the default no longer hands every `[access.users]` secret
+            // a bridge capability just because `[web]` was enabled.
+            derive_user_profiles: true,
             ..WebConfig::default()
         }
     }

@@ -79,6 +79,16 @@ pub struct WebLimits {
     #[serde(default = "default_max_backend_dials_in_flight")]
     pub max_backend_dials_in_flight: usize,
 
+    /// Carrier connections the accept loop serves concurrently.
+    ///
+    /// A lanes carrier opens one connection per logical stream and parks a long
+    /// poll on each, so this has to leave room for `max_streams_global` plus the
+    /// session-level traffic beside it. Past the ceiling a connection is
+    /// answered `503` with `Retry-After: 1` rather than dropped, so raising it
+    /// trades memory for a shorter retry path, never for correctness.
+    #[serde(default = "default_max_carrier_connections")]
+    pub max_carrier_connections: usize,
+
     /// Sustained session creation rate.
     #[serde(default = "default_new_sessions_per_minute")]
     pub new_sessions_per_minute: usize,
@@ -200,7 +210,11 @@ impl WebProfileLimits {
 }
 
 /// One capability profile: an MTProxy secret bound to a backend and carrier.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` is derived so a configuration reload can tell whether the
+/// profile source changed: rotating a secret has to reach the running relay,
+/// or a revoked capability keeps relaying until the process restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebProfileConfig {
     /// Operator-visible profile name, also used for per-profile accounting.
     pub name: String,
@@ -282,6 +296,7 @@ impl WebLimits {
             self.max_sessions_global,
             self.max_streams_global,
             self.max_backend_dials_in_flight,
+            self.max_carrier_connections,
             self.new_sessions_per_minute,
             self.new_sessions_burst,
             self.new_streams_per_minute,
@@ -302,6 +317,10 @@ impl WebLimits {
             || self.max_streams_global < self.max_streams_per_session
             || self.max_streams_global < self.max_backend_dials_in_flight
             || self.max_bootstraps_global < self.max_bootstraps_per_ip
+            // Under a lanes carrier every live stream parks its own long poll
+            // on its own connection, so a connection ceiling below the stream
+            // ceiling refuses streams the stream limits explicitly allow.
+            || self.max_carrier_connections < self.max_streams_global
         {
             return Err(ProxyError::Config(
                 "global web limits must not be smaller than per-session or per-IP limits"
@@ -402,6 +421,7 @@ impl WebTimeouts {
 impl Default for WebLimits {
     fn default() -> Self {
         Self {
+            max_carrier_connections: default_max_carrier_connections(),
             max_header_bytes: default_max_header_bytes(),
             max_body_bytes: default_max_body_bytes(),
             max_frame_payload: default_max_frame_payload(),

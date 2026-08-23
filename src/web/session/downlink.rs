@@ -70,6 +70,16 @@ impl Session {
                 return Err(WebError::Closed);
             }
             if queue_mut(&mut state, lane).is_none() {
+                // A lane whose queue is gone but whose stream id is still
+                // tombstoned has simply been evicted after it finished. The
+                // bridge is told the lane is closed and stops polling it; a 404
+                // here would instead read as parent-carrier failure and cost
+                // the client every other lane on the session.
+                if let Some(id) = lane
+                    && state.closed_streams.contains(&id)
+                {
+                    return Ok((Bytes::new(), cursor, true));
+                }
                 return Err(WebError::Protocol);
             }
             state.last_activity = Instant::now();

@@ -89,29 +89,37 @@ tracking account every user to that address.
 
 ## Carrier modes
 
-**Use `carrier_mode = "https"`.**
+**Use `carrier_mode = "https"`, or `https-lanes` if the public origin speaks
+HTTP/2.**
 
 The relay implements four carrier modes — `https`, `https-lanes`, `websocket`,
-`websocket-lanes` — because the reference relay does. The current client
-implements exactly one of them: the HTTPS long-poll carried by its hidden
-WebView. Telegram Desktop's
+`websocket-lanes` — because the reference relay does. The carrier itself lives
+entirely in the bridge page's JavaScript, which telemt serves byte-identical to
+the reference's for all four modes, so a client needs no new transport code for
+any of them; telemt's own tests drive a real MTProto handshake through an
+`https-lanes` lane.
+
+The two WebSocket carriers are the exception: they are implemented and tested
+here, but **not yet verified against a shipping client** (as of 2026-08).
+Telegram Desktop's
 [WEB proxy plan](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/web-proxy-plan.md)
 states that "the v1 HTTPS long-poll carrier is operational; the deployed bridge
 does not require a public WebSocket or another carrier", and the transport
-"allows only the exact canonical HTTPS bridge navigation". There is no carrier
-negotiation in v1, so a client cannot report that it does not speak the mode an
-operator selected.
+"allows only the exact canonical HTTPS bridge navigation": nothing in a shipped
+client exercises a WebSocket carrier today, so nothing has proved that its
+WebView allows the upgrade. There is no carrier negotiation in v1 either, so a
+client cannot report that it does not speak the mode an operator selected.
 
-Choosing any other mode produces a failure that looks like nothing is wrong:
+A mode a client cannot drive fails in a way that looks like nothing is wrong:
 the capability resolves, the bridge page renders with the right mode, the
 session is created, `sessions_created_total` and `streams_opened_total` both
 rise — and the client sits on "connecting" indefinitely, because its 10-second
 bridge-message and 30-second write-progress deadlines fail the carrier and
-restart it forever. telemt emits a start-up warning naming the affected
-profiles.
+restart it forever. telemt emits a start-up warning naming the profiles that
+select a WebSocket carrier.
 
-The other three modes remain in the relay for a client that implements them.
-Treat them as unreleased.
+Treat the two WebSocket modes as unreleased, and retire this note once a
+released client has been observed driving one.
 
 ```toml
 [web]
@@ -121,7 +129,7 @@ listen = "127.0.0.1:8080"           # carrier listener, behind the TLS front pro
 admin_listen = "127.0.0.1:8081"     # /healthz, /readyz, /metrics; "" disables
 public_dir = "site"                 # operator-owned static site (needs index.html)
 # public_upstream = "http://127.0.0.1:3000"   # or a private site application
-carrier_mode = "https"              # keep this: see "Carrier modes" below
+carrier_mode = "https"              # https or https-lanes: see "Carrier modes"
 derive_user_profiles = true         # every [access.users] entry gets WEB access
 trusted_proxies = ["127.0.0.0/8", "::1/128"]
 ```
@@ -147,8 +155,8 @@ URL        = https://<hostname>/?bridge=<capability>
 With `derive_user_profiles = true` every user in `[access.users]` can use the
 WEB transport with the secret they already have, in either form a WEB client
 accepts: the plain 32-hex secret or its `dd` random-padding form. New users
-become usable within one refresh interval (30 s) of a configuration reload; no
-restart is needed.
+become usable one refresh interval after a configuration reload, without a
+restart; see *Operational notes* for what that means for a revoked secret.
 
 **`ee` fake-TLS secrets do not work over this transport**, and a WEB-capable
 client refuses to accept one in its proxy settings. The carrier is a raw relay:
@@ -200,7 +208,9 @@ so clients need no new setting when an operator changes it.
 ## Limits and timeouts
 
 Every ceiling from the reference relay is configurable under `[web.limits]`
-and `[web.timeouts]`, with the same names and defaults:
+and `[web.timeouts]`. The `[web.limits]` keys carry the reference's names and
+defaults unchanged; the `[web.timeouts]` keys do not, and are mapped below the
+tables.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -235,6 +245,31 @@ and `[web.timeouts]`, with the same names and defaults:
 | `body_read_ms` | `30000` | Request-body deadline |
 | `idle_ms` | `75000` | Keep-alive idle period |
 
+The reference spells its timeouts as Go durations (`"25s"`); telemt spells them
+as integer milliseconds, so every shared key gains an `_ms` suffix. The values
+are the same:
+
+| Reference `timeouts` key | telemt `[web.timeouts]` key | Default |
+| --- | --- | --- |
+| `backend_dial` | `backend_dial_ms` | `5000` |
+| `long_poll` | `long_poll_ms` | `25000` |
+| `reconnect_grace` | `reconnect_grace_ms` | `120000` |
+| `bootstrap_lifetime` | `bootstrap_lifetime_ms` | `120000` |
+| `read_header` | `read_header_ms` | `10000` |
+| `idle` | `idle_ms` | `75000` |
+| `shutdown` | — | not implemented |
+| — | `body_read_ms` | `30000` |
+
+`body_read_ms` is an addition to the configuration, not to the behaviour: the
+reference applies the same 30-second body-read deadline from a constant
+(`bodyReadDeadline` in `internal/server/server.go`) rather than exposing it.
+
+There is deliberately no `shutdown` timeout. Telemt closes the WEB carrier
+before it drains proxy sessions — `web::shutdown()` runs ahead of
+`stop_sessions()` — so a demultiplexed stream ends on the process's own drain
+deadline, exactly like a direct client's session. A `shutdown` key would give
+one drain two competing deadlines, which is why it was not ported.
+
 Per-profile overrides live under `[web.profiles.limits]` and may only lower the
 process-wide ceiling they refine.
 
@@ -267,9 +302,9 @@ slots; a session still driving its carrier is never displaced.
 `[web.limits]` and `[web.timeouts]` are read once, at start-up. The process-wide
 pending pools, the per-session budget partitions, and the accept loops are all
 built from them, so a reload cannot change them in place. Reloading a
-configuration whose ceilings differ logs a warning and keeps the running values;
-`[access.users]` and `[[web.profiles]]` still reload normally. Rotating a
-profile's secret closes the live sessions that secret opened.
+configuration whose ceilings differ logs a warning and keeps the running values.
+The capability profiles reload; see *Operational notes* for exactly which keys
+do and which need a restart.
 
 ## Observability
 
@@ -306,12 +341,21 @@ upgrade, never enable header logging on the front proxy or on telemt.
 
 ## Operational notes
 
-- `hostname`, `listen`, `admin_listen`, `public_dir`, `public_upstream`,
-  `[web.limits]`, and `[web.timeouts]` are read once at start-up; changing them
-  requires a restart, and a reload that changes them logs a warning and keeps
-  the running values. Capability profiles (`[access.users]` and
-  `[[web.profiles]]`) are re-derived after a reload, and a profile whose secret
-  changed loses its live sessions with it.
+- Under `[web]`, only the capability profiles reload: `[access.users]`,
+  `[[web.profiles]]`, and the keys that shape them — `derive_user_profiles`,
+  `carrier_mode`, and each profile's `backend` and `[web.profiles.limits]`. A
+  profile that loses the capability it was created from, because its secret was
+  rotated or the profile was deleted, loses its live sessions with it.
+- The relay re-derives the profile set on a periodic refresh rather than as a
+  step of the reload itself, so revocation is eventual, not immediate. Restart
+  telemt when a leaked secret has to stop relaying at a known moment.
+- Every other `[web]` key is read once at start-up and needs a restart:
+  `enabled`, `hostname`, `listen`, `admin_listen`, `public_dir`,
+  `public_upstream`, `trusted_proxies`, `[web.limits]`, and `[web.timeouts]`. A
+  reload that changes a ceiling or a timeout logs a warning and keeps the
+  running values; a reload that sets `enabled = false` or changes `hostname`
+  keeps the whole capability set built at start-up, so it does not turn the
+  transport off — a restart does.
 - The `websocket` carrier ties the session to its socket. The `https` carriers
   survive a dropped request because each uplink carries its sequence and each
   downlink its cursor, so `reconnect_grace_ms` covers them; the v1 WebSocket
@@ -331,3 +375,45 @@ upgrade, never enable header logging on the front proxy or on telemt.
   telemt warns at start-up when `listen` is not a loopback address; it is not
   refused only because a container deployment reaches the relay from a sibling
   container.
+
+## Deliberate differences from the reference relay
+
+The wire contract is the reference's, and every divergence below is invisible
+to a conforming client. They are listed so that an operator reading the
+reference's own documentation is not surprised, and so that a later re-sync
+against upstream does not "fix" them back.
+
+- **A `websocket-lanes` session may hold twice `max_streams_per_session`
+  lanes.** The reference refuses the upgrade at the stream ceiling, and its
+  bridge page treats a refused upgrade as fatal for the whole session. Telemt
+  accepts the socket and answers the stream's `OPEN` with a `CLOSE` instead —
+  a per-stream failure every client already handles, in place of a per-session
+  one. The extra headroom is what lets a drained lane be reclaimed without ever
+  refusing a lane a live stream still needs.
+- **`Host` matching is case-insensitive and port-agnostic.** The reference
+  compares bytes against `hostname` or `hostname:443`. Telemt lowercases,
+  strips a trailing dot, and strips any port, because nginx and Caddy both do —
+  and byte-exact matching turns every non-443 origin port or `Host`-rewriting
+  CDN into a host that 404s everything, which is far more conspicuous than
+  serving the operator's index. The bridge page is always rendered from the
+  configured `hostname`, so an unusual but matching `Host` cannot reach it.
+- **The bridge document carries a variable-length padding comment.** Without
+  it, `GET /?bridge=…` returns a globally constant length on every deployment,
+  and a passive observer separates a bridge fetch from an index fetch without
+  decrypting anything. The filler is hexadecimal, so it can neither close the
+  comment nor reopen markup.
+- **The downlink long poll is jittered.** An idle carrier otherwise emits an
+  identical request and response pair on an exact 25-second period forever. The
+  jitter only ever shortens the park, never lengthens it, so every client
+  deadline and every documented multiple of `long_poll_ms` remains an upper
+  bound that still holds.
+- **The per-address ceilings bucket IPv6 by `/64`, not by exact address.** A
+  single subscriber is routinely handed a whole `/64`, so exact-address keying
+  would make `max_sessions_per_ip` and `max_bootstraps_per_ip` decorative for
+  every IPv6 client. Both ceilings are off by default, so this is inert unless
+  an operator turns them on.
+- **The loopback-MTProxy backend is retained** alongside in-process
+  termination. It is the reference's only mode, so keeping it costs nothing at
+  re-sync time, and it is the only configuration in which the protocol's
+  credit-timing rule can be exercised at all. In-process termination remains
+  the default and the recommended mode.

@@ -11,11 +11,15 @@ impl Session {
     /// Mirrors the reference relay: a reservation must fit its class partition
     /// *and* the process-wide pool, and no partial charge is ever left behind.
     ///
-    /// The control class is measured against its own running subtotal rather
-    /// than the session-wide one, because the whole point of the reserve is
-    /// that a saturated data partition must not block a CLOSE or a WINDOW.
-    /// The data classes stay measured against the session-wide total, which is
-    /// conservative and keeps `data + control` inside the session pool.
+    /// Every class is measured against the session-wide running total. The
+    /// control reserve does its work on the other side of the split — it is
+    /// subtracted from the two data partitions in [`BudgetLimits::new`], so a
+    /// saturated data partition still leaves room for a CLOSE or a WINDOW —
+    /// while a control frame itself may use the whole session pool. Bounding
+    /// control by the reserve instead would make one legal burst of OPENs kill
+    /// the session on its own stream-limit CLOSEs.
+    ///
+    /// [`BudgetLimits::new`]: super::state::BudgetLimits::new
     pub(crate) fn reserve_pending_locked(
         &self,
         state: &mut SessionState,
@@ -24,10 +28,7 @@ impl Session {
         class: PendingClass,
     ) -> bool {
         let (cost_limit, item_limit) = self.budget.for_class(class);
-        let (used_cost, used_items) = match class {
-            PendingClass::Control => (state.control_cost, state.control_items),
-            _ => (state.pending_cost, state.pending_items),
-        };
+        let (used_cost, used_items) = (state.pending_cost, state.pending_items);
         if cost == 0
             || cost > cost_limit
             || items > item_limit
@@ -36,11 +37,12 @@ impl Session {
         {
             return false;
         }
-        // Each class partition already fits inside the session pool, so this
-        // can only fire if the partitions are ever resized apart. It is checked
-        // rather than assumed, because the process-wide split into
-        // `control_reserve * max_sessions_global` plus the rest is built on the
-        // session pool being an actual ceiling.
+        // A data partition already fits inside the session pool, so this can
+        // only fire if the partitions are ever resized apart; for the control
+        // class it is the same check twice. It is checked rather than assumed,
+        // because the process-wide split into `control_reserve *
+        // max_sessions_global` plus the rest is built on the session pool being
+        // an actual ceiling.
         if state.pending_cost > self.budget.session_cost.saturating_sub(cost)
             || state.pending_items > self.budget.session_items.saturating_sub(items)
         {

@@ -163,8 +163,9 @@ async fn an_unclosed_lane_flood_stays_inside_the_lane_ceiling() {
     for lane in 1..=(ceiling as u32 * 8) {
         let result =
             session.process_up_lane(lane, 1, &batch(&[(FrameType::OPEN, lane, Vec::new())]));
-        // The session dies once the refusals exhaust its control reserve, which
-        // is itself a bound, not a leak.
+        // The lane ceiling is the bound here. Refusals are ordinary control
+        // frames now, so they no longer end the session on their own; a
+        // session that does close has hit its whole pending pool.
         if result == Err(WebError::Closed) {
             break;
         }
@@ -220,30 +221,39 @@ async fn a_refused_lane_reservation_does_not_leave_the_lane_behind() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejected_opens_stop_at_the_control_reserve() {
+async fn rejected_opens_close_their_streams_and_leave_the_session_running() {
     let backend = start_echo_backend().await;
     let mut limits = WebLimits::default();
     limits.max_streams_per_session = 1;
     let manager = build_manager(WebBackend::Loopback(backend), CarrierMode::Https, limits);
     let session = open_session(&manager);
 
-    // Every OPEN past the first is refused and answered with a CLOSE, which is
-    // a control frame. Before the reserve became the control ceiling, one
-    // session could mint these until the whole process pool was gone.
+    // Every OPEN past the first exceeds the per-session stream ceiling and is
+    // answered with a CLOSE for that id. `PROTOCOL.md` is explicit that this
+    // does not close the authenticated session or its other streams, so a
+    // single legal batch of them has to be accepted in full.
     let mut frames: Vec<(FrameType, u32, Vec<u8>)> = Vec::new();
     for id in 1..=64u32 {
         frames.push((FrameType::OPEN, id, Vec::new()));
     }
-    let result = session.process_up(1, &batch(&frames));
-    assert_eq!(result, Err(WebError::Closed));
-    assert!(session.is_closed_for_test());
+    let acked = session.process_up(1, &batch(&frames));
+    assert_eq!(acked, Ok(1));
+    assert!(!session.is_closed_for_test());
 
-    let capacity = manager.capacity();
-    assert_eq!(capacity.pending_bytes, 0);
-    assert_eq!(capacity.pending_items, 0);
+    // The refusals are real CLOSE frames waiting on the downlink, not a
+    // silently dropped batch.
+    let queued = session.state.lock().main.pending_frames.len();
     assert!(
-        capacity.pending_items < u64::from(u32::MAX),
-        "the control reserve, not the process pool, bounds a rejected open"
+        queued >= 63,
+        "expected a CLOSE per refused OPEN, queued {queued}"
+    );
+
+    // The process-wide pool still bounds them: the control class may use the
+    // whole session pool, but never more.
+    let capacity = manager.capacity();
+    assert!(capacity.pending_items > 0);
+    assert!(
+        u64::from(u32::try_from(capacity.pending_items).unwrap_or(u32::MAX)) < u64::from(u32::MAX)
     );
 }
 

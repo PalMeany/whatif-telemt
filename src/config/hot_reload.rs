@@ -48,6 +48,12 @@ const HOT_RELOAD_DEBOUNCE: Duration = Duration::from_millis(50);
 #[derive(Debug, Clone, PartialEq)]
 pub struct HotFields {
     pub log_level: LogLevel,
+    /// The `[web]` inputs that rebuild the capability set. Everything else
+    /// under `[web]` is fixed for the process lifetime and is reported by
+    /// `warn_non_hot_changes` instead.
+    pub web_profiles: Vec<crate::config::WebProfileConfig>,
+    pub web_derive_user_profiles: bool,
+    pub web_carrier_mode: crate::config::CarrierMode,
     pub ad_tag: Option<String>,
     pub dns_overrides: Vec<String>,
     pub desync_all_full: bool,
@@ -155,6 +161,9 @@ impl HotFields {
     pub fn from_config(cfg: &ProxyConfig) -> Self {
         Self {
             log_level: cfg.general.log_level.clone(),
+            web_profiles: cfg.web.profiles.clone(),
+            web_derive_user_profiles: cfg.web.derive_user_profiles,
+            web_carrier_mode: cfg.web.carrier_mode,
             ad_tag: cfg.general.ad_tag.clone(),
             dns_overrides: cfg.network.dns_overrides.clone(),
             desync_all_full: cfg.general.desync_all_full,
@@ -608,6 +617,15 @@ fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyConfig {
     cfg.access.user_max_unique_ips_global_each = new.access.user_max_unique_ips_global_each;
     cfg.access.user_max_unique_ips_mode = new.access.user_max_unique_ips_mode;
     cfg.access.user_max_unique_ips_window_secs = new.access.user_max_unique_ips_window_secs;
+    // Only the capability source reloads. `enabled`, `hostname`, `listen`,
+    // `admin_listen`, `public_dir`, `public_upstream`, `trusted_proxies`,
+    // `[web.limits]` and `[web.timeouts]` are bound to the listener and the
+    // budget pools built at start-up, and changing them needs a restart --
+    // which `warn_non_hot_changes` says out loud.
+    cfg.web.profiles = new.web.profiles.clone();
+    cfg.web.derive_user_profiles = new.web.derive_user_profiles;
+    cfg.web.carrier_mode = new.web.carrier_mode;
+
     overlay_listener_synlimit_fields(&mut cfg.server.listeners, &new.server.listeners);
 
     if cfg.rebuild_runtime_user_auth().is_err() {
@@ -809,6 +827,23 @@ fn warn_non_hot_changes(old: &ProxyConfig, new: &ProxyConfig, non_hot_changed: b
     {
         warned = true;
         warn!("config reload: general.upstream_* changed; restart required");
+    }
+    if old.web.enabled != new.web.enabled
+        || old.web.hostname != new.web.hostname
+        || old.web.listen != new.web.listen
+        || old.web.admin_listen != new.web.admin_listen
+        || old.web.public_dir != new.web.public_dir
+        || old.web.public_upstream != new.web.public_upstream
+        || old.web.trusted_proxies != new.web.trusted_proxies
+        || old.web.limits != new.web.limits
+        || old.web.timeouts != new.web.timeouts
+    {
+        warned = true;
+        warn!(
+            "config reload: web.enabled/hostname/listen/admin_listen/public_dir/public_upstream/\
+             trusted_proxies/[web.limits]/[web.timeouts] changed; restart required. \
+             [[web.profiles]], web.derive_user_profiles and web.carrier_mode reload in place."
+        );
     }
     if non_hot_changed && !warned {
         warn!("config reload: one or more non-hot fields changed; restart required");

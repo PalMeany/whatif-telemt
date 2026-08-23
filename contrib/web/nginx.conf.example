@@ -31,8 +31,36 @@ server {
     ssl_certificate     /etc/letsencrypt/live/proxy.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/proxy.example.com/privkey.pem;
 
-    # One uplink batch is bounded by web.limits.max_body_bytes (2 MiB).
-    client_max_body_size 4m;
+    # No gzip and no Strict-Transport-Security here, both deliberate.
+    # Compression adds a length side-channel over the operator's own responses
+    # and halves the amplitude of the relay's bridge-page padding; HSTS writes a
+    # permanent "this device contacted this host" record into the client's HSTS
+    # store, a device-side artefact a circumvention origin should not create.
+    # A valid certificate and the redirect above already cover the threat.
+
+    # No hostname-wide byte ceiling: one constant shared by every deployment is
+    # measurable with an active probe, and the operator's own application picks
+    # its per-route limits. Do not delete the line instead -- nginx then applies
+    # its 1 MiB default and rejects carrier uplinks. The relay bounds those
+    # itself with web.limits.max_body_bytes (2 MiB).
+    client_max_body_size 0;
+
+    # nginx's built-in error pages carry an <hr><center>nginx</center> banner,
+    # so a stopped relay would announce the front proxy on every path. Answer
+    # every failure with one short generic body instead. The client still sees
+    # the original status: error_page without `=` keeps it, and the code on
+    # `return` is then discarded. A named location rather than an internal
+    # `location = /path`, which would answer that one path unlike every other.
+    server_tokens off;
+    error_page 400 408 414 431 500 502 503 504 @unavailable;
+    location @unavailable {
+        default_type text/plain;
+        add_header Cache-Control          "no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options        "DENY" always;
+        add_header Referrer-Policy        "strict-origin-when-cross-origin" always;
+        return 502 "Service temporarily unavailable\n";
+    }
 
     # The bridge capability travels in the query string and the session bearer
     # in a request header on the WebSocket upgrade, so the default `combined`

@@ -352,6 +352,17 @@ impl SessionState {
             if id == 0 || self.streams.contains_key(&id) || !self.lanes.contains_key(&id) {
                 continue;
             }
+            // A closed lane still holding frames has not finished delivering:
+            // the bridge polls it until the relay answers `X-Lane-Closed`, and
+            // dropping the queue underneath it loses bytes the client was told
+            // to expect. Skip it and take an older, fully drained one.
+            let drainable = self
+                .lanes
+                .get(&id)
+                .is_some_and(|lane| lane.pending_frames.is_empty() && lane.unacked.is_empty());
+            if !drainable {
+                continue;
+            }
             let mut lane = self.lanes.remove(&id).expect("lane presence checked");
             let released = lane.charged();
             lane.clear();
@@ -366,8 +377,6 @@ impl SessionState {
 pub(crate) struct BudgetLimits {
     pub(crate) session_cost: usize,
     pub(crate) session_items: usize,
-    pub(crate) control_cost: usize,
-    pub(crate) control_items: usize,
     pub(crate) uplink_cost: usize,
     pub(crate) uplink_items: usize,
     pub(crate) downlink_cost: usize,
@@ -390,8 +399,6 @@ impl BudgetLimits {
         Self {
             session_cost: limits.max_pending_per_session,
             session_items: limits.max_pending_items_per_session,
-            control_cost: reserve_cost,
-            control_items: reserve_items,
             uplink_cost,
             uplink_items,
             downlink_cost,
@@ -401,15 +408,25 @@ impl BudgetLimits {
 
     /// Returns the cost and item ceiling for one reservation class.
     ///
-    /// The control class is bounded by the reserve, not by the whole session
-    /// pool. The process-wide pool is partitioned as `control_reserve *
-    /// max_sessions_global` plus everything else, and that split is only sound
-    /// while no single session can charge more control budget than its own
-    /// reserve. The data classes are checked against the session-wide running
-    /// total, which is conservative, so the two partitions never overlap.
+    /// The control reserve is a *floor*, not a cap: it is subtracted from the
+    /// two data partitions so a saturated stream can never make a CLOSE or a
+    /// WINDOW unqueueable, but a control frame itself is bounded by the whole
+    /// session pool, exactly as the reference bounds it. Capping control at the
+    /// reserve instead would turn an ordinary burst — one legal uplink batch of
+    /// OPENs whose stream-limit CLOSEs exceed the reserve — into a session
+    /// kill, which `PROTOCOL.md` forbids: an over-limit stream receives CLOSE
+    /// and the authenticated session and its other streams survive.
+    ///
+    /// The process-wide split stays sound without a per-session control cap:
+    /// [`GlobalPending`] bounds the data classes by
+    /// `max_pending_global - control_reserve * max_sessions_global` while
+    /// leaving the control class the full pool, so the reserved headroom is
+    /// reachable only by control frames no matter which session queues them.
+    ///
+    /// [`GlobalPending`]: crate::web::manager::limits::GlobalPending
     pub(crate) fn for_class(&self, class: PendingClass) -> (usize, usize) {
         match class {
-            PendingClass::Control => (self.control_cost, self.control_items),
+            PendingClass::Control => (self.session_cost, self.session_items),
             PendingClass::Uplink => (self.uplink_cost, self.uplink_items),
             PendingClass::Downlink => (self.downlink_cost, self.downlink_items),
         }
@@ -560,17 +577,25 @@ mod tests {
     }
 
     #[test]
-    fn control_class_is_capped_by_the_reserve_not_the_session_pool() {
+    fn the_control_reserve_is_a_floor_not_a_cap() {
         let limits = WebLimits::default();
         let budget = BudgetLimits::new(&limits);
         let (reserve_cost, reserve_items) = control_reserve(&limits);
+
+        // A control frame may use the whole session pool, exactly as the
+        // reference relay allows. Capping it at the reserve would make one
+        // legal burst of OPENs kill the session on its own stream-limit
+        // CLOSEs, which `PROTOCOL.md` forbids.
         assert_eq!(
             budget.for_class(PendingClass::Control),
-            (reserve_cost, reserve_items)
+            (budget.session_cost, budget.session_items)
         );
-        // The data partitions plus the reserve must fit the session pool, or
-        // the process-wide split into `reserve * sessions` is unsound.
+
+        // The reserve does its work by being subtracted from the data
+        // partitions, so a saturated stream can never leave a CLOSE or a
+        // WINDOW unqueueable.
         assert!(budget.uplink_cost + reserve_cost <= budget.session_cost);
         assert!(budget.uplink_items + reserve_items <= budget.session_items);
+        assert!(reserve_cost > 0 && reserve_items > 0);
     }
 }

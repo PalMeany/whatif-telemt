@@ -16,7 +16,6 @@ set -eu
 
 HOSTNAME_ARG=""
 SITE_DIR=""
-PLACEHOLDER_SITE=0
 USER_NAME="${USER_NAME:-alice}"
 USER_SECRET=""
 DIRECT_PORT="${DIRECT_PORT:-8443}"
@@ -40,16 +39,16 @@ die() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'USAGE'
-Usage: install-web.sh --hostname HOST (--site DIR | --placeholder-site) [options]
+Usage: install-web.sh --hostname HOST --site DIR [options]
 
 Required:
   --hostname HOST      Public hostname clients configure. Must already resolve
                        to this host: Caddy obtains a certificate for it.
   --site DIR           Operator-owned static site to serve. Needs index.html;
-                       404.html is strongly recommended.
-  --placeholder-site   Generate a throwaway site instead of supplying one.
-                       Opt-in on purpose: a page shared by many operators is an
-                       active-probing signature. Replace it before going live.
+                       404.html is strongly recommended. This script generates
+                       no site: a page shared by many operators is an
+                       active-probing signature. Without --site everything is
+                       installed and configured but nothing is started.
 
 Options:
   --user NAME          Name of the generated proxy user       (default: alice)
@@ -64,8 +63,8 @@ Options:
                                                               (default: https)
   --src DIR            Repository checkout to build from (default: this one)
   --config PATH        Configuration file  (default: /etc/telemt/config.toml)
-                       STATE_DIR, BIN_PATH, UNIT_FILE and CADDYFILE may be
-                       overridden the same way, through the environment.
+                       STATE_DIR, BIN_PATH, UNIT_FILE, CADDYFILE and CRED_FILE
+                       may be overridden the same way, through the environment.
   --skip-build         Use the already installed /usr/bin/telemt
   --skip-caddy         Do not install or configure the front proxy
   --skip-firewall      Do not touch ufw
@@ -80,7 +79,6 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --hostname) [ $# -ge 2 ] || die "--hostname needs a value"; HOSTNAME_ARG="$2"; shift 2 ;;
         --site) [ $# -ge 2 ] || die "--site needs a value"; SITE_DIR="$2"; shift 2 ;;
-        --placeholder-site) PLACEHOLDER_SITE=1; shift ;;
         --user) [ $# -ge 2 ] || die "--user needs a value"; USER_NAME="$2"; shift 2 ;;
         --secret) [ $# -ge 2 ] || die "--secret needs a value"; USER_SECRET="$2"; shift 2 ;;
         --direct-port) [ $# -ge 2 ] || die "--direct-port needs a value"; DIRECT_PORT="$2"; shift 2 ;;
@@ -142,12 +140,6 @@ if [ -n "$USER_SECRET" ]; then
     USER_SECRET=$(printf '%s' "$USER_SECRET" | tr 'A-F' 'a-f')
 fi
 
-if [ -n "$SITE_DIR" ] && [ "$PLACEHOLDER_SITE" -eq 1 ]; then
-    die "--site and --placeholder-site are mutually exclusive"
-fi
-if [ -z "$SITE_DIR" ] && [ "$PLACEHOLDER_SITE" -eq 0 ]; then
-    die "pass --site DIR with your own site, or --placeholder-site to generate a throwaway one"
-fi
 if [ -n "$SITE_DIR" ]; then
     [ -d "$SITE_DIR" ] || die "site directory '$SITE_DIR' does not exist"
     [ -f "$SITE_DIR/index.html" ] || die "site directory '$SITE_DIR' has no index.html"
@@ -164,6 +156,9 @@ fi
 if [ -e "$CONFIG_FILE" ] && [ "$FORCE" -eq 0 ]; then
     die "$CONFIG_FILE already exists; move it aside or pass --force"
 fi
+
+# Beside the configuration, because it holds the same secret in another form.
+CRED_FILE="${CRED_FILE:-$(dirname -- "$CONFIG_FILE")/web-credentials.txt}"
 
 if command -v getent >/dev/null 2>&1 && ! getent hosts "$HOSTNAME_ARG" >/dev/null 2>&1; then
     warn "$HOSTNAME_ARG does not resolve yet: Caddy cannot obtain a certificate until it does"
@@ -213,21 +208,17 @@ install -d -o root -g telemt -m 0750 "$(dirname -- "$CONFIG_FILE")"
 # ---------------------------------------------------------------- the site
 
 SITE_TARGET="$STATE_DIR/site"
-say "Installing the public site into $SITE_TARGET"
 install -d -o telemt -g telemt -m 0755 "$SITE_TARGET"
 if [ -n "$SITE_DIR" ]; then
+    say "Installing the public site into $SITE_TARGET"
     cp -R -- "$SITE_DIR"/. "$SITE_TARGET"/
+    chown -R telemt:telemt "$SITE_TARGET"
 else
-    # Vary the bytes per install. It is still a placeholder and still has to be
-    # replaced: only a site that genuinely belongs to the operator makes the
-    # origin uninteresting to an active prober.
-    filler=$(openssl rand -hex 16)
-    printf '<!doctype html>\n<meta charset="utf-8">\n<title>%s</title>\n<h1>%s</h1>\n<p>%s</p>\n' \
-        "$HOSTNAME_ARG" "$HOSTNAME_ARG" "$filler" > "$SITE_TARGET/index.html"
-    printf '<!doctype html>\n<meta charset="utf-8">\n<title>Not found</title>\n<h1>Not found</h1>\n<p>%s</p>\n' \
-        "$(openssl rand -hex 16)" > "$SITE_TARGET/404.html"
+    # Nothing is generated here and nothing is started later: see the refusal
+    # before "Starting services". The directory is created either way so the
+    # operator only has to copy a site into it.
+    say "No public site supplied; preparing $SITE_TARGET for one"
 fi
-chown -R telemt:telemt "$SITE_TARGET"
 
 # --------------------------------------------------------------- the config
 
@@ -240,6 +231,10 @@ cat > "$CONFIG_FILE" <<EOF
 # Reference: docs/Advanced_settings/WEB_PROXY.en.md and docs/Config_params.
 
 [general]
+# Refuse unknown keys instead of ignoring them: a mistyped limit in a file
+# nobody reads back is a setting that silently never applied. The global
+# default is false only so that upgrades of older configs keep working.
+config_strict = true
 use_middle_proxy = false
 log_level = "normal"
 
@@ -293,6 +288,33 @@ umask 022
 chown root:telemt "$CONFIG_FILE"
 chmod 0640 "$CONFIG_FILE"
 
+# ----------------------------------------------------- the bridge capability
+
+# The capability is keyed by the secret bytes the user pastes into the app --
+# including the dd prefix, which is part of the key. Derive it from the exact
+# form handed out below or the printed URL is one no client ever requests.
+HANDOUT_SECRET="dd$USER_SECRET"
+CAPABILITY=$(printf 'tdesktop-web-proxy-bridge-v1\n%s' "$HOSTNAME_ARG" \
+    | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$HANDOUT_SECRET" -binary \
+    | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+# A file, not stdout: a bridge URL echoed to a terminal survives in scrollback,
+# in tmux logs and in pasted bug reports, and it is the whole credential.
+say "Writing $CRED_FILE"
+umask 077
+cat > "$CRED_FILE" <<EOF
+# Generated by install-web.sh for $HOSTNAME_ARG.
+# Whoever holds these values holds the relay. Hand the host and the secret to
+# the user over a channel you trust; the client derives the bridge URL itself.
+
+host    $HOSTNAME_ARG
+secret  $HANDOUT_SECRET
+bridge  https://$HOSTNAME_ARG/?bridge=$CAPABILITY
+EOF
+umask 022
+chown root:root "$CRED_FILE"
+chmod 0600 "$CRED_FILE"
+
 # ------------------------------------------------------------- the unit file
 
 say "Installing the systemd unit"
@@ -302,6 +324,7 @@ if [ -f "$SRC_DIR/contrib/systemd/telemt.service" ]; then
     # sed and none on GNU sed, and this has to run on whatever the host ships.
     sed -e "s#^ExecStart=.*#ExecStart=$BIN_PATH $CONFIG_FILE#" \
         -e "s#^WorkingDirectory=.*#WorkingDirectory=$STATE_DIR#" \
+        -e "s#^ReadWritePaths=.*#ReadWritePaths=$STATE_DIR#" \
         "$SRC_DIR/contrib/systemd/telemt.service" > "$UNIT_FILE"
     chmod 0644 "$UNIT_FILE"
 else
@@ -323,6 +346,19 @@ LimitNOFILE=65536
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# WorkingDirectory is the only path the process writes: the tls_front cache and
+# the quota state file are relative to it by default. Keep the two in step.
+ReadWritePaths=$STATE_DIR
+# AF_UNIX is not optional: censorship.mask and the tls_front fetcher both accept
+# a unix socket, and the resolver talks to nscd over one.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+# Nothing in the binary generates code at runtime.
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target
@@ -358,7 +394,25 @@ else
             "$SRC_DIR/contrib/web/Caddyfile.example" > "$CADDYFILE"
     else
         cat > "$CADDYFILE" <<EOF
+{
+	# Keeps Caddy's admin API off 127.0.0.1:2019, and keeps Caddy on TCP: with
+	# HTTP/3 enabled it binds UDP/443 -- a port this installer never opens --
+	# and stamps \`Alt-Svc: h3=":443"\` on every response.
+	admin off
+	servers {
+		protocols h1 h2
+		timeouts {
+			read_header 10s
+			read_body 60s
+		}
+	}
+}
+
 $HOSTNAME_ARG {
+	# No \`encode\` and no Strict-Transport-Security, both deliberate:
+	# compression is a length side-channel over the operator's own responses,
+	# and HSTS records this host permanently on the client device.
+
 	# Every path goes to the relay: the bridge, the transport endpoints, and
 	# the operator's own site are all served by telemt through one origin.
 	reverse_proxy 127.0.0.1:$CARRIER_PORT {
@@ -369,6 +423,20 @@ $HOSTNAME_ARG {
 			read_timeout 0s
 			write_timeout 0s
 		}
+	}
+
+	# A stopped relay answers like an ordinary site whose backend is down,
+	# not with Caddy's own 502 page.
+	handle_errors {
+		header {
+			Cache-Control "no-store"
+			Content-Security-Policy "default-src 'self'; style-src 'self'; img-src 'self'; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+			Permissions-Policy "camera=(), microphone=(), geolocation=()"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+		}
+		respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
 	}
 }
 EOF
@@ -396,6 +464,29 @@ fi
 
 # ------------------------------------------------------------------- start
 
+if [ -z "$SITE_DIR" ]; then
+    UNITS="telemt"
+    [ "$SKIP_CADDY" -eq 1 ] || UNITS="telemt caddy"
+    cat >&2 <<EOF
+
+$(warn "No public site was supplied, so nothing has been started.")
+  A generated page is not a cover story: every install would share one body
+  shape, and the shape is what an active prober matches. Only a site that
+  genuinely belongs to you makes this origin uninteresting.
+
+  Copy yours into $SITE_TARGET -- index.html is required, 404.html is strongly
+  recommended, see contrib/web/DEPLOY.md step 5 -- and then:
+
+    chown -R telemt:telemt $SITE_TARGET
+    systemctl enable --now $UNITS
+
+  Everything else is in place: $CONFIG_FILE, $UNIT_FILE and $CRED_FILE, which
+  holds the user's host, secret and bridge URL. The site is read into memory
+  once at start-up, so restart telemt after changing it.
+EOF
+    exit 1
+fi
+
 say "Starting services"
 systemctl enable --now telemt >/dev/null 2>&1 || true
 systemctl restart telemt
@@ -411,37 +502,40 @@ systemctl is-active --quiet telemt || {
 # ------------------------------------------------------------------ verify
 
 say "Verifying the relay"
-if command -v curl >/dev/null 2>&1; then
-    curl --fail --silent --max-time 5 "http://127.0.0.1:$ADMIN_PORT/healthz" >/dev/null \
-        && printf '    healthz  ok\n' || warn "healthz did not answer"
-    if curl --fail --silent --max-time 10 "http://127.0.0.1:$ADMIN_PORT/readyz" >/dev/null; then
-        printf '    readyz   ready\n'
-    else
-        warn "readyz is not ready yet; check journalctl -u telemt"
-    fi
-fi
+command -v curl >/dev/null 2>&1 || die "curl is not installed; the relay cannot be verified"
 
-CAPABILITY=$(printf 'tdesktop-web-proxy-bridge-v1\n%s' "$HOSTNAME_ARG" \
-    | openssl dgst -sha256 -mac HMAC -macopt hexkey:"$USER_SECRET" -binary \
-    | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+curl --fail --silent --max-time 5 "http://127.0.0.1:$ADMIN_PORT/healthz" >/dev/null \
+    || die "healthz did not answer on 127.0.0.1:$ADMIN_PORT; check journalctl -u telemt"
+printf '    healthz  ok\n'
+
+# A relay that never reports ready serves the front proxy's error page to every
+# client, which is not a state to leave an operator believing is a success.
+ready=0
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+    if curl --fail --silent --max-time 5 "http://127.0.0.1:$ADMIN_PORT/readyz" >/dev/null; then
+        ready=1
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+[ "$ready" -eq 1 ] || {
+    journalctl -u telemt -n 30 --no-pager || true
+    die "the relay did not become ready after 20 tries; see the log above"
+}
+printf '    readyz   ready\n'
 
 cat <<EOF
 
 $(say "Done")
 
-  Hand the user these two values; the client derives everything else:
-
-    host    $HOSTNAME_ARG
-    secret  dd$USER_SECRET
-
+  The host, the secret and the bridge URL are in $CRED_FILE, mode 0600. Hand
+  the user the host and the secret; the client derives the bridge URL itself.
   A WEB client accepts only a plain or dd-prefixed secret and refuses ee
-  fake-TLS secrets outright, so hand out the dd form above.
+  fake-TLS secrets outright, so hand out the dd form the file records.
 
-  Bridge URL (keep it secret -- it is the capability itself):
-
-    https://$HOSTNAME_ARG/?bridge=$CAPABILITY
-
-  Any other query on / returns your ordinary index instead.
+  Any query on / other than the bridge capability returns your ordinary index.
 
   Check it from outside the host:
 
@@ -451,7 +545,7 @@ $(say "Done")
   The bridge must be fetched with a GET -- it is issued only for GET /, so
   curl -I returns the ordinary index and looks like a broken relay:
 
-    curl -sS -D - -o /dev/null 'https://$HOSTNAME_ARG/?bridge=$CAPABILITY' \\
+    curl -sS -D - -o /dev/null "\$(sed -n 's/^bridge  //p' $CRED_FILE)" \\
       | grep -i 'content-security-policy'
     # expect default-src 'none' ... script-src 'nonce-...'
 
@@ -460,13 +554,3 @@ $(say "Done")
     journalctl -u telemt -f
     curl -s http://127.0.0.1:$ADMIN_PORT/metrics
 EOF
-
-if [ "$PLACEHOLDER_SITE" -eq 1 ]; then
-    cat >&2 <<EOF
-
-$(warn "The public site is a placeholder.")
-  A generated page is not a cover story. Replace $SITE_TARGET with a site that
-  genuinely belongs to you, then restart telemt -- the site is read into memory
-  once at start-up.
-EOF
-fi
