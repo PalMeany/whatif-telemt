@@ -90,7 +90,7 @@ pub enum ListenerTransport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WebClientIpSource {
-    /// Require exactly one canonical IP in `X-Forwarded-For`.
+    /// Use one parseable `X-Forwarded-For` address or the trusted direct peer.
     #[default]
     XForwardedFor,
 }

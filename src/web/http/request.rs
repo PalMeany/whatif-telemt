@@ -2,15 +2,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use base64::Engine as _;
-use hyper::header;
 use hyper::Request;
+use hyper::header;
 use ipnetwork::IpNetwork;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::config::{
-    WebClientIpSource, WebRuntimeProfile, WebRuntimeVhost,
-};
+use crate::config::{WebClientIpSource, WebRuntimeProfile, WebRuntimeVhost};
 use crate::web::manager::TokenHash;
 
 /// Parses one lowercase canonical Host value restricted to the public HTTPS port.
@@ -26,14 +24,13 @@ pub(super) fn canonical_request_host<B>(request: &Request<B>) -> Option<&str> {
         return None;
     }
     let host = value.strip_suffix(":443").unwrap_or(value);
-    if authority.host() != host || host.bytes().any(|byte| byte.is_ascii_uppercase())
-    {
+    if authority.host() != host || host.bytes().any(|byte| byte.is_ascii_uppercase()) {
         return None;
     }
     Some(host)
 }
 
-/// Accepts one canonical forwarded client address from an explicitly trusted peer.
+/// Accepts one forwarded client address or the direct address of a trusted peer.
 pub(super) fn client_ip<B>(
     request: &Request<B>,
     peer: SocketAddr,
@@ -51,16 +48,17 @@ pub(super) fn client_ip<B>(
     };
     let values = request.headers().get_all(header_name);
     let mut values = values.iter();
-    let value = values.next()?.to_str().ok()?;
-    if values.next().is_some()
-        || value.is_empty()
-        || value.trim() != value
-        || value.contains(',')
-    {
+    let Some(value) = values.next() else {
+        return Some(peer.ip());
+    };
+    let value = value.to_str().ok()?;
+    if values.next().is_some() || value.trim() != value || value.contains(',') {
         return None;
     }
-    let ip = value.parse::<IpAddr>().ok()?;
-    (ip.to_string() == value).then_some(ip)
+    if value.is_empty() {
+        return Some(peer.ip());
+    }
+    value.parse::<IpAddr>().ok()
 }
 
 /// Decodes an exact canonical bridge query without allocating credential strings.
@@ -73,14 +71,14 @@ pub(super) fn bridge_candidate(query: Option<&str>) -> ([u8; 32], bool) {
         return (candidate, false);
     }
     let mut decoded = [0u8; 32];
-    let Ok(decoded_len) = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode_slice(value, &mut decoded)
+    let Ok(decoded_len) =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode_slice(value, &mut decoded)
     else {
         return (candidate, false);
     };
     let mut canonical = [0u8; 43];
-    let Ok(encoded_len) = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode_slice(decoded, &mut canonical)
+    let Ok(encoded_len) =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode_slice(decoded, &mut canonical)
     else {
         return (candidate, false);
     };
@@ -113,8 +111,7 @@ pub(super) fn bearer_token_hash<B>(request: &Request<B>) -> Option<TokenHash> {
     let values = request.headers().get_all(header::AUTHORIZATION);
     let mut values = values.iter();
     let value = values.next()?.to_str().ok()?;
-    if values.next().is_some() || !value.starts_with("Bearer ") || value.matches(' ').count() != 1
-    {
+    if values.next().is_some() || !value.starts_with("Bearer ") || value.matches(' ').count() != 1 {
         return None;
     }
     let token = value.strip_prefix("Bearer ")?;
@@ -132,7 +129,7 @@ pub(super) fn bearer_token_hash<B>(request: &Request<B>) -> Option<TokenHash> {
     (decoded_len == decoded.len()
         && encoded_len == canonical.len()
         && bool::from(canonical.ct_eq(token.as_bytes())))
-        .then(|| Sha256::digest(decoded).into())
+    .then(|| Sha256::digest(decoded).into())
 }
 
 /// Checks the exact carrier media type without accepting duplicate headers.
@@ -145,10 +142,7 @@ pub(super) fn binary_content_type<B>(request: &Request<B>) -> bool {
 }
 
 /// Parses one canonical unsigned decimal carrier sequence header.
-pub(super) fn canonical_u64_header<B>(
-    request: &Request<B>,
-    name: &'static str,
-) -> Option<u64> {
+pub(super) fn canonical_u64_header<B>(request: &Request<B>, name: &'static str) -> Option<u64> {
     let values = request.headers().get_all(name);
     let mut values = values.iter();
     let value = values.next()?.to_str().ok()?;
@@ -176,16 +170,13 @@ mod tests {
     }
 
     #[test]
-    fn host_and_forwarded_identity_require_canonical_single_values() {
+    fn host_is_canonical_and_forwarded_identity_is_single_parseable_ip() {
         let request = Request::builder()
             .header(header::HOST, "proxy.example.com:443")
             .header("x-forwarded-for", "192.0.2.10")
             .body(())
             .unwrap();
-        assert_eq!(
-            canonical_request_host(&request),
-            Some("proxy.example.com")
-        );
+        assert_eq!(canonical_request_host(&request), Some("proxy.example.com"));
         let trusted: [IpNetwork; 1] = ["127.0.0.1/32".parse().unwrap()];
         assert_eq!(
             client_ip(
@@ -195,6 +186,45 @@ mod tests {
                 &trusted,
             ),
             Some("192.0.2.10".parse().unwrap())
+        );
+
+        let expanded_ipv6 = Request::builder()
+            .header("x-forwarded-for", "2001:0db8:0:0:0:0:0:10")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            client_ip(
+                &expanded_ipv6,
+                "127.0.0.1:40000".parse().unwrap(),
+                WebClientIpSource::XForwardedFor,
+                &trusted,
+            ),
+            Some("2001:db8::10".parse().unwrap())
+        );
+
+        let without_forwarded_address = Request::builder().body(()).unwrap();
+        assert_eq!(
+            client_ip(
+                &without_forwarded_address,
+                "127.0.0.1:40000".parse().unwrap(),
+                WebClientIpSource::XForwardedFor,
+                &trusted,
+            ),
+            Some("127.0.0.1".parse().unwrap())
+        );
+
+        let empty_forwarded_address = Request::builder()
+            .header("x-forwarded-for", "")
+            .body(())
+            .unwrap();
+        assert_eq!(
+            client_ip(
+                &empty_forwarded_address,
+                "127.0.0.1:40000".parse().unwrap(),
+                WebClientIpSource::XForwardedFor,
+                &trusted,
+            ),
+            Some("127.0.0.1".parse().unwrap())
         );
 
         let uppercase = Request::builder()

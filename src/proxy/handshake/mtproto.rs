@@ -203,15 +203,23 @@ where
         }
 
         let mut matched = exact_user_id.is_some_and(|user_id| try_user_id!(user_id));
-        if exact_user.is_none() && let Some(user_id) = sticky_ip_hint {
+        if exact_user.is_none()
+            && let Some(user_id) = sticky_ip_hint
+        {
             matched = try_user_id!(user_id);
         }
 
-        if exact_user.is_none() && !matched && let Some(user_id) = preferred_user_id {
+        if exact_user.is_none()
+            && !matched
+            && let Some(user_id) = preferred_user_id
+        {
             matched = try_user_id!(user_id);
         }
 
-        if exact_user.is_none() && !matched && let Some(user_id) = sticky_prefix_hint {
+        if exact_user.is_none()
+            && !matched
+            && let Some(user_id) = sticky_prefix_hint
+        {
             matched = try_user_id!(user_id);
         }
 

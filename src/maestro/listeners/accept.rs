@@ -301,12 +301,7 @@ impl ListenerSlot {
         );
         tokio::time::timeout(connection_stop_timeout, self.connections.wait())
             .await
-            .map_err(|_| {
-                format!(
-                    "listener {} connection shutdown timed out",
-                    self.spec.addr
-                )
-            })?;
+            .map_err(|_| format!("listener {} connection shutdown timed out", self.spec.addr))?;
         Ok(())
     }
 

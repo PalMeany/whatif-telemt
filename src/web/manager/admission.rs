@@ -2,9 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use super::state::{
-    allocate_stream_port, allow_rate, decrement_map, release_stream_port,
-};
+use super::state::{allocate_stream_port, allow_rate, decrement_map, release_stream_port};
 use super::{ProfileKey, WebProcessRuntime};
 
 impl WebProcessRuntime {
@@ -43,10 +41,7 @@ impl WebProcessRuntime {
             return None;
         };
         state.streams_live += 1;
-        *state
-            .streams_per_profile
-            .entry(profile_key)
-            .or_insert(0) += 1;
+        *state.streams_per_profile.entry(profile_key).or_insert(0) += 1;
         self.streams_opened.fetch_add(1, Ordering::Relaxed);
         Some(peer_port)
     }
@@ -105,12 +100,7 @@ mod tests {
         let downlink_bytes = data_bytes - uplink_bytes;
         let downlink_items = data_items - runtime.limits.max_frames_per_body;
 
-        assert!(runtime.try_reserve_pending(
-            downlink_bytes,
-            downlink_items,
-            false,
-            true,
-        ));
+        assert!(runtime.try_reserve_pending(downlink_bytes, downlink_items, false, true,));
         assert!(runtime.try_reserve_pending(
             uplink_bytes,
             runtime.limits.max_frames_per_body,
@@ -120,11 +110,7 @@ mod tests {
         assert!(!runtime.try_reserve_pending(1, 1, false, true));
 
         runtime.release_pending(downlink_bytes, downlink_items, false);
-        runtime.release_pending(
-            uplink_bytes,
-            runtime.limits.max_frames_per_body,
-            false,
-        );
+        runtime.release_pending(uplink_bytes, runtime.limits.max_frames_per_body, false);
         runtime.shutdown().await;
     }
 }

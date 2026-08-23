@@ -37,10 +37,7 @@ pub(super) struct ActivityBody {
 impl ActivityBody {
     /// Binds one response body to its request activity guard.
     pub(super) fn new(inner: HttpBody, activity: RequestActivity) -> Self {
-        Self {
-            inner,
-            activity,
-        }
+        Self { inner, activity }
     }
 }
 

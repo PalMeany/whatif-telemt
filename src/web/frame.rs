@@ -98,15 +98,10 @@ pub(crate) fn parse_all<'a>(
             return Err(FrameError::Incomplete);
         }
         let frame_type = FrameType::parse(remaining[0]).ok_or(FrameError::UnknownType)?;
-        let stream_id = u32::from(remaining[1]) << 16
-            | u32::from(remaining[2]) << 8
-            | u32::from(remaining[3]);
-        let payload_len = u32::from_be_bytes([
-            remaining[4],
-            remaining[5],
-            remaining[6],
-            remaining[7],
-        ]) as usize;
+        let stream_id =
+            u32::from(remaining[1]) << 16 | u32::from(remaining[2]) << 8 | u32::from(remaining[3]);
+        let payload_len =
+            u32::from_be_bytes([remaining[4], remaining[5], remaining[6], remaining[7]]) as usize;
         if payload_len > limits.max_frame_payload_bytes {
             return Err(FrameError::PayloadLimit);
         }

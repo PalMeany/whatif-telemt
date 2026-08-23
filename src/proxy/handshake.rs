@@ -57,8 +57,8 @@ use self::tls_auth::{parse_tls_auth_material, validate_tls_secret_candidate};
 pub(crate) use self::auth_probe::{AuthProbeSaturationState, AuthProbeState};
 #[cfg(test)]
 pub use self::mtproto::handle_mtproto_handshake;
-pub use self::mtproto::handle_mtproto_handshake_with_shared;
 pub(crate) use self::mtproto::handle_mtproto_handshake_for_web_user;
+pub use self::mtproto::handle_mtproto_handshake_with_shared;
 #[allow(unused_imports)]
 pub use self::nonce::{encrypt_tg_nonce, encrypt_tg_nonce_with_ciphers, generate_tg_nonce};
 pub use self::session::HandshakeSuccess;

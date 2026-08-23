@@ -89,9 +89,7 @@ pub(crate) struct WebProcessRuntime {
 
 impl WebProcessRuntime {
     /// Starts one process-scoped manager using immutable allocation ceilings.
-    pub(crate) fn start(
-        active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
-    ) -> Arc<Self> {
+    pub(crate) fn start(active_runtime: Arc<ArcSwap<RuntimeGeneration>>) -> Arc<Self> {
         let limits = active_runtime.load().config().web.limits.clone();
         let runtime = Arc::new(Self {
             active_runtime,
@@ -169,9 +167,7 @@ impl WebProcessRuntime {
 
     /// Reserves one logical stream in the inner MTProxy handshake phase.
     pub(crate) fn try_stream_handshake(&self) -> Option<OwnedSemaphorePermit> {
-        let permit = Arc::clone(&self.stream_handshakes)
-            .try_acquire_owned()
-            .ok();
+        let permit = Arc::clone(&self.stream_handshakes).try_acquire_owned().ok();
         if permit.is_none() {
             self.record_stream_rejected();
         }
@@ -215,7 +211,7 @@ impl WebProcessRuntime {
         Some((reader, body))
     }
 
-    /// Issues a one-use bootstrap credential for the active generation.
+    /// Issues a one-use bootstrap credential for an active compatible profile.
     pub(crate) fn issue_bootstrap(
         &self,
         profile: Arc<WebRuntimeProfile>,
@@ -229,17 +225,18 @@ impl WebProcessRuntime {
             .as_ref()
             .and_then(|runtime| matching_profile(runtime, &profile))
             .ok_or(ManagerError::Authentication)?;
-        if !config.web.enabled
-            || profile.public_addr.is_ipv4() != client_ip.is_ipv4()
-            || !generation.proxy_shared.is_user_enabled(&profile.user)
-        {
+        if !config.web.enabled || !generation.proxy_shared.is_user_enabled(&profile.user) {
             return Err(ManagerError::Closed);
         }
         let now = Instant::now();
         let mut state = self.state.lock();
         remove_expired_locked(&mut state, now);
         if state.closed
-            || state.bootstraps_per_ip.get(&client_ip).copied().unwrap_or(0)
+            || state
+                .bootstraps_per_ip
+                .get(&client_ip)
+                .copied()
+                .unwrap_or(0)
                 >= self.limits.max_bootstraps_per_ip
             || !allow_rate(
                 &mut state.bootstrap_rate,
@@ -264,7 +261,6 @@ impl WebProcessRuntime {
         state.bootstraps.insert(
             hash,
             Bootstrap {
-                generation_id: generation.id,
                 expires_at: now + Duration::from_secs(config.web.timeouts.bootstrap_lifetime_secs),
                 issued_at: now,
                 issuance_ip: client_ip,
@@ -281,15 +277,12 @@ impl WebProcessRuntime {
 
     /// Checks whether a bootstrap token is live before reading a request body.
     pub(crate) fn has_bootstrap(&self, hash: TokenHash, host: &str) -> bool {
-        let generation_id = self.active_runtime.load().id;
         let now = Instant::now();
         let state = self.state.lock();
-        state.bootstraps.get(&hash).is_some_and(|entry| {
-            entry.profile.host == host
-                && now <= entry.expires_at
-                && (entry.generation_id == generation_id
-                    || entry.used && entry.session.is_some())
-        })
+        state
+            .bootstraps
+            .get(&hash)
+            .is_some_and(|entry| entry.profile.host == host && now <= entry.expires_at)
     }
 
     /// Creates a session exactly once or replays the original successful result.
@@ -320,17 +313,11 @@ impl WebProcessRuntime {
             if !digest_matches {
                 return Err(ManagerError::Authentication);
             }
-            let session = entry
-                .session
-                .as_ref()
-                .ok_or(ManagerError::Authentication)?;
+            let session = entry.session.as_ref().ok_or(ManagerError::Authentication)?;
             return Ok(CreateResult {
                 token: entry.session_token.as_str().to_owned(),
                 carrier: session.carrier(),
             });
-        }
-        if entry.generation_id != generation.id {
-            return Err(ManagerError::Authentication);
         }
         if state.closed || !config.web.enabled {
             return Err(ManagerError::Closed);
@@ -340,10 +327,7 @@ impl WebProcessRuntime {
             .runtime
             .as_ref()
             .and_then(|runtime| matching_profile(runtime, &entry.profile))
-            .filter(|profile| {
-                profile.public_addr.is_ipv4() == client_ip.is_ipv4()
-                    && generation.proxy_shared.is_user_enabled(&profile.user)
-            })
+            .filter(|profile| generation.proxy_shared.is_user_enabled(&profile.user))
             .ok_or(ManagerError::Authentication)?;
         let profile_key = profile_key(&profile);
         if state.sessions.len() >= self.limits.max_sessions_global
@@ -461,14 +445,11 @@ impl WebProcessRuntime {
         let fits = if control {
             bytes <= self.limits.control_bytes_global
                 && items <= control_item_reserve
-                && state.pending_bytes
-                    <= self.limits.pending_bytes_global.saturating_sub(bytes)
-                && state.pending_items
-                    <= self.limits.pending_items_global.saturating_sub(items)
+                && state.pending_bytes <= self.limits.pending_bytes_global.saturating_sub(bytes)
+                && state.pending_items <= self.limits.pending_items_global.saturating_sub(items)
                 && state.pending_control_bytes
                     <= self.limits.control_bytes_global.saturating_sub(bytes)
-                && state.pending_control_items
-                    <= control_item_reserve.saturating_sub(items)
+                && state.pending_control_items <= control_item_reserve.saturating_sub(items)
         } else {
             let data_bytes = state
                 .pending_bytes
@@ -477,14 +458,11 @@ impl WebProcessRuntime {
                 .pending_items
                 .saturating_sub(state.pending_control_items);
             let (byte_limit, item_limit) = if downlink {
-                let uplink_bytes = self
-                    .limits
-                    .max_body_bytes
-                    .saturating_add(
-                        self.limits
-                            .max_frames_per_body
-                            .saturating_mul(crate::web::session::QUEUE_ITEM_COST),
-                    );
+                let uplink_bytes = self.limits.max_body_bytes.saturating_add(
+                    self.limits
+                        .max_frames_per_body
+                        .saturating_mul(crate::web::session::QUEUE_ITEM_COST),
+                );
                 (
                     data_byte_limit.saturating_sub(uplink_bytes),
                     data_item_limit.saturating_sub(self.limits.max_frames_per_body),
@@ -544,5 +522,4 @@ impl WebProcessRuntime {
     fn record_limit_hit(&self) {
         self.limit_hits.fetch_add(1, Ordering::Relaxed);
     }
-
 }

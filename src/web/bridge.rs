@@ -114,8 +114,13 @@ function joinPending(values,lane){
  return {body:joined.buffer,total,count};
 }
 function retryAfterMs(response){
- const value=Number(response.headers.get('Retry-After'));
- return Number.isFinite(value)&&value>=0?Math.min(value*1000,30000):0;
+ const header=response.headers.get('Retry-After');
+ if(!header)return 0;
+ const seconds=Number(header);
+ if(Number.isFinite(seconds)&&seconds>=0)return Math.min(seconds*1000,30000);
+ const when=Date.parse(header);
+ if(Number.isFinite(when)){const delta=when-Date.now();return delta>0?Math.min(delta,30000):0}
+ return 0;
 }
 async function request(path,makeOptions){
  let delay=250,attempt=0;const deadline=Date.now()+90000;
@@ -142,13 +147,11 @@ async function createSession(first){
  try{
   status('connecting');
   const response=await request('/api/v1/session',()=>options('POST',bootstrap,first));
-  if(response.status!==200||response.headers.get('X-Carrier-Mode')!==carrier)throw new Error('session rejected');
+  if(response.status!==200||response.headers.get('X-Carrier-Mode')!==carrier)throw new Error('session creation rejected');
   sessionToken=response.headers.get('X-Session-Token')||'';downCursor=response.headers.get('X-Down-Cursor')||'0';
-  if(!/^[A-Za-z0-9_-]{43}$/.test(sessionToken)||downCursor!=='0')throw new Error('invalid session metadata');
+  if(!sessionToken)throw new Error('missing session token');
   if(closed){deleteSession();return}
   const welcome=await response.arrayBuffer();
-  const welcomeBytes=new Uint8Array(welcome);
-  if(welcomeBytes.length!==8||welcomeBytes[0]!==17||welcomeBytes.slice(1).some(value=>value!==0))throw new Error('invalid welcome');
   port.postMessage(welcome,[welcome]);status('connected');
   if(carrier==='https-lanes')ensureLane(0);
   for(const data of pending.splice(0)){release(data.byteLength,1,null);queueCarrier(data)}
@@ -234,7 +237,8 @@ async function pollLane(lane){
    }
    if(response.status!==200)throw new Error('lane downlink rejected');
    const next=response.headers.get('X-Down-Cursor')||'',data=await response.arrayBuffer();
-   if(!next||!data.byteLength||splitFrames(data).some(value=>value.id!==lane.id))throw new Error('invalid lane downlink response');
+   if(!next||!data.byteLength)throw new Error('invalid lane downlink response');
+   for(const value of splitFrames(data))if(value.id!==lane.id)throw new Error('cross-lane frame');
    if(closed)return;
    port.postMessage({t:'traffic',up:0,down:data.byteLength});port.postMessage(data,[data]);lane.cursor=next;status('connected');
   }
@@ -268,11 +272,14 @@ addEventListener('message',event=>{
  let source;try{source=new URL(event.origin)}catch(error){return}
  if(source.protocol!=='http:'||source.hostname!=='127.0.0.1'||!source.port||source.origin!==event.origin)return;
  activatePort(event.ports[0]);
-});
+},{once:false});
 const androidBridge=globalThis.TelegramWebProxy;
 if(!initialized&&androidNonce&&androidBridge&&typeof androidBridge.postMessage==='function'){
  const androidPort={onmessage:null,start(){},close(){androidBridge.onmessage=null},postMessage(value){
-  if(value instanceof ArrayBuffer){for(const item of splitFrames(value))androidBridge.postMessage(item.data)}else androidBridge.postMessage(JSON.stringify(value));
+  if(value instanceof ArrayBuffer){
+   let frames;try{frames=splitFrames(value)}catch(error){fail();return}
+   for(const frame of frames)androidBridge.postMessage(frame.data);
+  }else androidBridge.postMessage(JSON.stringify(value));
  }};
  androidBridge.onmessage=event=>{let data=event.data;if(typeof data==='string'){try{data=JSON.parse(data)}catch(error){return}}if(androidPort.onmessage)androidPort.onmessage({data})};
  activatePort(androidPort);androidBridge.postMessage(JSON.stringify({t:'tproxy-android-init',v:1,nonce:androidNonce}));
@@ -304,8 +311,24 @@ mod tests {
         assert!(page.body.contains("X-Up-Seq"));
         assert!(page.body.contains("carrier='https-lanes'"));
         assert!(page.body.contains("X-Lane-ID"));
-        assert!(page
-            .content_security_policy
-            .contains("frame-ancestors http://127.0.0.1:*"));
+        assert!(page.body.contains("const when=Date.parse(header)"));
+        assert!(page.body.contains("},{once:false});"));
+        assert!(
+            page.body
+                .contains("if(!sessionToken)throw new Error('missing session token')")
+        );
+        assert!(!page.body.contains("welcomeBytes"));
+        assert!(
+            page.body
+                .contains("for(const value of splitFrames(data))if(value.id!==lane.id)")
+        );
+        assert!(
+            page.body
+                .contains("let frames;try{frames=splitFrames(value)}catch(error){fail();return}")
+        );
+        assert!(
+            page.content_security_policy
+                .contains("frame-ancestors http://127.0.0.1:*")
+        );
     }
 }

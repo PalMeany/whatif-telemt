@@ -4,16 +4,16 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::config::ProxyConfig;
 use crate::config::ListenerTransport;
+use crate::config::ProxyConfig;
 use crate::maestro::generation::RuntimeGeneration;
 
 use super::accept::ListenerSlot;
 use super::bind::{BoundListeners, BoundTcpListener, PreparedTcpListener, prepare_listener};
 use super::plan::{ListenerBindSpec, listener_bind_plan};
-use crate::web::manager::WebProcessRuntime;
 #[cfg(unix)]
 use super::unix::UnixAcceptHandle;
+use crate::web::manager::WebProcessRuntime;
 
 /// Process-owned listener inventory and accept-task lifecycle controller.
 pub(crate) struct ListenerManager {
@@ -54,11 +54,7 @@ impl ListenerManager {
             let addr = listener.spec.addr;
             slots.insert(
                 addr,
-                ListenerSlot::start(
-                    listener,
-                    active_runtime.clone(),
-                    web_runtime.clone(),
-                ),
+                ListenerSlot::start(listener, active_runtime.clone(), web_runtime.clone()),
             );
         }
         #[cfg(unix)]
@@ -103,7 +99,9 @@ impl ListenerManager {
                 .map(|(addr, spec)| (*addr, spec.clone()))
                 .collect::<BTreeMap<_, _>>();
         if web_inventory_changed {
-            return Err("WEB listener inventory is process-owned; process restart required".to_string());
+            return Err(
+                "WEB listener inventory is process-owned; process restart required".to_string(),
+            );
         }
         let current_addresses: BTreeSet<_> = self.slots.keys().copied().collect();
         let target_addresses: BTreeSet<_> = target_specs.keys().copied().collect();

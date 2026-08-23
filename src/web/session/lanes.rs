@@ -7,8 +7,8 @@ use subtle::ConstantTimeEq;
 
 use super::uplink::{inbound_reservation, validate_batch};
 use super::{
-    CarrierLane, DownBatch, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame,
-    SessionState, WebSession, remember_closed,
+    CarrierLane, DownBatch, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame, SessionState,
+    WebSession, remember_closed,
 };
 use crate::config::{WebCarrier, WebLimitsConfig};
 use crate::web::frame::{self, Frame, FrameType};
@@ -32,9 +32,11 @@ impl WebSession {
                 return Err(ManagerError::Protocol);
             }
         };
-        if frames.iter().copied().any(|value| {
-            value.stream_id != lane_id || frame::validate_client_shape(value).is_err()
-        }) {
+        if frames
+            .iter()
+            .copied()
+            .any(|value| value.stream_id != lane_id || frame::validate_client_shape(value).is_err())
+        {
             self.close();
             return Err(ManagerError::Protocol);
         }
@@ -48,13 +50,17 @@ impl WebSession {
             state.last_activity = Instant::now();
             if !state.carrier_lanes.contains_key(&lane_id) {
                 if lane_id != 0
-                    && frames.first().is_some_and(|value| value.frame_type != FrameType::Open)
+                    && frames
+                        .first()
+                        .is_some_and(|value| value.frame_type != FrameType::Open)
                     && only_late_frames(&frames)
                 {
                     return Ok(sequence);
                 }
                 if lane_id == 0
-                    || frames.first().is_none_or(|value| value.frame_type != FrameType::Open)
+                    || frames
+                        .first()
+                        .is_none_or(|value| value.frame_type != FrameType::Open)
                 {
                     drop(state);
                     self.close();
@@ -182,12 +188,7 @@ impl WebSession {
             };
             if let Some(batch) = acknowledged {
                 self.release_locked(&mut state, batch.data_bytes, batch.data_items, false);
-                self.release_locked(
-                    &mut state,
-                    batch.control_bytes,
-                    batch.control_items,
-                    true,
-                );
+                self.release_locked(&mut state, batch.control_bytes, batch.control_items, true);
                 if let Some(stream) = state.streams.get_mut(&lane_id)
                     && let Some(waker) = stream.write_waker.take()
                 {
@@ -402,11 +403,7 @@ impl WebSession {
     }
 
     pub(super) fn remember_closed_locked(&self, state: &mut SessionState, stream_id: u32) {
-        let evicted = remember_closed(
-            state,
-            stream_id,
-            self.limits.max_tombstones_per_session,
-        );
+        let evicted = remember_closed(state, stream_id, self.limits.max_tombstones_per_session);
         if self.carrier() != WebCarrier::HttpsLanes {
             return;
         }

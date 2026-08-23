@@ -2542,7 +2542,7 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 
 ## web_client_ip_source (server.listeners)
   - **Constraints / validation**: Only `"x_forwarded_for"` is supported by the initial WEB implementation.
-  - **Description**: Chooses the L7 source of the original client IP. Telemt accepts exactly one canonical `X-Forwarded-For` address and only when the direct TCP peer belongs to `web_trusted_proxy_cidrs`.
+  - **Description**: Chooses the L7 source of the original client IP. From a direct TCP peer in `web_trusted_proxy_cidrs`, Telemt accepts one parseable `X-Forwarded-For` address. If the trusted peer omits the header, Telemt uses that peer's address; configure the terminator to set the header so per-client limits and source policy use the real client address.
 
 ## web_trusted_proxy_cidrs (server.listeners)
   - **Constraints / validation**: WEB-only non-empty CIDR array. A `/0` network is rejected. It is invalid on an MTProxy listener.
@@ -2630,7 +2630,7 @@ Every timeout is measured in seconds and must be within `1..=3600`. The longest 
 | `decoy` | table | yes | `✔` | Ordinary-site fallback for unauthenticated or invalid traffic. |
 | `profiles` | array of tables | when enabled | `✔` | Explicit users and client secret modes exposed by this hostname. |
 
-The forwarded client address and `public_addr` must use the same IP family. The hostname must be accepted by Telegram Desktop and is normalized during validation.
+The hostname must be accepted by Telegram Desktop and is normalized during validation. A bootstrap is a bearer credential: its client address and address family may change before session creation. An unused bootstrap remains valid across a configuration reload only while the same profile identity is still active.
 
 # [web.vhosts.decoy]
 

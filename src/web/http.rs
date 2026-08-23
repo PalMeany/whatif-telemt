@@ -34,9 +34,9 @@ mod request;
 #[cfg(test)]
 mod tests;
 
-use decoy::serve_decoy;
 use activity::{ActivityBody, RequestActivity};
 use body::{CollectBodyError, CollectedBody, collect_body};
+use decoy::serve_decoy;
 use request::{
     bearer_token_hash, binary_content_type, bridge_candidate, canonical_request_host,
     canonical_u64_header, client_ip, match_profile,
@@ -84,10 +84,7 @@ pub(crate) async fn serve_connection(
             } else {
                 service_unavailable()
             };
-            let response = response.map(|body| {
-                ActivityBody::new(body, activity)
-                .boxed_unsync()
-            });
+            let response = response.map(|body| ActivityBody::new(body, activity).boxed_unsync());
             Ok::<_, Infallible>(response)
         }
     });
@@ -174,12 +171,7 @@ async fn handle_root(
     let Some(profile) = profile.filter(|_| canonical && request.method() == Method::GET) else {
         return serve_decoy(request, vhost, false, &runtime).await;
     };
-    let Some(client_ip) = client_ip(
-        &request,
-        peer,
-        client_ip_source,
-        trusted_proxy_cidrs,
-    ) else {
+    let Some(client_ip) = client_ip(&request, peer, client_ip_source, trusted_proxy_cidrs) else {
         strip_query(&mut request);
         return serve_decoy(request, vhost, true, &runtime).await;
     };
@@ -242,21 +234,14 @@ async fn handle_api(
     if request.uri().query().is_some() || request.headers().contains_key(header::COOKIE) {
         return serve_decoy(request, vhost, true, &runtime).await;
     }
-    let Some(client_ip) = client_ip(
-        &request,
-        peer,
-        client_ip_source,
-        trusted_proxy_cidrs,
-    ) else {
+    let Some(client_ip) = client_ip(&request, peer, client_ip_source, trusted_proxy_cidrs) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
     let Some(token_hash) = bearer_token_hash(&request) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
     match request.uri().path() {
-        "/api/v1/session" => {
-            handle_session(request, runtime, vhost, token_hash, client_ip).await
-        }
+        "/api/v1/session" => handle_session(request, runtime, vhost, token_hash, client_ip).await,
         "/api/v1/up" => handle_up(request, runtime, vhost, token_hash).await,
         "/api/v1/down" => handle_down(request, runtime, vhost, token_hash).await,
         _ => serve_decoy(request, vhost, true, &runtime).await,
@@ -356,7 +341,12 @@ async fn handle_up(
     let Some(lane_id) = carrier_lane(&request, session.carrier()) else {
         return serve_decoy(request, vhost, true, &runtime).await;
     };
-    let limit = runtime.active_generation().config().web.limits.max_body_bytes;
+    let limit = runtime
+        .active_generation()
+        .config()
+        .web
+        .limits
+        .max_body_bytes;
     let CollectedBody {
         request,
         body,
@@ -510,10 +500,7 @@ fn bad_gateway() -> HttpResponse {
 }
 
 fn generic_not_found() -> HttpResponse {
-    full_response(
-        StatusCode::NOT_FOUND,
-        Bytes::from_static(b"not found\n"),
-    )
+    full_response(StatusCode::NOT_FOUND, Bytes::from_static(b"not found\n"))
 }
 
 fn full_response(status: StatusCode, body: Bytes) -> HttpResponse {
@@ -523,11 +510,7 @@ fn full_response(status: StatusCode, body: Bytes) -> HttpResponse {
         .boxed_unsync();
     let mut response = Response::new(body);
     *response.status_mut() = status;
-    insert_header(
-        &mut response,
-        header::CONTENT_LENGTH,
-        &length.to_string(),
-    );
+    insert_header(&mut response, header::CONTENT_LENGTH, &length.to_string());
     response
 }
 

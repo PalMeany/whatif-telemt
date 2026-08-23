@@ -359,10 +359,7 @@ pub(crate) struct WebRuntimeProfile {
 /// Runtime-ready ordinary-site fallback.
 #[derive(Debug)]
 pub(crate) enum WebRuntimeDecoy {
-    HttpUpstream {
-        addr: SocketAddr,
-        authority: String,
-    },
+    HttpUpstream { addr: SocketAddr, authority: String },
     StaticDirectory(Arc<WebStaticSite>),
 }
 

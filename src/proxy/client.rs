@@ -43,9 +43,7 @@ use crate::transport::{UpstreamManager, configure_client_socket, parse_proxy_pro
 
 use crate::proxy::authenticated::{ClientRuntimeDeps, run_authenticated};
 #[cfg(test)]
-use crate::proxy::authenticated::{
-    UserConnectionReservation, acquire_user_connection_reservation,
-};
+use crate::proxy::authenticated::{UserConnectionReservation, acquire_user_connection_reservation};
 use crate::proxy::handshake::{
     HandshakeSuccess, TlsResponseWriteOptions, handle_mtproto_handshake_with_shared,
     handle_tls_handshake_with_shared, handle_tls_handshake_with_shared_and_options,
@@ -53,9 +51,9 @@ use crate::proxy::handshake::{
 #[cfg(test)]
 use crate::proxy::handshake::{handle_mtproto_handshake, handle_tls_handshake};
 use crate::proxy::masking::handle_bad_client_with_shared;
-use crate::proxy::route_mode::RouteRuntimeController;
 #[cfg(test)]
 use crate::proxy::route_mode::RelayRouteMode;
+use crate::proxy::route_mode::RouteRuntimeController;
 use crate::proxy::shared_state::{ConntrackClosePolicy, ProxySharedState};
 
 fn beobachten_ttl(config: &ProxyConfig) -> Duration {

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Limited};
-use hyper::body::{Body as _, Incoming};
 use hyper::Request;
+use hyper::body::{Body as _, Incoming};
 
 use crate::web::manager::WebProcessRuntime;
 
@@ -50,14 +50,8 @@ pub(super) async fn collect_body(
     let Some((reader_budget, body_budget)) = runtime.try_body_budget(limit) else {
         return Err(CollectBodyError::Limit);
     };
-    let body_timeout = Duration::from_secs(
-        runtime
-            .active_generation()
-            .config()
-            .web
-            .timeouts
-            .body_secs,
-    );
+    let body_timeout =
+        Duration::from_secs(runtime.active_generation().config().web.timeouts.body_secs);
     let body = match tokio::time::timeout(body_timeout, Limited::new(body, limit).collect()).await {
         Ok(Ok(body)) => body.to_bytes(),
         _ => {
