@@ -6,11 +6,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 
-use crate::config::RstOnCloseMode;
+use crate::config::{ListenerTransport, RstOnCloseMode};
 use crate::proxy::ClientHandler;
 use crate::transport::socket::set_linger_zero;
+use crate::web::manager::WebProcessRuntime;
 
 use super::bind::BoundTcpListener;
 use super::plan::ListenerBindSpec;
@@ -19,11 +21,15 @@ use crate::maestro::helpers::{
     expected_handshake_close_description, is_expected_handshake_eof, peer_close_description,
 };
 
+/// One bound listener and all connection tasks accepted through its lifecycle.
 pub(super) struct ListenerSlot {
     pub(super) spec: ListenerBindSpec,
     listener: Arc<TcpListener>,
     cancellation: CancellationToken,
     task: Option<JoinHandle<()>>,
+    connections: TaskTracker,
+    web_runtime: Option<Arc<WebProcessRuntime>>,
+    active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
 }
 
 enum PermitWait {
@@ -181,6 +187,8 @@ async fn run_accept_loop(
     listener: Arc<TcpListener>,
     spec: ListenerBindSpec,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    web_runtime: Option<Arc<WebProcessRuntime>>,
+    connections: TaskTracker,
     cancellation: CancellationToken,
 ) {
     loop {
@@ -191,6 +199,26 @@ async fn run_accept_loop(
         };
         match accepted {
             Ok((stream, peer_addr)) => {
+                if spec.transport == ListenerTransport::Web {
+                    let Some(web_runtime) = web_runtime.as_ref() else {
+                        error!(addr = %spec.addr, "WEB listener has no process runtime");
+                        return;
+                    };
+                    let Some(connection_permit) = web_runtime.try_http_connection() else {
+                        drop(stream);
+                        continue;
+                    };
+                    connections.spawn(crate::web::http::serve_connection(
+                        stream,
+                        peer_addr,
+                        spec.web_client_ip_source,
+                        Arc::clone(&spec.web_trusted_proxy_cidrs),
+                        Arc::clone(web_runtime),
+                        cancellation.clone(),
+                        connection_permit,
+                    ));
+                    continue;
+                }
                 let runtime = active_runtime.load_full();
                 if !*runtime.admission_rx.borrow() {
                     debug!(peer = %peer_addr, "Admission gate closed, dropping connection");
@@ -232,12 +260,16 @@ impl ListenerSlot {
     pub(super) fn start(
         bound: BoundTcpListener,
         active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+        web_runtime: Option<Arc<WebProcessRuntime>>,
     ) -> Self {
         let cancellation = CancellationToken::new();
+        let connections = TaskTracker::new();
         let task = tokio::spawn(run_accept_loop(
             bound.listener.clone(),
             bound.spec.clone(),
-            active_runtime,
+            active_runtime.clone(),
+            web_runtime.clone(),
+            connections.clone(),
             cancellation.clone(),
         ));
         Self {
@@ -245,6 +277,9 @@ impl ListenerSlot {
             listener: bound.listener,
             cancellation,
             task: Some(task),
+            connections,
+            web_runtime,
+            active_runtime,
         }
     }
 
@@ -255,15 +290,31 @@ impl ListenerSlot {
                 format!("listener {} task failed: {error_value}", self.spec.addr)
             })?;
         }
+        self.connections.close();
+        let connection_stop_timeout = Duration::from_secs(
+            self.active_runtime
+                .load()
+                .config()
+                .web
+                .timeouts
+                .shutdown_secs,
+        );
+        tokio::time::timeout(connection_stop_timeout, self.connections.wait())
+            .await
+            .map_err(|_| format!("listener {} connection shutdown timed out", self.spec.addr))?;
         Ok(())
     }
 
     pub(super) fn restart(&mut self, active_runtime: Arc<ArcSwap<RuntimeGeneration>>) {
+        self.active_runtime = active_runtime.clone();
         self.cancellation = CancellationToken::new();
+        self.connections = TaskTracker::new();
         self.task = Some(tokio::spawn(run_accept_loop(
             self.listener.clone(),
             self.spec.clone(),
             active_runtime,
+            self.web_runtime.clone(),
+            self.connections.clone(),
             self.cancellation.clone(),
         )));
     }

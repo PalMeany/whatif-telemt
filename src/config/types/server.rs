@@ -75,6 +75,26 @@ pub enum SynLimitMode {
     Pf,
 }
 
+/// Application protocol accepted by one process-owned TCP listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenerTransport {
+    /// Existing MTProxy TCP listener behavior.
+    #[default]
+    Mtproxy,
+    /// Plain HTTP WEB gateway behind a trusted TLS terminator.
+    Web,
+}
+
+/// Trusted L7 source used to recover a WEB client's identity address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebClientIpSource {
+    /// Use one parseable `X-Forwarded-For` address or the trusted direct peer.
+    #[default]
+    XForwardedFor,
+}
+
 impl Serialize for SynLimitMode {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -380,6 +400,9 @@ impl Default for TimeoutsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenerConfig {
     pub ip: IpAddr,
+    /// Application protocol accepted by this listener.
+    #[serde(default)]
+    pub transport: ListenerTransport,
     /// Per-listener TCP port. If omitted, falls back to legacy `server.port`.
     #[serde(default)]
     pub port: Option<u16>,
@@ -429,6 +452,12 @@ pub struct ListenerConfig {
     /// Default is false for safety.
     #[serde(default)]
     pub reuse_allow: bool,
+    /// L7 header policy used only by WEB listeners.
+    #[serde(default)]
+    pub web_client_ip_source: WebClientIpSource,
+    /// Immediate socket peers allowed to provide the WEB client identity header.
+    #[serde(default)]
+    pub web_trusted_proxy_cidrs: Vec<IpNetwork>,
 }
 
 /// Client-facing TCP MSS preset for extreme-low fragmentation profiles.

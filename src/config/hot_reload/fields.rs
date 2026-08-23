@@ -337,8 +337,14 @@ pub(super) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyC
     cfg.access.user_max_unique_ips_global_each = new.access.user_max_unique_ips_global_each;
     cfg.access.user_max_unique_ips_mode = new.access.user_max_unique_ips_mode;
     cfg.access.user_max_unique_ips_window_secs = new.access.user_max_unique_ips_window_secs;
+    let process_limits = cfg.web.limits.clone();
+    cfg.web = new.web.clone();
+    cfg.web.limits = process_limits;
     if cfg.rebuild_runtime_user_auth().is_err() {
         cfg.runtime_user_auth = None;
+    }
+    if cfg.rebuild_runtime_web().is_err() {
+        cfg.web = old.web.clone();
     }
 
     cfg

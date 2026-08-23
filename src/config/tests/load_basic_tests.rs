@@ -52,3 +52,5 @@ mod synlimit_mss_tests;
 mod tls_fetch_tests;
 #[path = "load_basic_tests/upstream_tests.rs"]
 mod upstream_tests;
+#[path = "load_basic_tests/web_tests.rs"]
+mod web_tests;

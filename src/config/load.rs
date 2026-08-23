@@ -22,6 +22,8 @@ mod includes;
 mod strict_keys;
 // Precomputed user authentication data for handshake hot paths.
 mod runtime_auth;
+// Validated immutable WEB configuration and static-site snapshots.
+mod runtime_web;
 // Post-deserialization validation helpers.
 mod decode;
 mod effective;
@@ -30,6 +32,7 @@ mod validate_core;
 mod validate_me;
 mod validate_runtime;
 mod validate_server;
+mod validate_web;
 mod validation;
 
 use self::includes::{hash_rendered_snapshot, normalize_config_path, preprocess_includes};
@@ -95,6 +98,10 @@ pub struct ProxyConfig {
     /// Server-side listener, fallback, and API configuration.
     #[serde(default)]
     pub server: ServerConfig,
+
+    /// WEB carrier ingress and public-site fallback configuration.
+    #[serde(default)]
+    pub web: WebConfig,
 
     /// Timeout values used by client, fallback, and upstream operations.
     #[serde(default)]
@@ -202,6 +209,11 @@ impl ProxyConfig {
         let snapshot = UserAuthSnapshot::from_users(&self.access.users)?;
         self.runtime_user_auth = Some(Arc::new(snapshot));
         Ok(())
+    }
+
+    /// Rebuilds validated WEB capabilities and immutable decoy snapshots.
+    pub(crate) fn rebuild_runtime_web(&mut self) -> Result<()> {
+        runtime_web::rebuild(self)
     }
 
     pub(crate) fn runtime_user_auth(&self) -> Option<&UserAuthSnapshot> {

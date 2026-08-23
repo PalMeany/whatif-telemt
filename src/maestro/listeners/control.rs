@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use crate::config::ListenerTransport;
 use crate::config::ProxyConfig;
 use crate::maestro::generation::RuntimeGeneration;
 
@@ -12,21 +13,25 @@ use super::bind::{BoundListeners, BoundTcpListener, PreparedTcpListener, prepare
 use super::plan::{ListenerBindSpec, listener_bind_plan};
 #[cfg(unix)]
 use super::unix::UnixAcceptHandle;
+use crate::web::manager::WebProcessRuntime;
 
 /// Process-owned listener inventory and accept-task lifecycle controller.
 pub(crate) struct ListenerManager {
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     slots: BTreeMap<SocketAddr, ListenerSlot>,
+    web_runtime: Option<Arc<WebProcessRuntime>>,
     #[cfg(unix)]
     unix: Option<UnixAcceptHandle>,
 }
 
+/// Socket changes prepared without activating or stopping accept loops.
 pub(crate) struct PreparedListenerTransition {
     target_specs: BTreeMap<SocketAddr, ListenerBindSpec>,
     additions: Vec<PreparedTcpListener>,
     removals: Vec<SocketAddr>,
 }
 
+/// Activated additions and stopped removals awaiting runtime publication.
 pub(crate) struct PendingListenerTransition {
     target_specs: BTreeMap<SocketAddr, ListenerBindSpec>,
     additions: Vec<BoundTcpListener>,
@@ -39,10 +44,18 @@ impl ListenerManager {
         bound: BoundListeners,
         active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     ) -> Self {
+        let has_web = bound
+            .listeners
+            .iter()
+            .any(|listener| listener.spec.transport == ListenerTransport::Web);
+        let web_runtime = has_web.then(|| WebProcessRuntime::start(active_runtime.clone()));
         let mut slots = BTreeMap::new();
         for listener in bound.listeners {
             let addr = listener.spec.addr;
-            slots.insert(addr, ListenerSlot::start(listener, active_runtime.clone()));
+            slots.insert(
+                addr,
+                ListenerSlot::start(listener, active_runtime.clone(), web_runtime.clone()),
+            );
         }
         #[cfg(unix)]
         let unix = bound
@@ -51,6 +64,7 @@ impl ListenerManager {
         Self {
             active_runtime,
             slots,
+            web_runtime,
             #[cfg(unix)]
             unix,
         }
@@ -61,6 +75,7 @@ impl ListenerManager {
         Self {
             active_runtime,
             slots: BTreeMap::new(),
+            web_runtime: None,
             #[cfg(unix)]
             unix: None,
         }
@@ -72,6 +87,22 @@ impl ListenerManager {
         desired: &ProxyConfig,
     ) -> Result<Option<PreparedListenerTransition>, String> {
         let target_specs = listener_bind_plan(desired)?;
+        let web_inventory_changed = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.spec.transport == ListenerTransport::Web)
+            .map(|(addr, slot)| (*addr, slot.spec.clone()))
+            .collect::<BTreeMap<_, _>>()
+            != target_specs
+                .iter()
+                .filter(|(_, spec)| spec.transport == ListenerTransport::Web)
+                .map(|(addr, spec)| (*addr, spec.clone()))
+                .collect::<BTreeMap<_, _>>();
+        if web_inventory_changed {
+            return Err(
+                "WEB listener inventory is process-owned; process restart required".to_string(),
+            );
+        }
         let current_addresses: BTreeSet<_> = self.slots.keys().copied().collect();
         let target_addresses: BTreeSet<_> = target_specs.keys().copied().collect();
         if current_addresses == target_addresses
@@ -164,7 +195,11 @@ impl ListenerManager {
             let addr = listener.spec.addr;
             self.slots.insert(
                 addr,
-                ListenerSlot::start(listener, self.active_runtime.clone()),
+                ListenerSlot::start(
+                    listener,
+                    self.active_runtime.clone(),
+                    self.web_runtime.clone(),
+                ),
             );
         }
         debug_assert_eq!(
@@ -191,6 +226,9 @@ impl ListenerManager {
             errors.push(error_value);
         }
         self.slots.clear();
+        if let Some(web_runtime) = self.web_runtime.take() {
+            web_runtime.shutdown().await;
+        }
         #[cfg(unix)]
         {
             self.unix = None;
@@ -214,6 +252,7 @@ mod tests {
     fn listener_config(addr: SocketAddr) -> ListenerConfig {
         ListenerConfig {
             ip: addr.ip(),
+            transport: crate::config::ListenerTransport::Mtproxy,
             port: Some(addr.port()),
             client_mss: None,
             synlimit: SynLimitMode::Off,
@@ -229,6 +268,8 @@ mod tests {
             announce_ip: None,
             proxy_protocol: None,
             reuse_allow: false,
+            web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
+            web_trusted_proxy_cidrs: Vec::new(),
         }
     }
 
@@ -237,12 +278,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let spec = ListenerBindSpec {
             addr,
+            transport: crate::config::ListenerTransport::Mtproxy,
             options: ListenOptions {
                 reuse_port: false,
                 ..Default::default()
             },
             proxy_protocol: false,
             tls_response_fragment_size: None,
+            web_client_ip_source: crate::config::WebClientIpSource::XForwardedFor,
+            web_trusted_proxy_cidrs: Arc::from([]),
         };
         (
             BoundTcpListener {

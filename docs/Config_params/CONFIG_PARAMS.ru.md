@@ -23,6 +23,12 @@
  - [server.conntrack_control](#serverconntrack_control)
  - [server.api](#serverapi)
  - [server.listeners](#serverlisteners)
+ - [web](#web)
+ - [web.limits](#weblimits)
+ - [web.timeouts](#webtimeouts)
+ - [web.vhosts](#webvhosts)
+ - [web.vhosts.decoy](#webvhostsdecoy)
+ - [web.vhosts.profiles](#webvhostsprofiles)
  - [timeouts](#timeouts)
  - [censorship](#censorship)
  - [censorship.tls_fetch](#censorshiptls_fetch)
@@ -2250,6 +2256,9 @@
 | [`announce_ip`](#announce_ip) | `IpAddr` | — | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | — | `✘` |
 | [`reuse_allow`](#reuse_allow) | `bool` | `false` | `✘` |
+| [`transport`](#transport-serverlisteners) | `"mtproxy"` или `"web"` | `"mtproxy"` | `✘` |
+| [`web_client_ip_source`](#web_client_ip_source-serverlisteners) | `"x_forwarded_for"` | `"x_forwarded_for"` | `✘` |
+| [`web_trusted_proxy_cidrs`](#web_trusted_proxy_cidrs-serverlisteners) | `IpNetwork[]` | `[]` | `✘` |
 
 ## ip
   - **Ограничения / валидация**: Обязательный параметр. Значение должно содержать IP-адрес в формате строки.
@@ -2442,6 +2451,142 @@
     ip = "0.0.0.0"
     reuse_allow = false
     ```
+
+## transport (server.listeners)
+  - **Ограничения / валидация**: `"mtproxy"` или `"web"`.
+  - **Описание**: Выбирает протокол listener’а. WEB-listener принимает обычный HTTP/1.1 от доверенного TLS-терминатора и требует перезапуска процесса. Для него обязательны `proxy_protocol = false` и `reuse_allow = false`; параметры `client_mss`, `synlimit`, `announce` и `announce_ip` запрещены.
+  - **Пример**:
+
+    ```toml
+    [[server.listeners]]
+    ip = "127.0.0.1"
+    port = 18080
+    transport = "web"
+    proxy_protocol = false
+    web_trusted_proxy_cidrs = ["127.0.0.1/32"]
+    ```
+
+## web_client_ip_source (server.listeners)
+  - **Ограничения / валидация**: Первая реализация WEB поддерживает только `"x_forwarded_for"`.
+  - **Описание**: Выбирает L7-источник исходного IP клиента. От прямого TCP peer из `web_trusted_proxy_cidrs` Telemt принимает один корректно разбираемый адрес `X-Forwarded-For`. Если доверенный peer не передал header, Telemt использует его адрес; настройте TLS-терминатор на передачу header, чтобы per-client limits и source policy применялись к реальному адресу клиента.
+
+## web_trusted_proxy_cidrs (server.listeners)
+  - **Ограничения / валидация**: Непустой массив CIDR только для WEB. Сеть `/0` запрещена. Параметр недопустим для MTProxy-listener’а.
+  - **Описание**: Граница доверия для непосредственного NGINX или HAProxy. Указывайте только адреса, которые могут напрямую подключаться к этому listener’у; не публикуйте plain HTTP listener в недоверенной сети.
+
+
+# [web]
+
+WEB-режим переносит MTProxy-трафик Telegram Desktop внутри HTTPS, который терминирует внешний NGINX или HAProxy. Telemt принимает обычный HTTP/1.1 на приватном listener’е с `transport = "web"`. Перед включением режима прочитайте [полное руководство по развёртыванию WEB](../WEB/WEB_PROXY.ru.md).
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `false` | `✔` |
+| `carrier` | `"https"` или `"https-lanes"` | `"https"` | `✔` |
+| `limits` | таблица | ограниченные defaults | `✘` |
+| `timeouts` | таблица | ограниченные defaults | `✔` |
+| `vhosts` | массив таблиц | `[]` | `✔` |
+
+Для `enabled = true` нужен как минимум один доступный по сетевой политике WEB-listener, один vhost и один профиль в каждом vhost. `carrier = "https"` сохраняет сериализованный HTTPS transport. При `carrier = "https-lanes"` stream zero и каждый logical stream получают независимые uplink sequence, downlink cursor, retry и long poll; этот carrier требует `max_http_handlers >= 2` и публичного HTTP/2 на TLS-терминаторе, чтобы убрать application-level inter-stream head-of-line blocking. Reload применяет `carrier` только к новым bridge sessions. Отключение WEB после reload прекращает выдачу новых bridge- и session-credentials; для отзыва активных сессий отдельного пользователя используйте users API.
+
+# [web.limits]
+
+Эти process-wide границы ограничивают все WEB-реестры, очереди, тела запросов, статические snapshots и admission-пути. Значения проверяются совместно: per-owner лимиты не могут превышать глобальные, резервы очередей должны сохранять прогресс control frames, body-резервы должны помещаться в общий бюджет, а все заявленные байтовые границы — в `memory_envelope_bytes`. Изменение любого значения этой таблицы требует перезапуска процесса.
+
+| Ключ | Тип | По умолчанию | Описание |
+| --- | --- | --- | --- |
+| `max_header_bytes` | `usize` | `16384` | Максимальный размер заголовка одного HTTP-запроса. |
+| `max_body_bytes` | `usize` | `2097152` | Максимальный размер собранного carrier body. |
+| `max_frame_payload_bytes` | `usize` | `1048576` | Максимальный payload одного WEB frame. |
+| `carrier_batch_bytes` | `usize` | `2097152` | Максимальный закодированный downlink batch. |
+| `max_frames_per_body` | `usize` | `4096` | Максимальное число frames в одном carrier body. |
+| `max_http_connections` | `usize` | `1024` | Принятые WEB HTTP connections на весь процесс. |
+| `max_http_handlers` | `usize` | `512` | Одновременно выполняемые HTTP handlers на весь процесс; HTTPS lanes могут занять long polls не более половины лимита, оставляя остаток для session, uplink и control work. |
+| `max_body_readers` | `usize` | `32` | Одновременно собираемые request bodies на весь процесс. |
+| `max_body_bytes_global` | `usize` | `67108864` | Глобальный байтовый резерв для собранных bodies. |
+| `max_sessions_global` | `usize` | `128` | Активные WEB-сессии на весь процесс. |
+| `max_sessions_per_ip` | `usize` | `16` | Активные сессии одного forwarded client IP. |
+| `max_streams_per_session` | `usize` | `128` | Default активных logical streams на сессию. |
+| `max_streams_global` | `usize` | `4096` | Активные logical streams на весь процесс. |
+| `max_stream_handshakes` | `usize` | `256` | Одновременные внутренние MTProxy handshakes. |
+| `max_tombstones_per_session` | `usize` | `4096` | Закрытые stream IDs, сохраняемые одной сессией. |
+| `pending_bytes_per_session` | `usize` | `33554432` | Байты данных и управления в очередях одной сессии. |
+| `pending_bytes_global` | `usize` | `536870912` | Байты данных и управления в очередях всего процесса. |
+| `pending_items_per_session` | `usize` | `16384` | Элементы данных и управления в очередях одной сессии. |
+| `pending_items_global` | `usize` | `262144` | Элементы данных и управления в очередях всего процесса. |
+| `control_bytes_per_session` | `usize` | `262144` | Резерв одной сессии только для control frames. |
+| `control_bytes_global` | `usize` | `16777216` | Process-wide резерв только для control frames. |
+| `max_bootstraps_global` | `usize` | `512` | Активные bootstrap credentials на весь процесс. |
+| `max_bootstraps_per_ip` | `usize` | `64` | Активные bootstrap credentials на один client IP. |
+| `max_vhosts` | `usize` | `8` | Настроенные WEB virtual hosts. |
+| `max_profiles` | `usize` | `32` | WEB-профили всех vhosts. |
+| `max_static_files` | `usize` | `4096` | Элементы static snapshot всех vhosts. |
+| `max_static_file_bytes` | `usize` | `8388608` | Максимальный размер одного статического файла. |
+| `max_static_bytes` | `usize` | `67108864` | Размер static snapshots всех vhosts. |
+| `memory_envelope_bytes` | `usize` | `805306368` | Заявленный envelope для HTTP heads, bodies, очередей и static snapshots; максимум 4 GiB. |
+| `new_bootstraps_per_minute` | `u32` | `1200` | Устойчивая process-wide скорость выдачи bootstrap. |
+| `new_bootstraps_burst` | `u32` | `256` | Process-wide burst выдачи bootstrap. |
+| `new_sessions_per_minute` | `u32` | `600` | Устойчивая process-wide скорость создания сессий. |
+| `new_sessions_burst` | `u32` | `128` | Process-wide burst создания сессий. |
+| `new_streams_per_minute` | `u32` | `6000` | Устойчивая скорость создания logical streams. |
+| `new_streams_burst` | `u32` | `512` | Process-wide burst создания logical streams. |
+
+# [web.timeouts]
+
+Все таймауты задаются в секундах и должны входить в диапазон `1..=3600`. Самый длинный request deadline должен быть меньше `http_idle_secs`.
+
+| Ключ | Тип | По умолчанию | Hot-Reload | Описание |
+| --- | --- | --- | --- | --- |
+| `header_secs` | `u64` | `10` | `✔` | Получение полного заголовка HTTP-запроса. |
+| `body_secs` | `u64` | `30` | `✔` | Сбор одного аутентифицированного carrier body. |
+| `stream_handshake_secs` | `u64` | `10` | `✔` | Выполнение внутреннего MTProxy handshake. |
+| `long_poll_secs` | `u64` | `25` | `✔` | Максимальная длительность пустого downlink long poll. |
+| `bootstrap_lifetime_secs` | `u64` | `120` | `✔` | Срок неиспользованного bootstrap и replay-marker закрытого token. |
+| `reconnect_grace_secs` | `u64` | `120` | `✔` | Максимальная неактивность carrier до закрытия сессии. |
+| `http_idle_secs` | `u64` | `75` | `✔` | Idle lifetime WEB HTTP keep-alive connection. |
+| `shutdown_secs` | `u64` | `15` | `✔` | Deadline корректного завершения WEB. |
+| `decoy_header_secs` | `u64` | `30` | `✔` | Deadline подключения и получения response head от HTTP decoy. |
+
+# [[web.vhosts]]
+
+| Ключ | Тип | Обязательный | Hot-Reload | Описание |
+| --- | --- | --- | --- | --- |
+| `host` | `String` | да | `✔` | Уникальный канонический lowercase ACE FQDN без порта, пути, credentials и завершающей точки. |
+| `public_addr` | `SocketAddr` | да | `✔` | Конкретный публичный IP на порту `443`, используемый во внутреннем destination tuple relay. |
+| `decoy` | таблица | да | `✔` | Обычный сайт для неаутентифицированного или некорректного трафика. |
+| `profiles` | массив таблиц | при включённом WEB | `✔` | Явные пользователи и client secret modes для этого hostname. |
+
+Hostname нормализуется при валидации и должен приниматься Telegram Desktop. Bootstrap является bearer credential: адрес клиента и его IP-семейство могут измениться до создания session. Неиспользованный bootstrap остаётся действительным после reload конфигурации, только пока активен профиль с той же identity.
+
+# [web.vhosts.decoy]
+
+Обязателен ровно один decoy mode:
+
+| Mode | Обязательные ключи | Валидация |
+| --- | --- | --- |
+| `http_upstream` | `upstream` | `http://` origin с loopback, link-local или private IP literal; без credentials, path, query и fragment. |
+| `static_directory` | `directory`; необязательный `index = "index.html"` | Абсолютный реальный каталог и одно безопасное имя index-файла. Symlinks и выход за пределы каталога запрещены; immutable snapshot загружается в пределах `[web.limits]`. |
+
+# [[web.vhosts.profiles]]
+
+| Ключ | Тип | Обязательный | По умолчанию | Описание |
+| --- | --- | --- | --- | --- |
+| `user` | `String` | да | — | Существующий ключ из `[access.users]`. |
+| `secret_mode` | `"plain"` или `"dd"` | да | — | Точное представление секрета для Telegram Desktop. `ee` не поддерживается. |
+| `max_sessions` | `usize` | нет | `web.limits.max_sessions_global` | Активные сессии этого профиля. |
+| `max_streams` | `usize` | нет | `web.limits.max_streams_global` | Активные logical streams этого профиля. |
+| `max_streams_per_session` | `usize` | нет | `web.limits.max_streams_per_session` | Активные logical streams в одной сессии профиля. |
+
+Лимиты профиля должны быть ненулевыми и не превышать соответствующие глобальные границы. Повторяющиеся профили `(user, secret_mode)` в одном vhost запрещены.
+
+## Lifecycle WEB и управление через API
+
+- Config watcher и generation reload применяют `web.enabled`, `web.carrier`, `web.timeouts`, vhosts, profiles и decoy snapshots без перезапуска процесса. Существующие сессии сохраняют carrier, лимиты и deadlines своего момента создания; новые bridge sessions используют активное поколение.
+- Состав WEB-listeners и их trust policy в `server.listeners`, а также все значения `web.limits` принадлежат процессу и требуют перезапуска.
+- Отдельного endpoint `/v1/web` нет. `GET /v1/config` не возвращает `[web]`, а `PATCH /v1/config` отклоняет ключ `web` с `400 section_not_editable`.
+- Для удалённого применения WEB policy измените соответствующий TOML-файл и вызовите `POST /v1/system/reload`; проверьте `GET /v1/system/reload/{id}` и поле `deferred_process_fields`. Если оно содержит `server.listeners` или `web.limits`, перезапустите Telemt.
+- Существующих access users можно создавать, изменять, ротировать, включать, выключать и удалять через `/v1/users`. Создание пользователя не добавляет WEB-профиль. Отключение пользователя немедленно обновляет admission и завершает его активные сессии.
+- `PATCH /v1/config` может сохранить `server.listeners`, включая поля WEB-listener’а, но изменённый WEB-listener активируется только после перезапуска процесса.
 
 
 # [timeouts]

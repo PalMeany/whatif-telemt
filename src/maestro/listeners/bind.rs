@@ -8,13 +8,13 @@ use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tracing::{error, info, warn};
 
-use crate::config::ProxyConfig;
+use crate::config::{ListenerTransport, ProxyConfig};
 use crate::startup::{COMPONENT_LISTENERS_BIND, StartupTracker};
 use crate::transport::find_listener_processes;
 use crate::transport::socket::{activate_listener_socket, bind_listener_socket};
 
 use super::plan::{ListenerBindSpec, listener_bind_plan};
-use crate::maestro::helpers::print_proxy_links;
+use crate::maestro::helpers::{print_proxy_links, print_web_proxy_links};
 
 /// Owns sockets bound before process accept loops start.
 pub(crate) struct BoundListeners {
@@ -57,7 +57,8 @@ fn default_link_port(config: &ProxyConfig) -> u16 {
     config
         .server
         .listeners
-        .first()
+        .iter()
+        .find(|listener| listener.transport == ListenerTransport::Mtproxy)
         .and_then(|listener| listener.port)
         .unwrap_or(config.server.port)
 }
@@ -110,7 +111,7 @@ impl PreparedTcpListener {
 }
 
 fn log_listener_profile(spec: &ListenerBindSpec) {
-    info!(addr = %spec.addr, "Listening on TCP endpoint");
+    info!(addr = %spec.addr, transport = ?spec.transport, "Listening on TCP endpoint");
     if let Some(client_mss) = spec.options.client_mss {
         info!(
             addr = %spec.addr,
@@ -135,7 +136,11 @@ fn print_configured_links(
     detected_ip_v4: Option<IpAddr>,
     detected_ip_v6: Option<IpAddr>,
 ) {
+    print_web_proxy_links(config);
     for listener in &config.server.listeners {
+        if listener.transport != ListenerTransport::Mtproxy {
+            continue;
+        }
         let port = listener.port.unwrap_or(config.server.port);
         let addr = SocketAddr::new(listener.ip, port);
         if !plan.contains_key(&addr) || config.general.links.public_host.is_some() {
@@ -160,7 +165,12 @@ fn print_configured_links(
         }
     }
 
-    if config.general.links.show.is_empty() || config.general.links.public_host.is_none() {
+    if config.general.links.show.is_empty()
+        || config.general.links.public_host.is_none()
+        || !plan
+            .values()
+            .any(|spec| spec.transport == ListenerTransport::Mtproxy)
+    {
         return;
     }
     let host = config
