@@ -29,6 +29,9 @@ struct SeenRequest {
     method: String,
     path: String,
     body_len: usize,
+    /// Lowercased header names, sorted. Enough to prove that a carrier bearer
+    /// and the transport headers never reach the operator's application.
+    header_names: Vec<String>,
 }
 
 /// Requests observed by the stand-in application, newest last.
@@ -96,10 +99,18 @@ async fn serve_application_connection(mut stream: TcpStream, seen: Seen) {
         }
         body.extend_from_slice(&buffer[..read]);
     }
+    let mut header_names: Vec<String> = head
+        .split("\r\n")
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, _)| name.trim().to_ascii_lowercase())
+        .collect();
+    header_names.sort();
     seen.lock().push(SeenRequest {
         method,
         path,
         body_len: body.len(),
+        header_names,
     });
     let response = format!(
         "HTTP/1.1 404 Not Found\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -251,4 +262,95 @@ async fn the_bridge_capability_never_reaches_the_application() {
         seen.lock().is_empty(),
         "a capability request must never be delegated to the application"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mismatched_host_never_hands_the_application_a_carrier_bearer() {
+    let (application, seen) = start_application().await;
+    let fixture = start_application_relay(application).await;
+
+    // The `Host` check runs before the request target is classified, so a
+    // reserved path with the wrong `Host` used to reach the plain forwarder,
+    // which strips only hop-by-hop headers. That handed the operator's own
+    // application a live session bearer, the carrier headers, and the opaque
+    // MTProto body -- from an unauthenticated request that chose the `Host`.
+    let payload = vec![0x5au8; 4096];
+    let mut request = format!(
+        "POST /api/v1/up HTTP/1.1\r\nHost: unrelated.example.net\r\n\
+         Authorization: Bearer {}\r\nContent-Type: application/octet-stream\r\n\
+         X-Up-Seq: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "A".repeat(43),
+        payload.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&payload);
+
+    let (status, _, body) = http_request(fixture.address, &request).await;
+    assert_eq!(status, 404);
+    assert_eq!(body, APP_BODY);
+
+    let observed = seen.lock().clone();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        observed[0].body_len, 0,
+        "the carrier body must not reach the application"
+    );
+    for forbidden in [
+        "authorization",
+        "content-type",
+        "x-up-seq",
+        "x-lane-id",
+        "x-down-cursor",
+    ] {
+        assert!(
+            !observed[0]
+                .header_names
+                .iter()
+                .any(|name| name == forbidden),
+            "{forbidden} reached the application: {:?}",
+            observed[0].header_names
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_percent_encoded_reserved_path_is_still_a_reserved_path() {
+    let (application, seen) = start_application().await;
+    let fixture = start_application_relay(application).await;
+
+    // The reference classifies on the decoded target, so `/api/v1/%75p` is the
+    // uplink it names. Matching the raw target instead let it miss the reserved
+    // set and fall through to the *unsanitised* forwarder -- the same leak as a
+    // mismatched `Host`, reached by a second route.
+    let payload = vec![0x21u8; 2048];
+    let mut request = format!(
+        "POST /api/v1/%75p HTTP/1.1\r\nHost: {TEST_HOST}\r\n\
+         Authorization: Bearer {}\r\nContent-Type: application/octet-stream\r\n\
+         X-Up-Seq: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "A".repeat(43),
+        payload.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&payload);
+
+    let (status, _, body) = http_request(fixture.address, &request).await;
+    assert_eq!(status, 404);
+    assert_eq!(body, APP_BODY);
+
+    let observed = seen.lock().clone();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        observed[0].body_len, 0,
+        "a percent-encoded reserved path must be delegated bodyless"
+    );
+    assert!(
+        !observed[0]
+            .header_names
+            .iter()
+            .any(|name| name == "authorization"),
+        "the bearer reached the application: {:?}",
+        observed[0].header_names
+    );
+    // The application still sees the target the client actually asked for.
+    assert_eq!(observed[0].path, "/api/v1/%75p");
 }

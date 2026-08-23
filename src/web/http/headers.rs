@@ -9,8 +9,17 @@ use ipnetwork::IpNetwork;
 use crate::web::capability::decode_token;
 
 /// Reads one header as UTF-8, treating a non-UTF-8 value as absent.
+///
+/// Callers that route on a header must use [`header_present`] instead: a
+/// non-UTF-8 `X-Lane-ID` read as "absent" would silently move a lanes request
+/// onto the shared-carrier path, where the reference answers its ordinary 404.
 pub(crate) fn header<'a>(headers: &'a HeaderMap<HeaderValue>, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+/// True when the header is present at all, decodable or not.
+pub(crate) fn header_present(headers: &HeaderMap<HeaderValue>, name: &str) -> bool {
+    headers.contains_key(name)
 }
 
 /// Extracts a canonical bearer token from an `Authorization` header.
@@ -71,8 +80,26 @@ pub(crate) fn client_ip(
     let Some(forwarded) = header(headers, "x-forwarded-for") else {
         return Some(peer_ip);
     };
+    if forwarded.contains(',') {
+        // A chain collapses every user behind the far proxy into one per-address
+        // bucket. That is a working configuration, not an error, but it silently
+        // changes what the per-address ceilings mean, so it is said once.
+        warn_forwarded_chain();
+    }
     let observed = forwarded.rsplit(',').next()?.trim();
     observed.parse::<IpAddr>().ok()
+}
+
+/// Warns once per process that `X-Forwarded-For` arrives as a chain.
+fn warn_forwarded_chain() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "WEB proxy sees an X-Forwarded-For chain: the nearest proxy's observation is used, so \
+             every client behind the far proxy shares one per-address bucket. Set \
+             web.trusted_proxies to the nearest hop only if that is not intended."
+        );
+    });
 }
 
 /// True when the `Host` header names the configured public hostname.
@@ -82,20 +109,40 @@ pub(crate) fn client_ip(
 /// three are normalised away, because rejecting them produces a blanket 404
 /// that looks exactly like a misconfigured site.
 pub(crate) fn host_matches(headers: &HeaderMap<HeaderValue>, hostname: &str) -> bool {
+    // More than one `Host` is a request-smuggling primitive and RFC 9112
+    // forbids it outright, so it is refused before the value is even read.
+    if headers.get_all("host").iter().count() != 1 {
+        return false;
+    }
     request_host(headers).is_some_and(|host| host.eq_ignore_ascii_case(hostname))
 }
 
-/// Returns the `Host` header without its port or trailing dot.
+/// Returns the `Host` header without its port.
+///
+/// Case and port are normalised away deliberately, unlike the reference, which
+/// compares byte-exactly against `H` or `H:443`. Every ordinary origin server
+/// matches this way, and refusing a CDN-fronted or non-443 origin with a
+/// blanket 404 is a bigger difference from an ordinary site than serving it.
+/// A trailing dot is *not* normalised: `H.` is a distinct name that no browser
+/// sends here, and accepting it would widen the set of request targets that
+/// reach the bridge for no client that needs it.
 pub(crate) fn request_host(headers: &HeaderMap<HeaderValue>) -> Option<&str> {
     let host = header(headers, "host")?;
     // An IPv6 literal keeps its colons inside brackets; the configured
     // hostname can never be an address, so such a value simply will not match.
     let without_port = match host.rfind(':') {
-        Some(index) if !host.starts_with('[') => &host[..index],
+        Some(index) if !host.starts_with('[') => {
+            // A port has to be a port. `example.com:` and `example.com:http`
+            // are malformed authorities, not the configured host.
+            let port = &host[index + 1..];
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            &host[..index]
+        }
         _ => host,
     };
-    let trimmed = without_port.strip_suffix('.').unwrap_or(without_port);
-    (!trimmed.is_empty()).then_some(trimmed)
+    (!without_port.is_empty()).then_some(without_port)
 }
 
 #[cfg(test)]
@@ -135,15 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn host_matching_normalises_case_port_and_trailing_dot() {
+    fn host_matching_normalises_case_and_port_only() {
         let mut headers = HeaderMap::new();
+        // Case and port are normalised away: every ordinary origin matches this
+        // way, and a CDN-fronted or non-443 deployment must not 404 everything.
         for value in [
             "proxy.example.com",
             "PROXY.Example.CoM",
             "proxy.example.com:443",
             "proxy.example.com:8443",
-            "proxy.example.com.",
-            "proxy.example.com.:443",
         ] {
             headers.insert("host", HeaderValue::from_str(value).expect("header"));
             assert!(
@@ -156,6 +203,12 @@ mod tests {
             "proxy.example.com.evil.net",
             ":443",
             "",
+            // A trailing dot is a distinct name no browser sends, and a port
+            // that is not a port is a malformed authority.
+            "proxy.example.com.",
+            "proxy.example.com.:443",
+            "proxy.example.com:",
+            "proxy.example.com:https",
         ] {
             headers.insert("host", HeaderValue::from_str(value).expect("header"));
             assert!(
@@ -164,6 +217,13 @@ mod tests {
             );
         }
         assert!(!host_matches(&HeaderMap::new(), "proxy.example.com"));
+
+        // A duplicated Host is a smuggling primitive, refused before the value
+        // is read at all -- even when both copies name the right host.
+        let mut duplicated = HeaderMap::new();
+        duplicated.append("host", HeaderValue::from_static("proxy.example.com"));
+        duplicated.append("host", HeaderValue::from_static("proxy.example.com"));
+        assert!(!host_matches(&duplicated, "proxy.example.com"));
     }
 
     #[test]

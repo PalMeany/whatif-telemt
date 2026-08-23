@@ -12,7 +12,9 @@ use crate::web::error::WebError;
 use crate::web::frame::MAX_STREAM_ID;
 use crate::web::session::Session;
 
-use super::headers::{bearer_token, binary_content_type, canonical_uint, client_ip, header};
+use super::headers::{
+    bearer_token, binary_content_type, canonical_uint, client_ip, header, header_present,
+};
 use super::{Relay, RequestHead, WebBody, empty_body, full, insert, read_body, request_head};
 
 /// A create body is one HELLO frame, so a tiny cap keeps an unauthenticated
@@ -21,13 +23,16 @@ const MAX_CREATE_BODY_BYTES: usize = 64;
 
 impl Relay {
     /// Dispatches one of the four reserved transport paths.
+    /// `path` is the percent-decoded request target the router classified on,
+    /// so `/api/v1/%75p` dispatches as the uplink it names rather than falling
+    /// through to the site with its carrier headers intact.
     pub(crate) async fn serve_api(
         self: &Arc<Self>,
         request: Request<Incoming>,
         peer: SocketAddr,
+        path: String,
     ) -> Response<WebBody> {
         let head = request_head(&request);
-        let path = head.uri.path().to_string();
         let websocket = path == "/api/v1/ws";
         // The upgrade endpoint needs the request intact for hyper's upgrade
         // handle, so it owns its own refusal path and drains there.
@@ -147,7 +152,10 @@ impl Relay {
         let lane = header(&head.headers, "x-lane-id");
         let result = match session.carrier_mode() {
             CarrierMode::Https => {
-                if lane.is_some() {
+                // Presence is the violation, not decodability: a non-UTF-8
+                // `X-Lane-ID` read as absent would route a lanes request onto
+                // the shared carrier, where the reference answers its 404.
+                if header_present(&head.headers, "x-lane-id") {
                     return self.transport_not_found(&head, peer).await;
                 }
                 session.process_up(sequence, &payload)
@@ -204,7 +212,10 @@ impl Relay {
         let lane = header(&head.headers, "x-lane-id");
         let result = match session.carrier_mode() {
             CarrierMode::Https => {
-                if lane.is_some() {
+                // Presence is the violation, not decodability: a non-UTF-8
+                // `X-Lane-ID` read as absent would route a lanes request onto
+                // the shared carrier, where the reference answers its 404.
+                if header_present(&head.headers, "x-lane-id") {
                     return self.transport_not_found(&head, peer).await;
                 }
                 session
