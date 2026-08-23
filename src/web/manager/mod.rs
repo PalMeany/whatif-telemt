@@ -39,15 +39,38 @@ pub(crate) struct ProfileSet {
 
 impl ProfileSet {
     /// Builds the lookup index, rejecting a capability claimed twice.
+    ///
+    /// The first capability of a profile is the one its configured secret form
+    /// derives, and two profiles claiming the same one is a configuration the
+    /// operator has to resolve. The rest are aliases this relay adds so a
+    /// client handed either secret form still reaches its profile; an alias
+    /// that collides is dropped rather than fatal, because the profile it would
+    /// have pointed at is reachable through its own primary capability anyway.
     pub(crate) fn new(profiles: Vec<Arc<WebProfile>>) -> Result<Self> {
-        let mut index = HashMap::with_capacity(profiles.len() * 3);
+        let mut index = HashMap::with_capacity(profiles.len() * 2);
         for (position, profile) in profiles.iter().enumerate() {
-            for capability in &profile.capabilities {
-                if index.insert(*capability, position).is_some() {
-                    return Err(ProxyError::Config(format!(
-                        "duplicate web capability for profile '{}'",
-                        profile.name
-                    )));
+            let Some(primary) = profile.capabilities.first() else {
+                continue;
+            };
+            if index.insert(*primary, position).is_some() {
+                return Err(ProxyError::Config(format!(
+                    "duplicate web capability for profile '{}'",
+                    profile.name
+                )));
+            }
+        }
+        for (position, profile) in profiles.iter().enumerate() {
+            for alias in profile.capabilities.iter().skip(1) {
+                match index.entry(*alias) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(position);
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        debug!(
+                            profile = %profile.name,
+                            "WEB secret-form alias already claimed; keeping the owning profile"
+                        );
+                    }
                 }
             }
         }
@@ -113,8 +136,24 @@ pub(crate) struct Manager {
     rng: Arc<SecureRandom>,
     state: Mutex<ManagerState>,
     pending: Mutex<GlobalPending>,
+    /// Wakes streams parked on the process-wide pool when budget is released.
+    pending_released: Arc<tokio::sync::Notify>,
     metrics: WebMetrics,
     self_ref: Weak<Manager>,
+}
+
+/// Rejects a limit set whose control reserve leaves no room for data frames.
+///
+/// Split out so start-up can check it before binding anything, rather than
+/// discovering it when the first stream is refused.
+pub(crate) fn validate_pending_split(limits: &WebLimits) -> Result<()> {
+    if GlobalPending::new(limits).data_partition_empty() {
+        return Err(ProxyError::Config(
+            "web control reserve times max_sessions_global exhausts the global pending pool"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl Manager {
@@ -125,13 +164,8 @@ impl Manager {
         profiles: Vec<Arc<WebProfile>>,
         runtime: Arc<WebRuntime>,
     ) -> Result<Arc<Self>> {
+        validate_pending_split(&limits)?;
         let pending = GlobalPending::new(&limits);
-        if pending.data_partition_empty() {
-            return Err(ProxyError::Config(
-                "web control reserve times max_sessions_global exhausts the global pending pool"
-                    .to_string(),
-            ));
-        }
         let set = Arc::new(ProfileSet::new(profiles)?);
         Ok(Arc::new_cyclic(|self_ref| Self {
             limits,
@@ -141,6 +175,7 @@ impl Manager {
             rng: Arc::new(SecureRandom::new()),
             state: Mutex::new(ManagerState::default()),
             pending: Mutex::new(pending),
+            pending_released: Arc::new(tokio::sync::Notify::new()),
             metrics: WebMetrics::default(),
             self_ref: self_ref.clone(),
         }))
@@ -169,8 +204,26 @@ impl Manager {
     pub(crate) fn replace_profiles(&self, profiles: Vec<Arc<WebProfile>>) -> Result<()> {
         let set = Arc::new(ProfileSet::new(profiles)?);
         let revoked = {
-            let guard = self.state.lock();
-            guard
+            let mut guard = self.state.lock();
+            let state = &mut *guard;
+            // An unredeemed bootstrap outlives the capability it was issued
+            // from unless it is dropped here, and it captures its profile at
+            // issuance. Leaving it would let the holder mint a fresh session on
+            // a revoked secret for the rest of the bootstrap lifetime — and
+            // because the session sweep below has already run, that session
+            // would never be revoked at all.
+            let mut dropped = Vec::new();
+            state.bootstraps.retain(|_, entry| {
+                if entry.used || profile_survives(&set, &entry.profile) {
+                    return true;
+                }
+                dropped.push(entry.issuance_ip);
+                false
+            });
+            for issuance_ip in dropped {
+                decrement_ip(&mut state.bootstraps_per_ip, issuance_ip);
+            }
+            state
                 .sessions
                 .values()
                 .filter(|session| !profile_survives(&set, &session.profile))
@@ -212,6 +265,17 @@ impl Manager {
     /// Returns budget to the process-wide pending pool.
     pub(crate) fn release_pending_budget(&self, cost: usize, items: usize) {
         self.pending.lock().release(cost, items);
+        // Wake every stream parked on the process-wide pool. A session's own
+        // headroom wakes its writer through `release_pending_locked`, but a
+        // pool exhausted by *other* sessions produces no such signal, and
+        // polling for it burns wake-ups precisely when the process is
+        // saturated.
+        self.pending_released.notify_waiters();
+    }
+
+    /// Signalled whenever the process-wide pending pool gives budget back.
+    pub(crate) fn pending_released(&self) -> Arc<tokio::sync::Notify> {
+        self.pending_released.clone()
     }
     /// Counts a stream rejected by a capacity or rate limit.
     pub(crate) fn count_stream_rejected(&self) {

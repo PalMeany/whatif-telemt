@@ -20,9 +20,7 @@ use crate::error::{ProxyError, Result};
 mod defaults;
 mod limits;
 
-use defaults::{
-    default_true, default_trusted_proxies, default_web_admin_listen, default_web_listen,
-};
+use defaults::{default_trusted_proxies, default_web_admin_listen, default_web_listen};
 pub use limits::{WebLimits, WebProfileConfig, WebProfileLimits, WebTimeouts};
 
 /// Largest downlink body a carrier may deliver. The desktop client's browser
@@ -129,7 +127,14 @@ pub struct WebConfig {
 
     /// Derives one profile per `[access.users]` entry so every telemt user can
     /// reach the proxy through the WEB carrier with their existing secret.
-    #[serde(default = "default_true")]
+    ///
+    /// Off by default, and deliberately so: the secrets in `[access.users]` are
+    /// the ones operators publish in `tg://proxy` links, and enabling `[web]`
+    /// should not silently turn every one of them into a bridge capability as
+    /// well. Neither reference derives profiles from anything but its own
+    /// dedicated profile source. Turning it on is a decision; the resolved
+    /// count is bounded by `web.limits.max_profiles` either way.
+    #[serde(default)]
     pub derive_user_profiles: bool,
 
     /// Front proxies allowed to assert a client address via `X-Forwarded-For`.
@@ -157,7 +162,26 @@ impl WebConfig {
         }
         crate::web::capability::validate_hostname(&self.hostname)
             .map_err(|reason| ProxyError::Config(format!("web.hostname: {reason}")))?;
-        parse_listen(&self.listen, "web.listen")?;
+        let carrier = parse_listen(&self.listen, "web.listen")?;
+        // A carrier reachable off-host, with no off-host proxy trusted to
+        // forward for it, is a plaintext relay whose bridge capabilities and
+        // session bearers are readable by anything that can route to it — and
+        // every request would be accounted to the front proxy's own address.
+        // The reference refuses a non-loopback listener outright; this refuses
+        // the combination that makes one indefensible.
+        if !carrier.ip().is_loopback()
+            && self
+                .trusted_proxies
+                .iter()
+                .all(|network| network.ip().is_loopback())
+        {
+            return Err(ProxyError::Config(
+                "web.listen is not a loopback address, so web.trusted_proxies must name the front \
+                 proxy that reaches it. Bind web.listen to 127.0.0.1, or add the front proxy's \
+                 address or network to web.trusted_proxies."
+                    .to_string(),
+            ));
+        }
         if !self.admin_listen.is_empty() {
             let admin = parse_listen(&self.admin_listen, "web.admin_listen")?;
             if !admin.ip().is_loopback() {
@@ -261,7 +285,7 @@ impl Default for WebConfig {
             public_dir: None,
             public_upstream: None,
             carrier_mode: CarrierMode::default(),
-            derive_user_profiles: true,
+            derive_user_profiles: false,
             trusted_proxies: default_trusted_proxies(),
             limits: WebLimits::default(),
             timeouts: WebTimeouts::default(),
@@ -279,6 +303,10 @@ mod tests {
             enabled: true,
             hostname: "proxy.example.com".to_string(),
             public_dir: Some("site".to_string()),
+            // Explicit: deriving a bridge capability for every `[access.users]`
+            // secret is opt-in, so a config that names no profile source is
+            // deliberately invalid.
+            derive_user_profiles: true,
             ..WebConfig::default()
         }
     }
@@ -286,6 +314,14 @@ mod tests {
     #[test]
     fn defaults_validate_when_enabled() {
         assert!(enabled_config().validate().is_ok());
+    }
+
+    #[test]
+    fn a_profile_source_must_be_chosen_explicitly() {
+        let mut config = enabled_config();
+        config.derive_user_profiles = false;
+        let error = config.validate().expect_err("no profile source");
+        assert!(error.to_string().contains("derive_user_profiles"));
     }
 
     #[test]

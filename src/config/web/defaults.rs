@@ -2,10 +2,6 @@
 
 use ipnetwork::IpNetwork;
 
-pub(super) fn default_true() -> bool {
-    true
-}
-
 pub(super) fn default_backend() -> String {
     "internal".to_string()
 }
@@ -77,6 +73,16 @@ pub(super) fn default_max_sessions_per_ip() -> usize {
 
 pub(super) fn default_max_sessions_global() -> usize {
     128
+}
+
+/// Carrier connections served at once.
+///
+/// Derived from the global stream ceiling rather than fixed: under a lanes
+/// carrier every live stream owns a connection, so a cap below
+/// `max_streams_global` would refuse streams the stream ceilings allow. The
+/// headroom covers session creation and the shared-carrier polls beside them.
+pub(super) fn default_max_carrier_connections() -> usize {
+    default_max_streams_global() + 1024
 }
 
 pub(super) fn default_max_streams_global() -> usize {
