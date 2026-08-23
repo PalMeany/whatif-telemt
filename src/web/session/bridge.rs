@@ -22,12 +22,13 @@ use crate::web::frame::{self, FrameType};
 use super::Session;
 use super::state::{PendingCharge, QUEUE_ITEM_COST, SessionState};
 
-/// Retry delay used when the process-wide pool, not this session, is full.
+/// Backstop delay for a writer parked on the process-wide pool.
 ///
-/// Session-local headroom wakes the parked writer through
-/// `release_pending_locked`, but a pool exhausted by *other* sessions produces
-/// no such wake-up, so the writer arms its own timer instead of stalling.
-const GLOBAL_BACKPRESSURE_RETRY: Duration = Duration::from_millis(25);
+/// The pool signals every release through `Manager::pending_released`, so this
+/// is only the safety net for a manager that has gone away or a wake-up lost to
+/// a race — not the mechanism. A fixed poll as the mechanism would burn
+/// wake-ups on every parked stream exactly when the process is saturated.
+const GLOBAL_BACKPRESSURE_BACKSTOP: Duration = Duration::from_millis(250);
 
 /// One logical stream presented as a byte-oriented duplex endpoint.
 pub(crate) struct StreamBridge {
@@ -136,7 +137,13 @@ impl AsyncRead for StreamBridge {
             &frame::window_payload(grant),
         );
         if !queued {
-            this.session.control_budget_exhausted(&mut state, this.id);
+            // A refused WINDOW is this stream's problem, not the session's:
+            // `PROTOCOL.md` is explicit that an over-limit stream receives a
+            // CLOSE while the authenticated session and its other streams keep
+            // running. Tearing the whole session down here is what turns one
+            // saturated stream into a full re-bootstrap for every other one.
+            this.session.backend_closed_locked(&mut state, this.id);
+            this.finished = true;
         }
         Poll::Ready(Ok(()))
     }
@@ -199,8 +206,17 @@ impl AsyncWrite for StreamBridge {
             }
             drop(state);
             // `AsyncWrite` has no retryable error, so `WouldBlock` here would
-            // kill a live stream over transient backpressure. Park instead.
-            let mut backoff = Box::pin(tokio::time::sleep(GLOBAL_BACKPRESSURE_RETRY));
+            // kill a live stream over transient backpressure. Park instead, on
+            // the pool's own release signal, with a timer only as a backstop.
+            if let Some(manager) = this.session.manager.upgrade() {
+                let released = manager.pending_released();
+                let waker = cx.waker().clone();
+                tokio::spawn(async move {
+                    released.notified().await;
+                    waker.wake();
+                });
+            }
+            let mut backoff = Box::pin(tokio::time::sleep(GLOBAL_BACKPRESSURE_BACKSTOP));
             let armed = backoff.as_mut().poll(cx).is_pending();
             if armed {
                 this.backoff = Some(backoff);
@@ -233,6 +249,16 @@ impl Session {
     /// direction is dropped, matching the client's own TCP behaviour.
     pub(crate) fn backend_closed(&self, id: u32) {
         let mut state = self.state.lock();
+        self.backend_closed_locked(&mut state, id);
+    }
+
+    /// [`Session::backend_closed`] for a caller that already holds the lock.
+    ///
+    /// `state` is a `parking_lot::Mutex` guard and the mutex is not reentrant,
+    /// so a path that is already inside the lock — `poll_read` returning a
+    /// WINDOW, for one — has to reach the teardown through this rather than
+    /// through the wrapper.
+    pub(crate) fn backend_closed_locked(&self, state: &mut SessionState, id: u32) {
         if state.closed {
             return;
         }
@@ -249,9 +275,13 @@ impl Session {
         stream.aborted = true;
         stream.cancel.cancel();
         released.add(state.remember_closed(id, self.limits.max_closed_stream_ids));
-        self.release_pending_locked(&mut state, released);
-        if !self.queue_frame_locked(&mut state, FrameType::CLOSE, id, &[]) {
-            self.control_budget_exhausted(&mut state, id);
+        self.release_pending_locked(state, released);
+        if !self.queue_frame_locked(state, FrameType::CLOSE, id, &[]) {
+            // The stream is already gone and its charges released, so the only
+            // frame left to place is its own CLOSE. If even that will not fit,
+            // the peer has stopped draining entirely and there is nothing left
+            // to tell it, which is the one case that does end the session.
+            self.control_budget_exhausted(state, id);
         }
     }
 

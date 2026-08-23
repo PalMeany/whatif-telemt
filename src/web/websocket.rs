@@ -23,6 +23,21 @@ const OPCODE_CLOSE: u8 = 0x8;
 const OPCODE_PING: u8 = 0x9;
 const OPCODE_PONG: u8 = 0xA;
 
+/// RFC 6455 close codes this carrier emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub(crate) enum CloseCode {
+    /// The carrier finished normally.
+    Normal = 1000,
+    /// The relay is shutting down.
+    GoingAway = 1001,
+    /// The peer broke the carrier grammar: a text message, a cross-lane frame,
+    /// a malformed batch, or a first message that was not `OPEN`.
+    Protocol = 1002,
+    /// A message exceeded the configured carrier body limit.
+    TooLarge = 1009,
+}
+
 /// Largest control-frame payload allowed by the protocol.
 const MAX_CONTROL_PAYLOAD: usize = 125;
 
@@ -187,9 +202,15 @@ impl<W: AsyncWrite + Unpin> WsWriter<W> {
         self.write_frame(OPCODE_PONG, payload).await
     }
 
-    /// Sends a normal close frame.
-    pub(crate) async fn write_close(&mut self) -> io::Result<()> {
-        self.write_frame(OPCODE_CLOSE, &1000u16.to_be_bytes()).await
+    /// Sends a close frame carrying `code`.
+    ///
+    /// The code is not decoration: a client that respects it reads `1000` as
+    /// "this ended normally, do not reconnect", so answering a protocol error
+    /// or a size violation with `1000` tells the peer to give up on a carrier
+    /// it could simply have retried.
+    pub(crate) async fn write_close(&mut self, code: CloseCode) -> io::Result<()> {
+        self.write_frame(OPCODE_CLOSE, &(code as u16).to_be_bytes())
+            .await
     }
 
     async fn write_frame(&mut self, opcode: u8, payload: &[u8]) -> io::Result<()> {

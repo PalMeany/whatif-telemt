@@ -189,8 +189,11 @@ async fn a_reconnecting_client_is_not_locked_out_by_its_own_dead_sessions() {
     let mut limits = WebLimits::default();
     limits.max_sessions_per_ip = 1;
     let timeouts = WebTimeouts {
-        // A carrier is considered abandoned after twice the long-poll period.
-        long_poll_ms: 1,
+        // A carrier is considered abandoned once it has been silent for the
+        // reconnect grace. That is deliberately wider than the long-poll
+        // period, because a WebSocket carrier is kept alive by protocol
+        // ping/pong rather than by a poll.
+        reconnect_grace_ms: 10,
         ..WebTimeouts::default()
     };
     let manager = manager_with(limits, timeouts).await;

@@ -14,7 +14,7 @@ use crate::config::CarrierMode;
 use crate::web::error::WebError;
 use crate::web::frame::MAX_STREAM_ID;
 use crate::web::session::Session;
-use crate::web::websocket::{WsMessage, WsReader, WsWriter, accept_key};
+use crate::web::websocket::{CloseCode, WsMessage, WsReader, WsWriter, accept_key};
 
 use super::headers::{canonical_uint, client_ip, header};
 use super::{Relay, RequestHead, WebBody, full, insert};
@@ -183,12 +183,12 @@ async fn run_carrier<S>(
         idle,
     );
     let write_task = write_loop(writer.clone(), session, lanes, lane_id);
-    tokio::select! {
-        _ = read_task => {}
-        _ = write_task => {}
-    }
+    let code = tokio::select! {
+        code = read_task => code,
+        _ = write_task => CloseCode::Normal,
+    };
     if let Some(mut writer) = lock_writer(&writer).await {
-        let _ = tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_close()).await;
+        let _ = tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_close(code)).await;
     }
 }
 
@@ -208,6 +208,7 @@ async fn lock_writer<W>(
 }
 
 /// Applies client messages as uplink batches with bounded backpressure waits.
+/// Returns the close code the carrier should end with.
 async fn read_loop<R, W>(
     mut reader: WsReader<R>,
     writer: Arc<Mutex<WsWriter<W>>>,
@@ -215,7 +216,8 @@ async fn read_loop<R, W>(
     lanes: bool,
     lane_id: u32,
     idle: Duration,
-) where
+) -> CloseCode
+where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
@@ -223,25 +225,35 @@ async fn read_loop<R, W>(
     loop {
         let message = match tokio::time::timeout(idle, reader.read_message()).await {
             Ok(Ok(message)) => message,
-            _ => return,
+            // A read error here is a framing violation or an oversized message;
+            // the reader has already refused it, and the peer is told which.
+            Ok(Err(error)) => {
+                return if error.kind() == std::io::ErrorKind::InvalidData {
+                    CloseCode::TooLarge
+                } else {
+                    CloseCode::Protocol
+                };
+            }
+            Err(_) => return CloseCode::GoingAway,
         };
         let payload = match message {
             WsMessage::Binary(payload) if !payload.is_empty() => payload,
-            // An empty binary message carries no frame at all. The reference
-            // client never sends one, but tearing the carrier down over it
-            // would turn a harmless keepalive into a session loss.
-            WsMessage::Binary(_) => continue,
+            // An empty binary message is not a legal carrier message: every
+            // binary message is a bounded batch of complete frames, and a batch
+            // of none is exactly what the reference refuses. Keepalive is
+            // protocol Ping, handled below, so nothing harmless lands here.
+            WsMessage::Binary(_) => return CloseCode::Protocol,
             WsMessage::Ping(payload) => {
                 let Some(mut writer) = lock_writer(&writer).await else {
-                    return;
+                    return CloseCode::GoingAway;
                 };
                 match tokio::time::timeout(WS_WRITE_TIMEOUT, writer.write_pong(&payload)).await {
                     Ok(Ok(())) => continue,
-                    _ => return,
+                    _ => return CloseCode::GoingAway,
                 }
             }
             WsMessage::Pong => continue,
-            WsMessage::Close => return,
+            WsMessage::Close => return CloseCode::Normal,
         };
         let deadline = tokio::time::Instant::now() + WS_WRITE_TIMEOUT;
         loop {
@@ -257,11 +269,14 @@ async fn read_loop<R, W>(
                 }
                 Err(WebError::Backpressure) | Err(WebError::Concurrent) => {
                     if tokio::time::Instant::now() >= deadline {
-                        return;
+                        return CloseCode::GoingAway;
                     }
                     tokio::time::sleep(WS_BACKPRESSURE_RETRY).await;
                 }
-                _ => return,
+                // A malformed batch, a cross-lane frame, or a first message
+                // that was not OPEN: all carrier-grammar violations.
+                Err(WebError::Protocol) => return CloseCode::Protocol,
+                _ => return CloseCode::Normal,
             }
         }
     }

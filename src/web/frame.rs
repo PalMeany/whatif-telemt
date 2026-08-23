@@ -145,29 +145,30 @@ pub(crate) fn parse_all(input: &[u8], max_payload: usize) -> Result<Vec<Frame<'_
 /// Protocol version this relay implements.
 pub(crate) const PROTOCOL_VERSION: u8 = 1;
 
-/// Reads the protocol version out of a session-creation body.
+/// Validates a session-creation body.
 ///
-/// The body must be exactly one HELLO on stream zero whose first payload byte
-/// is the client's protocol version. Bytes past the version are accepted and
-/// ignored, and so is a version this relay does not implement: the relay then
-/// answers with its own v1 WELCOME, which is the only downgrade signal a later
-/// client can get. Rejecting either would produce the same deliberately
-/// indistinguishable 404 an unrelated host returns, leaving a future client no
-/// way to tell "relay speaking an older version" from "not a relay".
-pub(crate) fn parse_hello(input: &[u8]) -> Result<u8, FrameError> {
+/// The body must be exactly one HELLO frame on stream zero whose payload is
+/// the single byte `01`, which is what the reference relay requires and what
+/// `PROTOCOL.md` specifies. Nothing here negotiates a version: WELCOME carries
+/// an empty payload in every implementation, so there is no channel through
+/// which a relay could signal a downgrade, and admitting a version it cannot
+/// speak only moves the failure somewhere less diagnosable.
+///
+/// Refusing here is also the safer order. A create body is authenticated by a
+/// one-shot bootstrap whose replay is keyed on the body digest, so admitting a
+/// malformed HELLO would burn the bootstrap on that body and make the client's
+/// byte-identical retry with a correct HELLO fail authentication.
+pub(crate) fn parse_hello(input: &[u8]) -> Result<(), FrameError> {
     let frames = parse_all(input, MAX_PAYLOAD)?;
     if frames.len() != 1 {
         return Err(FrameError::Shape);
     }
     let value = frames[0];
-    if value.kind != FrameType::HELLO || value.stream_id != 0 || value.payload.is_empty() {
+    if value.kind != FrameType::HELLO || value.stream_id != 0 || value.payload != [PROTOCOL_VERSION]
+    {
         return Err(FrameError::Shape);
     }
-    let version = value.payload[0];
-    if version == 0 {
-        return Err(FrameError::Shape);
-    }
-    Ok(version)
+    Ok(())
 }
 
 /// Decodes a WINDOW payload into its nonzero credit delta.
@@ -221,6 +222,121 @@ pub(crate) fn validate_client_shape(value: &Frame<'_>) -> Result<(), FrameError>
 mod tests {
     use super::*;
 
+    /// Decodes one hand-written wire vector.
+    ///
+    /// Every assertion in the vector tests below compares against the output of
+    /// this helper, never against `encode`, so the vectors stay independent of
+    /// the code they pin.
+    fn wire(vector: &str) -> Vec<u8> {
+        hex::decode(vector).expect("test vector is valid hex")
+    }
+
+    // The rest of this module round-trips through this module's own `encode`,
+    // so a swapped stream-id byte, a little-endian slip in the length field or
+    // a renumbered `FrameType` would leave every one of those tests green while
+    // breaking every deployed client — the relay would keep answering 204 and
+    // the failure would surface only inside a WebView. The vectors below are
+    // transcribed from `PROTOCOL.md` "Shared frames" and the reference
+    // `frame.Encode` in `internal/frame/frame.go`, which is the authority.
+
+    #[test]
+    fn header_is_type_then_stream_id_u24_then_length_u32_big_endian() {
+        // `type:u8 | stream_id:u24 | payload_length:u32 | payload`.
+        assert_eq!(
+            encode(FrameType::DATA, 1, b"round trip"),
+            wire("020000010000000a726f756e642074726970")
+        );
+        // A payload longer than 255 bytes forces the length field to use more
+        // than its last byte, which is where an endianness slip would hide.
+        let long = encode(FrameType::DATA, 1, &[0xAA; 258]);
+        assert_eq!(long[..HEADER_SIZE].to_vec(), wire("0200000100000102"));
+        assert_eq!(long.len(), HEADER_SIZE + 258);
+    }
+
+    #[test]
+    fn stream_id_uses_all_three_big_endian_id_bytes() {
+        // 0x0A0B0C has three distinct nonzero bytes, so any reordering of the
+        // u24 shows up; 0x00FFFFFF is the largest representable id.
+        assert_eq!(
+            encode(FrameType::OPEN, 0x000A_0B0C, &[]),
+            wire("010a0b0c00000000")
+        );
+        assert_eq!(
+            encode(FrameType::OPEN, MAX_STREAM_ID, &[]),
+            wire("01ffffff00000000")
+        );
+        assert_eq!(encode(FrameType::OPEN, 17, &[]), wire("0100001100000000"));
+
+        let body = wire("010a0b0c00000000");
+        let frames = parse_all(&body, MAX_PAYLOAD).expect("parse");
+        assert_eq!(frames[0].stream_id, 0x000A_0B0C);
+    }
+
+    #[test]
+    fn frame_type_bytes_match_the_protocol_table() {
+        // Renumbering any of these is a wire break with no server-side symptom.
+        assert_eq!(FrameType::OPEN.0, 0x01);
+        assert_eq!(FrameType::DATA.0, 0x02);
+        assert_eq!(FrameType::CLOSE.0, 0x03);
+        assert_eq!(FrameType::WINDOW.0, 0x04);
+        assert_eq!(FrameType::PING.0, 0x05);
+        assert_eq!(FrameType::PONG.0, 0x06);
+        assert_eq!(FrameType::HELLO.0, 0x10);
+        assert_eq!(FrameType::WELCOME.0, 0x11);
+        assert_eq!(FrameType::BYE.0, 0x1F);
+
+        assert_eq!(encode(FrameType::CLOSE, 7, &[]), wire("0300000700000000"));
+        assert_eq!(
+            encode(FrameType::PONG, 0, b"token"),
+            wire("0600000000000005746f6b656e")
+        );
+    }
+
+    #[test]
+    fn hello_and_welcome_match_the_reference_bytes() {
+        // The create body a client actually sends, and the body the relay
+        // answers with. Both are fixed by PROTOCOL.md, not negotiated.
+        assert_eq!(
+            encode(FrameType::HELLO, 0, &[PROTOCOL_VERSION]),
+            wire("100000000000000101")
+        );
+        assert_eq!(encode(FrameType::WELCOME, 0, &[]), wire("1100000000000000"));
+        assert_eq!(parse_hello(&wire("100000000000000101")), Ok(()));
+        // The v2 body the reference rejects, spelled out on the wire.
+        assert_eq!(
+            parse_hello(&wire("100000000000000102")).err(),
+            Some(FrameError::Shape)
+        );
+    }
+
+    #[test]
+    fn window_payload_is_a_nonzero_big_endian_u32_delta() {
+        assert_eq!(
+            encode(FrameType::WINDOW, 17, &window_payload(10)),
+            wire("04000011000000040000000a")
+        );
+        // Four distinct bytes, so a reversed delta cannot compare equal.
+        assert_eq!(window_payload(0x0102_0304).to_vec(), wire("01020304"));
+        assert_eq!(window_amount(&wire("0000000a")), Ok(10));
+        assert_eq!(window_amount(&wire("00400000")), Ok(INITIAL_STREAM_WINDOW));
+    }
+
+    #[test]
+    fn parses_a_two_frame_batch_from_literal_wire_bytes() {
+        // One carrier body carrying OPEN then DATA for stream 7, exactly as a
+        // client emits it: the parser must find the second frame at the offset
+        // the first one's declared length implies.
+        let body = wire("01000007000000000200000700000003616263");
+        let frames = parse_all(&body, MAX_PAYLOAD).expect("parse");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].kind, FrameType::OPEN);
+        assert_eq!(frames[0].stream_id, 7);
+        assert_eq!(frames[0].payload, b"");
+        assert_eq!(frames[1].kind, FrameType::DATA);
+        assert_eq!(frames[1].stream_id, 7);
+        assert_eq!(frames[1].payload, b"abc");
+    }
+
     #[test]
     fn encodes_and_parses_round_trip() {
         let mut body = encode(FrameType::OPEN, 7, &[]);
@@ -253,15 +369,21 @@ mod tests {
     }
 
     #[test]
-    fn hello_reports_the_client_protocol_version() {
-        assert_eq!(parse_hello(&encode(FrameType::HELLO, 0, &[1])), Ok(1));
-        // A newer client is admitted and answered with the v1 WELCOME, which is
-        // how it learns to downgrade instead of seeing an opaque 404.
-        assert_eq!(parse_hello(&encode(FrameType::HELLO, 0, &[2])), Ok(2));
-        assert_eq!(parse_hello(&encode(FrameType::HELLO, 0, &[2, 9])), Ok(2));
+    fn hello_accepts_only_the_exact_protocol_shape() {
+        assert_eq!(parse_hello(&encode(FrameType::HELLO, 0, &[1])), Ok(()));
+        // The reference rejects every one of these, and so must this relay:
+        // a create body is one HELLO frame carrying the single byte `01`.
+        assert!(parse_hello(&encode(FrameType::HELLO, 0, &[2])).is_err());
+        assert!(parse_hello(&encode(FrameType::HELLO, 0, &[1, 9])).is_err());
         assert!(parse_hello(&encode(FrameType::HELLO, 0, &[0])).is_err());
         assert!(parse_hello(&encode(FrameType::HELLO, 0, &[])).is_err());
         assert!(parse_hello(&encode(FrameType::HELLO, 1, &[1])).is_err());
+        assert!(parse_hello(&encode(FrameType::DATA, 0, &[1])).is_err());
+
+        // Two frames are not a create body even when the first one is valid.
+        let mut two = encode(FrameType::HELLO, 0, &[1]);
+        two.extend_from_slice(&encode(FrameType::HELLO, 0, &[1]));
+        assert!(parse_hello(&two).is_err());
     }
 
     #[test]
