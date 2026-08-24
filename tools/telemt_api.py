@@ -1,6 +1,6 @@
 """
-Telemt Control API Python Client
-Full-coverage client for https://github.com/telemt/telemt
+WhatIfTelemt Control API Python Client
+Full-coverage client for https://github.com/PalMeany/whatif-telemt
 
 Usage:
     client = TelemtAPI("http://127.0.0.1:9091", auth_header="your-secret")
@@ -60,7 +60,7 @@ class APIResponse:
 
 class TelemtAPI:
     """
-    HTTP client for the Telemt Control API.
+    HTTP client for the WhatIfTelemt Control API.
 
     Parameters
     ----------
@@ -468,7 +468,7 @@ def _build_parser():
 
     p = argparse.ArgumentParser(
         prog="telemt_api.py",
-        description="Telemt Control API CLI",
+        description="WhatIfTelemt Control API CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 COMMANDS (read)

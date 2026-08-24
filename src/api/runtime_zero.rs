@@ -155,7 +155,7 @@ pub(super) fn build_system_info_data(
         .map(ToString::to_string);
 
     SystemInfoData {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: crate::VERSION.to_string(),
         target_arch: std::env::consts::ARCH.to_string(),
         target_os: std::env::consts::OS.to_string(),
         build_profile: option_env!("PROFILE").unwrap_or("unknown").to_string(),

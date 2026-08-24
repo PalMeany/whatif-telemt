@@ -123,7 +123,7 @@ fn generate_systemd_unit(opts: &ServiceOptions) -> String {
     format!(
         r#"[Unit]
 Description={description}
-Documentation=https://github.com/telemt/telemt
+Documentation=https://github.com/PalMeany/whatif-telemt
 After=network-online.target
 Wants=network-online.target
 

@@ -5,11 +5,17 @@ const TEST_SHADOWSOCKS_URL: &str =
     "ss://2022-blake3-aes-256-gcm:MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=@127.0.0.1:8388";
 
 fn load_config_from_temp_toml(toml: &str) -> ProxyConfig {
+    // A nanosecond clock is not guaranteed to differ between two tests running
+    // in parallel, so the counter is what actually makes this path unique. A
+    // timestamp alone lets one test load another's configuration and fail with
+    // an error message from a file it never wrote.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("telemt_load_cfg_{nonce}"));
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("telemt_load_cfg_{nonce}-{sequence}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
     std::fs::write(&path, toml).unwrap();
@@ -20,11 +26,17 @@ fn load_config_from_temp_toml(toml: &str) -> ProxyConfig {
 }
 
 fn load_config_error_from_temp_toml(toml: &str) -> String {
+    // A nanosecond clock is not guaranteed to differ between two tests running
+    // in parallel, so the counter is what actually makes this path unique. A
+    // timestamp alone lets one test load another's configuration and fail with
+    // an error message from a file it never wrote.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("telemt_load_cfg_error_{nonce}"));
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("telemt_load_cfg_error_{nonce}-{sequence}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
     std::fs::write(&path, toml).unwrap();
@@ -877,11 +889,17 @@ fn dc_overrides_allow_string_and_array() {
 
 #[test]
 fn load_with_metadata_collects_include_files() {
+    // A nanosecond clock is not guaranteed to differ between two tests running
+    // in parallel, so the counter is what actually makes this path unique. A
+    // timestamp alone lets one test load another's configuration and fail with
+    // an error message from a file it never wrote.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("telemt_load_metadata_{nonce}"));
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("telemt_load_metadata_{nonce}-{sequence}"));
     std::fs::create_dir_all(&dir).unwrap();
     let main_path = dir.join("config.toml");
     let include_path = dir.join("included.toml");

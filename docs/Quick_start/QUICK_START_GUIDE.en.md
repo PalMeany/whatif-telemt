@@ -4,11 +4,18 @@ There are three options for installing Telemt:
  - [Manual installation of Telemt as a service](#telemt-via-systemd).
  - [Installation using Docker Compose](#telemt-via-docker-compose).
 
+> [!NOTE]
+> [!NOTE]
+>
+> The download URLs below point at `PalMeany/whatif-telemt`, which has not
+> published a release yet, so `install.sh` and the `wget` step will 404 until one is tagged.
+> Build from source until then (`cargo build --release`).
+
 # Very quick start
 
 ### One-command installation / update on re-run
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh
 ```
 
 After starting, the script will prompt for:
@@ -33,12 +40,12 @@ tg://proxy?server=IP&port=PORT&secret=SECRET
 
 ### Installing a specific version
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- 3.3.39
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- 3.3.39
 ```
 
 ### Uninstall with full cleanup
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- purge
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- purge
 ```
 
 # Telemt via Systemd
@@ -49,7 +56,7 @@ This software is designed for Debian-based OS: in addition to Debian, these are 
 
 **1. Download**
 ```bash
-wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
+wget -qO- "https://github.com/PalMeany/whatif-telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
 ```
 **2. Move to the Bin folder**
 ```bash

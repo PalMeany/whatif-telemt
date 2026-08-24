@@ -330,7 +330,7 @@ if [ -f "$SRC_DIR/contrib/systemd/telemt.service" ]; then
 else
     cat > "$UNIT_FILE" <<EOF
 [Unit]
-Description=Telemt
+Description=WhatIfTelemt
 Wants=network-online.target
 After=multi-user.target network.target network-online.target
 

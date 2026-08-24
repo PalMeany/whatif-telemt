@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 
-ARG TELEMT_REPOSITORY=telemt/telemt
+# NOTE: this stage downloads a published release artefact, and this fork
+# has tagged no release yet, so the default below resolves to a 404. Override
+# TELEMT_REPOSITORY, or build from the working tree with
+# contrib/web/Dockerfile.source.
+ARG TELEMT_REPOSITORY=PalMeany/whatif-telemt
 ARG TELEMT_VERSION=latest
 
 # ==========================

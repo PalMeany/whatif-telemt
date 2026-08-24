@@ -1,9 +1,13 @@
 # Code of Conduct
 
+> This is the Code of Conduct of **WhatIf Telemt**, an unofficial, modified fork of
+> [Telemt](https://github.com/telemt/telemt). It is adapted from the upstream document;
+> the Telemt project and its maintainers do not administer this repository.
+
 ## Purpose
 
-**Telemt exists to solve technical problems.**
-- Telemt is open to contributors who want to learn, improve and build meaningful systems together.
+**WhatIf Telemt exists to solve technical problems.**
+- WhatIf Telemt is open to contributors who want to learn, improve and build meaningful systems together.
 - It is a place for building, testing, reasoning, documenting, and improving systems.
 - Discussions that advance this work are in scope, discussions that divert it are not.
 - Technology has consequences, responsibility is inherent.
@@ -72,13 +76,13 @@ Precision is learned.
 The following is not allowed:
 
 * Personal attacks, insults, harassment, or intimidation
-* Repeatedly derailing discussion away from Telemt’s purpose
+* Repeatedly derailing discussion away from WhatIf Telemt’s purpose
 * Spam, flooding, or repeated low-quality input
 * Misinformation presented as fact
-* Attempts to degrade, destabilize, or exhaust Telemt or its participants
-* Use of Telemt or its spaces to enable harm
+* Attempts to degrade, destabilize, or exhaust WhatIf Telemt or its participants
+* Use of WhatIf Telemt or its spaces to enable harm
 
-Telemt is not a venue for disputes that displace technical work.
+WhatIf Telemt is not a venue for disputes that displace technical work.
 Such discussions may be closed, removed, or redirected.
 
 > **Störung ist kein Beitrag.**
@@ -89,7 +93,7 @@ Such discussions may be closed, removed, or redirected.
 
 ## Security and Misuse
 
-Telemt is intended for responsible use.
+WhatIf Telemt is intended for responsible use.
 
 * Do not use it to plan, coordinate, or execute harm
 * Do not publish vulnerabilities without responsible disclosure
@@ -105,7 +109,7 @@ Security is both technical and behavioral.
 
 ## Openness
 
-Telemt is open to contributors of different backgrounds, experience levels, and working styles.
+WhatIf Telemt is open to contributors of different backgrounds, experience levels, and working styles.
 
 - Standards are public, legible, and applied to the work itself.
 - Questions are welcome. Careful disagreement is welcome. Honest correction is welcome.
@@ -119,7 +123,7 @@ This Code of Conduct applies to all official spaces:
 
 * Source repositories (issues, pull requests, discussions)
 * Documentation
-* Communication channels associated with Telemt
+* Communication channels associated with WhatIf Telemt
 
 ---
 
@@ -131,13 +135,13 @@ This responsibility is stewardship:
 - preserving continuity, 
 - protecting signal, 
 - maintaining standards, 
-- keeping Telemt workable for others.
+- keeping WhatIf Telemt workable for others.
 
 Judgment should be exercised with restraint, consistency, and institutional responsibility.
 - Not every decision requires extended debate.
 - Not every intervention requires public explanation.
 
-All decisions are expected to serve the durability, clarity, and integrity of Telemt.
+All decisions are expected to serve the durability, clarity, and integrity of WhatIf Telemt.
 
 > **Klarheit vor Zustimmung - Bestand vor Beifall**
 
@@ -146,7 +150,7 @@ All decisions are expected to serve the durability, clarity, and integrity of Te
 
 ## Enforcement
 
-Maintainers may act to preserve the integrity of Telemt, including by:
+Maintainers may act to preserve the integrity of WhatIf Telemt, including by:
 
 * Removing content
 * Locking discussions
@@ -161,7 +165,7 @@ Actions are taken to maintain function, continuity, and signal quality.
 
 ## Final
 
-**Telemt is built on discipline, structure, and shared intent**
+**WhatIf Telemt is built on discipline, structure, and shared intent**
 - Signal over noise
 - Facts over opinion
 - Systems over rhetoric

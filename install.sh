@@ -1,7 +1,10 @@
 #!/bin/sh
 set -eu
 
-REPO="${REPO:-telemt/telemt}"
+# NOTE: release artefacts are pulled from this repository. The fork has
+# tagged no release yet, so the download stage fails until one exists; override
+# with REPO=... or build from source in the meantime.
+REPO="${REPO:-PalMeany/whatif-telemt}"
 BIN_NAME="${BIN_NAME:-telemt}"
 INSTALL_DIR="${INSTALL_DIR:-/bin}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/telemt}"
@@ -508,7 +511,7 @@ ensure_user_group() {
 
     if ! check_os_entity passwd telemt; then
         if command -v useradd >/dev/null 2>&1; then
-            $SUDO useradd -r -g telemt -d "$WORK_DIR" -s "$nologin_bin" -c "Telemt Proxy" telemt
+            $SUDO useradd -r -g telemt -d "$WORK_DIR" -s "$nologin_bin" -c "WhatIfTelemt Proxy" telemt
         elif command -v adduser >/dev/null 2>&1; then
             if adduser --help 2>&1 | grep -q -- '-S'; then
                 $SUDO adduser -S -D -H -h "$WORK_DIR" -s "$nologin_bin" -G telemt telemt
@@ -670,7 +673,7 @@ install_config() {
 generate_systemd_content() {
     cat <<EOF
 [Unit]
-Description=Telemt
+Description=WhatIfTelemt
 After=network-online.target
 Wants=network-online.target
 
@@ -695,7 +698,7 @@ generate_openrc_content() {
     cat <<EOF
 #!/sbin/openrc-run
 name="$SERVICE_NAME"
-description="Telemt Proxy Service"
+description="WhatIfTelemt Proxy Service"
 command="${INSTALL_DIR}/${BIN_NAME}"
 command_args="${CONFIG_FILE}"
 command_background=true

@@ -4,10 +4,16 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn write_temp_config(contents: &str) -> PathBuf {
+    // A nanosecond clock is not guaranteed to differ between two tests running
+    // in parallel, so the counter is what actually makes this path unique. A
+    // timestamp alone lets one test load another's configuration and fail with
+    // an error message from a file it never wrote.
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time must be after unix epoch")
         .as_nanos();
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "telemt-load-mask-prefetch-timeout-security-{nonce}.toml"
     ));

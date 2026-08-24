@@ -21,8 +21,8 @@ Notes:
 ## 2. Build from source
 
 ```sh
-git clone https://github.com/telemt/telemt
-cd telemt
+git clone https://github.com/PalMeany/whatif-telemt
+cd whatif-telemt
 cargo build --release
 ./target/release/telemt --version
 ```

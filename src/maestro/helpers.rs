@@ -205,7 +205,7 @@ pub(crate) fn parse_cli() -> CliArgs {
                 std::process::exit(0);
             }
             "--version" | "-V" => {
-                println!("telemt {}", env!("CARGO_PKG_VERSION"));
+                println!("{} {}", crate::PRODUCT, crate::VERSION);
                 std::process::exit(0);
             }
             // Skip daemon-related flags (already parsed)

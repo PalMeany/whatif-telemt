@@ -223,7 +223,11 @@ jobs:
 
           TOOLCHAIN_DIR="$HOME/.musl-aarch64"
           ARCHIVE="aarch64-linux-musl-cross.tgz"
-          URL="https://github.com/telemt/telemt/releases/download/toolchains/${ARCHIVE}"
+          # NOTE: upstream hosts this cross toolchain under its own
+          # `toolchains` release tag. This fork must mirror the archive into a
+          # release tagged `toolchains` on this repository before the
+          # aarch64-musl job can run; until then the fetch below 404s.
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/toolchains/${ARCHIVE}"
 
           if [ -x "${TOOLCHAIN_DIR}/bin/aarch64-linux-musl-gcc" ]; then
             echo "MUSL toolchain cached"

@@ -1,5 +1,5 @@
 [Unit]
-Description=Telemt
+Description=WhatIfTelemt
 Wants=network-online.target
 After=multi-user.target network.target network-online.target
 

@@ -53,7 +53,7 @@ hello2 = "ad_tag2"
  
   ### Клиент С секретным ключом получает доступ к ресурсу MTProxy:
   
-  <img width="360" height="439" alt="telemt" src="https://github.com/user-attachments/assets/39352afb-4a11-4ecc-9d91-9e8cfb20607d" />
+  <img width="360" height="439" alt="Telegram client proxy dialog" src="assets/proxy-link-dialog.png" />
   
   ### Клиент БЕЗ секретного ключа получает прозрачный доступ к указанному ресурсу:
     - с доверенным сертификатом;
@@ -155,7 +155,7 @@ Keep-Alive: timeout=60
 
 
 ## Зачем нужен middle proxy (ME)
-https://github.com/telemt/telemt/discussions/167
+Разобрано в обсуждении апстримного Telemt: https://github.com/telemt/telemt/discussions/167
 
 ## Как клиенты взаимодействуют с дата-центрами Telegram
 При регистрации аккаунта Telegram он навсегда привязывается к одному из дата-центров (DC).  

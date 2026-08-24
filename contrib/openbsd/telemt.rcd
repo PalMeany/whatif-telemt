@@ -1,7 +1,7 @@
 #!/bin/ksh
 # /etc/rc.d/telemt
 #
-# rc.d(8) script for Telemt MTProxy daemon.
+# rc.d(8) script for the WhatIfTelemt MTProxy daemon.
 # Tokio runtime does not daemonize itself, so rc_bg=YES is used.
 
 daemon="/usr/local/bin/telemt"

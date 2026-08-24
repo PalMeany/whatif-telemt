@@ -12,5 +12,7 @@ lfx_crowdfunding: # Replace with a single LFX Crowdfunding project-name e.g., cl
 polar: # Replace with a single Polar username
 buy_me_a_coffee: # Replace with a single Buy Me a Coffee username
 thanks_dev: # Replace with a single thanks.dev username
+# The upstream Telemt donation link was removed here: it pays the upstream
+# project, and a sponsor button on this fork pointing at it would suggest
+# this repository is an official Telemt release. This fork solicits nothing.
 custom:
-  - https://nowpayments.io/donation?api_key=2bf1afd2-abc2-49f9-a012-f1e715b37223

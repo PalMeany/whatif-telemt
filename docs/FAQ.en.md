@@ -52,7 +52,7 @@ that does not occur in modern browsers.
       - Crawlers completely satisfied receiving responses from `mask_host`
   ### Client WITH secret-key accesses the MTProxy resource:
   
-  <img width="360" height="439" alt="telemt" src="https://github.com/user-attachments/assets/39352afb-4a11-4ecc-9d91-9e8cfb20607d" />
+  <img width="360" height="439" alt="Telegram client proxy dialog" src="assets/proxy-link-dialog.png" />
   
   ### Client WITHOUT secret-key gets transparent access to the specified resource:
     - with trusted certificate
@@ -155,7 +155,7 @@ Keep-Alive: timeout=60
   - in Iran during "activity"
 
 ### Why do you need a middle proxy (ME)
-https://github.com/telemt/telemt/discussions/167
+Explained in the upstream Telemt discussion: https://github.com/telemt/telemt/discussions/167
 
 ## How clients interact with Telegram DCs
 When you register a Telegram account, it gets permanently bound to one of Telegram's data centers (DCs).  

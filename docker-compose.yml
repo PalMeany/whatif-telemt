@@ -1,6 +1,9 @@
 services:
   telemt:
-    image: ghcr.io/telemt/telemt:latest
+    # NOTE: this fork has published no GHCR package yet, so the tag does
+    # not resolve. Use `docker compose up --build` (the build stanza below) until
+    # a release pipeline pushes it.
+    image: ghcr.io/palmeany/whatif-telemt:latest
     build:
       context: .
       target: prod

@@ -416,7 +416,7 @@ async fn run_telemt_core(
         )
         .await;
 
-    print_maestro_line(format!("Telemt MTProxy v{}", env!("CARGO_PKG_VERSION")));
+    print_maestro_line(format!("{} {}", crate::PRODUCT, crate::VERSION));
     info!("Log level: {}", effective_log_level);
     if config.general.disable_colors {
         info!("Colors: disabled");

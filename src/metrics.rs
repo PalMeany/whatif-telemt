@@ -449,7 +449,7 @@ async fn render_metrics(
     let _ = writeln!(
         out,
         "telemt_build_info{{version=\"{}\"}} 1",
-        env!("CARGO_PKG_VERSION")
+        crate::VERSION
     );
 
     let _ = writeln!(out, "# HELP telemt_uptime_seconds Proxy uptime");
@@ -3962,7 +3962,7 @@ mod tests {
 
         assert!(output.contains(&format!(
             "telemt_build_info{{version=\"{}\"}} 1",
-            env!("CARGO_PKG_VERSION")
+            crate::VERSION
         )));
         assert!(output.contains("telemt_connections_total 2"));
         assert!(output.contains("telemt_connections_bad_total 1"));
@@ -4268,7 +4268,7 @@ mod tests {
                 .unwrap()
                 .contains(&format!(
                     "telemt_build_info{{version=\"{}\"}} 1",
-                    env!("CARGO_PKG_VERSION")
+                    crate::VERSION
                 ))
         );
 

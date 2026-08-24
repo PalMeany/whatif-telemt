@@ -26,10 +26,10 @@
             "keepTime": false,
             "tags": [],
             "targetBlank": true,
-            "title": "Official GitHub repository",
-            "tooltip": "Official GitHub repository",
+            "title": "GitHub repository",
+            "tooltip": "GitHub repository",
             "type": "link",
-            "url": "https://github.com/telemt/telemt"
+            "url": "https://github.com/PalMeany/whatif-telemt"
         }
     ],
     "panels": [
@@ -6645,6 +6645,6 @@
     },
     "timepicker": {},
     "timezone": "browser",
-    "title": "Telemt MtProto proxy",
+    "title": "WhatIfTelemt MtProto proxy",
     "weekStart": ""
 }

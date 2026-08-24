@@ -1,4 +1,22 @@
-//! telemt — Telegram MTProto Proxy
+//! WhatIfTelemt — Telegram MTProto Proxy
+//!
+//! An unofficial, modified version of Telemt (<https://github.com/telemt/telemt>).
+//! Not affiliated with, endorsed by, or supported by the Telemt project.
+
+/// Product name shown to operators.
+///
+/// Deliberately not "Telemt": TELEMT PUBLIC LICENSE 3.3 §3 grants no permission
+/// to use the Telemt name or branding, and permits naming a modified version
+/// only when it is clearly identified as modified and unofficial. See NOTICE.md.
+pub const PRODUCT: &str = "WhatIfTelemt";
+
+/// Full version: the upstream Telemt release this forked from, plus this fork's
+/// own sub-version.
+///
+/// `Cargo.toml` deliberately keeps the upstream number (`3.4.25`) so it stays
+/// obvious which Telemt release this tree came from; the suffix identifies the
+/// fork build. Bump the suffix HERE, not in `Cargo.toml`.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), ".1w");
 
 mod api;
 mod cli;

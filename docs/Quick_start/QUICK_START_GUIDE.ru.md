@@ -4,11 +4,18 @@
  - [Ручная установка Telemt в качестве службы](#telemt-через-systemd-вручную).
  - [Установка через Docker Compose](#telemt-через-docker-compose).
 
+> [!NOTE]
+> [!NOTE]
+>
+> Ссылки ниже ведут на `PalMeany/whatif-telemt`, где релизов пока нет,
+> поэтому `install.sh` и шаг с `wget` будут отдавать 404, пока релиз не выпущен.
+> До этого собирайте из исходников (`cargo build --release`).
+
 # Очень быстрый старт
 
 ### Установка одной командой / обновление при повторном запуске
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh
 ```
 После запуска скрипт запросит:
  - ваш язык (1 - English, 2 - Русский);
@@ -32,12 +39,12 @@ tg://proxy?server=IP&port=PORT&secret=SECRET
 
 ### Установка нужной версии
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- 3.3.39
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- 3.3.39
 ```
 
 ### Удаление с полной очисткой
 ```bash
-curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh -s -- purge
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- purge
 ```
 
 # Telemt через Systemd вручную
@@ -48,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/telemt/telemt/main/install.sh | sh 
 
 **1. Скачать**
 ```bash
-wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
+wget -qO- "https://github.com/PalMeany/whatif-telemt/releases/latest/download/telemt-$(uname -m)-linux-$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu).tar.gz" | tar -xz
 ```
 **2. Переместить в папку Bin**
 ```bash
