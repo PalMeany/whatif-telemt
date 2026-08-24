@@ -299,7 +299,8 @@ impl Manager {
             .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Counts a carrier connection refused by the accept-loop budget.
+    /// Counts a carrier connection dropped because both the accept-loop budget
+    /// and the refusal reserve behind it were exhausted.
     pub(crate) fn count_carrier_connection_dropped(&self) {
         self.metrics
             .carrier_connections_dropped

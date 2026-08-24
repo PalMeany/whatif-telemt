@@ -4,7 +4,7 @@
 # Dockerfile, which downloads a published release artifact. Use it to deploy a
 # fork whose binary is not published yet:
 #
-#   docker build -f contrib/web/Dockerfile.source -t telemt-webp:local .
+#   docker build -f contrib/web/Dockerfile.source -t whatif-telemt:local .
 #
 # The image contains only the binary; mount the configuration and the
 # operator-owned public site at runtime.

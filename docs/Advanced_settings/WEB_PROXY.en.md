@@ -57,9 +57,11 @@ bridge capability is `HMAC(secret, "…\n" + hostname)` — the relay and the cl
 must derive it over the same name. It is not the origin's own hostname.
 
 telemt then checks the `Host` header against that name and answers everything
-else with the site's 404. Case, a trailing dot, and any port are normalised
-away, but a CDN that forwards its own origin hostname still fails the check. Two
-ways out:
+else with the site's 404. Case and any port are normalised away, but a trailing
+dot is not — `proxy.example.com.` is a distinct name and is refused — and a
+request that carries more than one `Host` header is refused before the value is
+read at all. A CDN that forwards its own origin hostname also fails the check.
+Two ways out:
 
 - point clients and the CDN at the same name (`hostname = "cdn.example.com"`)
   and let the CDN preserve `Host`; or
@@ -87,39 +89,7 @@ tracking account every user to that address.
 
 ## Configuration
 
-## Carrier modes
-
-**Use `carrier_mode = "https"`, or `https-lanes` if the public origin speaks
-HTTP/2.**
-
-The relay implements four carrier modes — `https`, `https-lanes`, `websocket`,
-`websocket-lanes` — because the reference relay does. The carrier itself lives
-entirely in the bridge page's JavaScript, which telemt serves byte-identical to
-the reference's for all four modes, so a client needs no new transport code for
-any of them; telemt's own tests drive a real MTProto handshake through an
-`https-lanes` lane.
-
-The two WebSocket carriers are the exception: they are implemented and tested
-here, but **not yet verified against a shipping client** (as of 2026-08).
-Telegram Desktop's
-[WEB proxy plan](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/web-proxy-plan.md)
-states that "the v1 HTTPS long-poll carrier is operational; the deployed bridge
-does not require a public WebSocket or another carrier", and the transport
-"allows only the exact canonical HTTPS bridge navigation": nothing in a shipped
-client exercises a WebSocket carrier today, so nothing has proved that its
-WebView allows the upgrade. There is no carrier negotiation in v1 either, so a
-client cannot report that it does not speak the mode an operator selected.
-
-A mode a client cannot drive fails in a way that looks like nothing is wrong:
-the capability resolves, the bridge page renders with the right mode, the
-session is created, `sessions_created_total` and `streams_opened_total` both
-rise — and the client sits on "connecting" indefinitely, because its 10-second
-bridge-message and 30-second write-progress deadlines fail the carrier and
-restart it forever. telemt emits a start-up warning naming the profiles that
-select a WebSocket carrier.
-
-Treat the two WebSocket modes as unreleased, and retire this note once a
-released client has been observed driving one.
+The transport is enabled and shaped by the top-level `[web]` table:
 
 ```toml
 [web]
@@ -186,7 +156,7 @@ the same name.
 name = "media"
 secret = "000102030405060708090a0b0c0d0e0f"   # hex or base64url
 backend = "internal"                           # or "127.0.0.1:2398"
-carrier_mode = "https"                         # see "Carrier modes" below
+carrier_mode = "https"                         # see "Carrier modes"
 
 [web.profiles.limits]
 max_sessions = 32
@@ -194,6 +164,38 @@ max_streams = 512
 ```
 
 ## Carrier modes
+
+**Use `carrier_mode = "https"`, or `https-lanes` if the public origin speaks
+HTTP/2.**
+
+The relay implements four carrier modes — `https`, `https-lanes`, `websocket`,
+`websocket-lanes` — because the reference relay does. The carrier itself lives
+entirely in the bridge page's JavaScript, which telemt serves byte-identical to
+the reference's for all four modes, so a client needs no new transport code for
+any of them; telemt's own tests drive a real MTProto handshake through an
+`https-lanes` lane.
+
+The two WebSocket carriers are the exception: they are implemented and tested
+here, but **not yet verified against a shipping client** (as of 2026-08).
+Telegram Desktop's
+[WEB proxy plan](https://github.com/telegramdesktop/tdesktop/blob/dev/docs/web-proxy-plan.md)
+states that "the v1 HTTPS long-poll carrier is operational; the deployed bridge
+does not require a public WebSocket or another carrier", and the transport
+"allows only the exact canonical HTTPS bridge navigation": nothing in a shipped
+client exercises a WebSocket carrier today, so nothing has proved that its
+WebView allows the upgrade. There is no carrier negotiation in v1 either, so a
+client cannot report that it does not speak the mode an operator selected.
+
+A mode a client cannot drive fails in a way that looks like nothing is wrong:
+the capability resolves, the bridge page renders with the right mode, the
+session is created, `sessions_created_total` and `streams_opened_total` both
+rise — and the client sits on "connecting" indefinitely, because its 10-second
+bridge-message and 30-second write-progress deadlines fail the carrier and
+restart it forever. telemt emits a start-up warning naming the profiles that
+select a WebSocket carrier.
+
+Treat the two WebSocket modes as unreleased, and retire this note once a
+released client has been observed driving one.
 
 | Mode | Shape | Trade-off |
 | --- | --- | --- |
@@ -209,8 +211,8 @@ so clients need no new setting when an operator changes it.
 
 Every ceiling from the reference relay is configurable under `[web.limits]`
 and `[web.timeouts]`. The `[web.limits]` keys carry the reference's names and
-defaults unchanged; the `[web.timeouts]` keys do not, and are mapped below the
-tables.
+defaults unchanged, except `max_carrier_connections`, which the reference does
+not have; the `[web.timeouts]` keys do not, and are mapped below the tables.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -228,6 +230,7 @@ tables.
 | `max_sessions_global` | `128` | Live sessions |
 | `max_streams_global` | `4096` | Live streams |
 | `max_backend_dials_in_flight` | `256` | Backend connections establishing at once |
+| `max_carrier_connections` | `max_streams_global + 1024` (`5120`) | Carrier connections served at once; must not be smaller than `max_streams_global`, and past it a connection is answered `503` with `Retry-After: 1` |
 | `new_sessions_per_minute` / `new_sessions_burst` | `600` / `128` | Session creation rate |
 | `new_streams_per_minute` / `new_streams_burst` | `6000` / `512` | Stream creation rate |
 | `max_bootstraps_per_ip` | `0` (off) | Unconsumed bootstraps per address |
@@ -296,8 +299,11 @@ diagnostic.
 Enable them only when clients have addresses of their own. When
 `max_sessions_per_ip` is set, a client reconnecting from an address at its
 ceiling first reclaims its own sessions that have been silent for more than
-twice `long_poll_ms`, so a flapping network cannot lock a client out of its own
-slots; a session still driving its carrier is never displaced.
+`reconnect_grace_ms`, so a flapping network cannot lock a client out of its own
+slots. That window is the same one the idle reaper uses and is deliberately
+wider than the long-poll period: a WebSocket carrier is kept alive by protocol
+ping/pong rather than by a poll, so a healthy but quiet session is never
+displaced.
 
 `[web.limits]` and `[web.timeouts]` are read once, at start-up. The process-wide
 pending pools, the per-session budget partitions, and the accept loops are all
@@ -330,10 +336,12 @@ The same counters appear on telemt's main metrics endpoint under the
 The last three are the ones worth alerting on: every other failure is answered
 with the site's ordinary 404 by design, so they are the only externally visible
 signal that the relay is refusing work.
-`carrier_connections_dropped_total` rises when the accept-loop budget is full,
-`request_timeouts_total` when a request overran the relay's own deadline, and
-`retry_later_responses_total` when a queue budget or a capacity ceiling handed a
-client a 503. Protocol, authentication, and budget refusals are logged at
+`retry_later_responses_total` rises when a queue budget, a capacity ceiling, or
+the accept-loop connection budget (`max_carrier_connections`) handed a client a
+503; `carrier_connections_dropped_total` rises only when the bounded refusal
+reserve behind the accept loop is also exhausted and the socket really is
+dropped; `request_timeouts_total` when a request overran the relay's own
+deadline. Protocol, authentication, and budget refusals are logged at
 `debug` level with the session id and profile name.
 
 Because the session bearer travels in a request header on the WebSocket
@@ -372,9 +380,12 @@ upgrade, never enable header logging on the front proxy or on telemt.
 - Do not expose `listen` or `admin_listen` on a public interface. The carrier
   listener is plaintext HTTP by design — TLS belongs to the front proxy — so
   anything that can reach it reads the bridge capability and the session bearer.
-  telemt warns at start-up when `listen` is not a loopback address; it is not
-  refused only because a container deployment reaches the relay from a sibling
-  container.
+  telemt refuses a non-loopback `listen` outright unless `trusted_proxies`
+  names the off-host front proxy that reaches it: with the shipped default
+  (`["127.0.0.0/8", "::1/128"]`) the process exits at configuration load. A
+  container deployment that must bind `0.0.0.0` has to add the sibling
+  container's address or network to `trusted_proxies`; with that in place it
+  starts and only warns.
 
 ## Deliberate differences from the reference relay
 
@@ -391,12 +402,15 @@ against upstream does not "fix" them back.
   one. The extra headroom is what lets a drained lane be reclaimed without ever
   refusing a lane a live stream still needs.
 - **`Host` matching is case-insensitive and port-agnostic.** The reference
-  compares bytes against `hostname` or `hostname:443`. Telemt lowercases,
-  strips a trailing dot, and strips any port, because nginx and Caddy both do —
-  and byte-exact matching turns every non-443 origin port or `Host`-rewriting
-  CDN into a host that 404s everything, which is far more conspicuous than
-  serving the operator's index. The bridge page is always rendered from the
-  configured `hostname`, so an unusual but matching `Host` cannot reach it.
+  compares bytes against `hostname` or `hostname:443`. Telemt lowercases and
+  strips any port, because nginx and Caddy both do — and byte-exact matching
+  turns every non-443 origin port or `Host`-rewriting CDN into a host that 404s
+  everything, which is far more conspicuous than serving the operator's index.
+  The bridge page is always rendered from the configured `hostname`, so an
+  unusual but matching `Host` cannot reach it. A trailing dot is *not*
+  normalised away — `hostname.` is a distinct name no browser sends here — and a
+  duplicated `Host` header is refused outright, because it is a
+  request-smuggling primitive.
 - **The bridge document carries a variable-length padding comment.** Without
   it, `GET /?bridge=…` returns a globally constant length on every deployment,
   and a passive observer separates a bridge fetch from an index fetch without

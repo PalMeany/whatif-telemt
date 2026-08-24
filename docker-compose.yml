@@ -1,8 +1,12 @@
 services:
   telemt:
-    # NOTE: this fork has published no GHCR package yet, so the tag does
-    # not resolve. Use `docker compose up --build` (the build stanza below) until
-    # a release pipeline pushes it.
+    # NOTE: this fork has published no GHCR package yet, so the tag does not
+    # resolve, and `--build` is not a workaround: the build stanza below runs the
+    # root Dockerfile, which only downloads a release archive that does not exist
+    # either. Build from the working tree instead:
+    #   docker build -f contrib/web/Dockerfile.source -t whatif-telemt:local .
+    # and point `image:` at that tag (dropping the `build:` stanza), until a
+    # release pipeline publishes both.
     image: ghcr.io/palmeany/whatif-telemt:latest
     build:
       context: .

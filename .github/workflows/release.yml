@@ -3,11 +3,20 @@ name: Release
 on:
   push:
     tags:
+      # This fork versions as <upstream release>.<fork sub-version>, e.g.
+      # 3.4.25.1w — the trailing `w` marks it as a WhatIf Telemt build so a tag
+      # can never be mistaken for an upstream Telemt release. The plain
+      # three-component form is kept so a tag inherited from upstream still
+      # builds.
       - '[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+.[0-9]+w'
+      # Pre-releases of either form: 3.4.25-rc1, 3.4.25.1w-rc1.
+      - '[0-9]+.[0-9]+.[0-9]+-*'
+      - '[0-9]+.[0-9]+.[0-9]+.[0-9]+w-*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (example: 3.3.15)'
+        description: 'Release tag (example: 3.4.25.1w)'
         required: true
         type: string
 
@@ -51,6 +60,10 @@ jobs:
             exit 1
           fi
 
+          # A hyphen marks a pre-release (3.4.25.1w-rc1); the `.1w`
+          # sub-version suffix on its own does not. Both tag forms are in
+          # `on.push.tags`, so a pre-release can be cut by pushing a tag as
+          # well as through workflow_dispatch.
           if [[ "${VERSION}" == *-* ]]; then
             PRERELEASE=true
           else
@@ -223,21 +236,39 @@ jobs:
 
           TOOLCHAIN_DIR="$HOME/.musl-aarch64"
           ARCHIVE="aarch64-linux-musl-cross.tgz"
-          # NOTE: upstream hosts this cross toolchain under its own
-          # `toolchains` release tag. This fork must mirror the archive into a
-          # release tagged `toolchains` on this repository before the
-          # aarch64-musl job can run; until then the fetch below 404s.
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/toolchains/${ARCHIVE}"
+          # This is the stock musl.cc cross toolchain, not project code. It is
+          # fetched from this repository's own `toolchains` release when one
+          # exists, because musl.cc has a long history of being unreachable;
+          # musl.cc itself is the fallback so a fresh fork builds before anyone
+          # has mirrored anything. To self-host it, upload the archive to a
+          # release tagged `toolchains` on this repository.
+          SOURCES=(
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/toolchains/${ARCHIVE}"
+            "https://musl.cc/${ARCHIVE}"
+          )
 
           if [ -x "${TOOLCHAIN_DIR}/bin/aarch64-linux-musl-gcc" ]; then
             echo "MUSL toolchain cached"
           else
-            curl -fL \
-              --retry 5 \
-              --retry-delay 3 \
-              --connect-timeout 10 \
-              --max-time 120 \
-              -o "${ARCHIVE}" "${URL}"
+            FETCHED=0
+            for URL in "${SOURCES[@]}"; do
+              echo "Fetching ${URL}"
+              if curl -fL \
+                   --retry 5 \
+                   --retry-delay 3 \
+                   --connect-timeout 10 \
+                   --max-time 120 \
+                   -o "${ARCHIVE}" "${URL}"; then
+                FETCHED=1
+                break
+              fi
+              echo "Failed: ${URL}"
+            done
+
+            if [ "${FETCHED}" -ne 1 ]; then
+              echo "Could not fetch ${ARCHIVE} from any source" >&2
+              exit 1
+            fi
 
             mkdir -p "${TOOLCHAIN_DIR}"
             tar -xzf "${ARCHIVE}" --strip-components=1 -C "${TOOLCHAIN_DIR}"
@@ -341,6 +372,26 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
+          # Prepended to the auto-generated notes. The release page is a
+          # user-visible surface of its own, so the unofficial-version
+          # statement required by TELEMT PUBLIC LICENSE 3.3 §2 and §3 belongs
+          # here too, not only in the README.
+          body: |
+            **WhatIf Telemt is an unofficial, modified version of
+            [Telemt](https://github.com/telemt/telemt).** It is not affiliated
+            with, endorsed by, or supported by the Telemt project or its
+            maintainers.
+
+            Version `${{ needs.prepare.outputs.version }}` — the trailing `w`
+            marks a WhatIf Telemt build. The leading three components are the
+            upstream Telemt release this fork is based on.
+
+            What differs from upstream:
+            [CHANGES-FROM-UPSTREAM.md](https://github.com/${{ github.repository }}/blob/main/CHANGES-FROM-UPSTREAM.md)
+            · Licence and attribution:
+            [NOTICE.md](https://github.com/${{ github.repository }}/blob/main/NOTICE.md)
+
+            ---
           prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
           overwrite_files: true
 

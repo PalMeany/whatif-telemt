@@ -43,7 +43,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
 | [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
 | [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
-| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"beobachten.txt"` | `✘` |
 
 ## include
   - **Constraints / validation**: Must be a single-line directive in the form `include = "path/to/file.toml"`. Includes are expanded before TOML parsing. Maximum include depth is 10.
@@ -191,7 +191,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`middle_proxy_warm_standby`](#middle_proxy_warm_standby) | `usize` | `16` | `✘` |
 | [`me_init_retry_attempts`](#me_init_retry_attempts) | `u32` | `0` | `✘` |
 | [`me2dc_fallback`](#me2dc_fallback) | `bool` | `true` | `✘` |
-| [`me2dc_fast`](#me2dc_fast) | `bool` | `false` | `✘` |
+| [`me2dc_fast`](#me2dc_fast) | `bool` | `true` | `✘` |
 | [`me_keepalive_enabled`](#me_keepalive_enabled) | `bool` | `true` | `✘` |
 | [`me_keepalive_interval_secs`](#me_keepalive_interval_secs) | `u64` | `8` | `✘` |
 | [`me_keepalive_jitter_secs`](#me_keepalive_jitter_secs) | `u64` | `2` | `✘` |
@@ -216,7 +216,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
 | [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
 | [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
-| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"beobachten.txt"` | `✘` |
 | [`hardswap`](#hardswap) | `bool` | `true` | `✔` |
 | [`me_warmup_stagger_enabled`](#me_warmup_stagger_enabled) | `bool` | `true` | `✘` |
 | [`me_warmup_step_delay_ms`](#me_warmup_step_delay_ms) | `u64` | `500` | `✘` |
@@ -1890,7 +1890,7 @@ This document lists all configuration keys accepted by `config.toml`.
 | [`client_mss_bulk`](#client_mss_bulk) | `String` | `""` | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | `false` | `✘` |
 | [`proxy_protocol_header_timeout_ms`](#proxy_protocol_header_timeout_ms) | `u64` | `500` | `✘` |
-| [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `[]` | `✘` |
+| [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `["0.0.0.0/0", "::/0"]` | `✘` |
 | [`metrics_port`](#metrics_port) | `u16` | — | `✘` |
 | [`metrics_listen`](#metrics_listen) | `String` | — | `✘` |
 | [`metrics_whitelist`](#metrics_whitelist) | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | `✘` |
@@ -2639,8 +2639,8 @@ Note: This section also accepts the legacy alias `[server.admin_api]` (same sche
 | [`fake_cert_len`](#fake_cert_len) | `usize` | `2048` | `✘` |
 | [`tls_emulation`](#tls_emulation) | `bool` | `true` | `✘` |
 | [`tls_front_dir`](#tls_front_dir) | `String` | `"tlsfront"` | `✘` |
-| [`server_hello_delay_min_ms`](#server_hello_delay_min_ms) | `u64` | `0` | `✘` |
-| [`server_hello_delay_max_ms`](#server_hello_delay_max_ms) | `u64` | `0` | `✘` |
+| [`server_hello_delay_min_ms`](#server_hello_delay_min_ms) | `u64` | `8` | `✘` |
+| [`server_hello_delay_max_ms`](#server_hello_delay_max_ms) | `u64` | `24` | `✘` |
 | [`tls_new_session_tickets`](#tls_new_session_tickets) | `u8` | `0` | `✘` |
 | [`tls_full_cert_ttl_secs`](#tls_full_cert_ttl_secs) | `u64` | `90` | `✘` |
 | [`serverhello_compact`](#serverhello_compact) | `bool` | `false` | `✘` |
@@ -3588,7 +3588,7 @@ same-origin HTTPS or WebSocket carrier. Disabled by default.
 | `public_dir` | `String` (path) | — | `✘` |
 | `public_upstream` | `String` (`http://ip:port`) | — | `✘` |
 | `carrier_mode` | `"https" \| "https-lanes" \| "websocket" \| "websocket-lanes"` | `"https"` | `✔` |
-| `derive_user_profiles` | `bool` | `true` | `✔` |
+| `derive_user_profiles` | `bool` | `false` | `✔` |
 | `trusted_proxies` | `CIDR[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
 | `limits` | Table | default values | `✘` |
 | `timeouts` | Table | default values | `✘` |
@@ -3598,6 +3598,10 @@ Exactly one of `public_dir` and `public_upstream` is required when `enabled` is
 `true`. Capability profiles — derived from `[access.users]` and declared in
 `[[web.profiles]]` — are re-derived after a configuration reload; listener,
 hostname, and public-site settings are read once at start-up.
+
+With `enabled = true`, at least one of `[[web.profiles]]` or
+`derive_user_profiles = true` is required; a configuration with neither is
+refused at start-up.
 
 Every key of `[web.limits]`, `[web.timeouts]`, and `[[web.profiles]]`, together
 with deployment instructions and the carrier-mode trade-offs, is documented in

@@ -207,7 +207,8 @@ pub(crate) async fn serve_admin(
     }
 }
 
-/// Binds one relay listener, reporting the failure without aborting start-up.
+/// Binds one relay listener, returning `None` so the caller can turn the
+/// failure into the fatal start-up error it now is.
 pub(crate) async fn bind(address: SocketAddr, purpose: &str) -> Option<TcpListener> {
     match TcpListener::bind(address).await {
         Ok(listener) => {

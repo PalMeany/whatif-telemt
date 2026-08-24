@@ -81,4 +81,6 @@ hello = "00000000000000000000000000000000"
 # name = "media"
 # secret = "000102030405060708090a0b0c0d0e0f"
 # backend = "internal"              # or "127.0.0.1:2398" for a stock MTProxy
-# carrier_mode = "websocket-lanes"
+# carrier_mode = "https"            # https | https-lanes; the WebSocket modes are not yet
+#                                   verified against a shipping client, and a client that
+#                                   cannot drive one hangs on "connecting" with no error

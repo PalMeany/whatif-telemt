@@ -1,7 +1,7 @@
 #!/bin/sh
 # Unattended installer for telemt with the WEB proxy transport.
 #
-# Automates contrib/web/DEPLOY.md steps 2-9 on a clean Debian/Ubuntu host with
+# Automates contrib/web/DEPLOY.md steps 2-10 on a clean Debian/Ubuntu host with
 # systemd: builds the binary from this checkout, creates the service account,
 # writes the configuration, installs Caddy as the TLS front proxy, and starts
 # both services. The runbook remains the reference for anything this script
@@ -39,27 +39,29 @@ die() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'USAGE'
-Usage: install-web.sh --hostname HOST --site DIR [options]
+Usage: install-web.sh --hostname HOST [--site DIR] [options]
 
 Required:
   --hostname HOST      Public hostname clients configure. Must already resolve
                        to this host: Caddy obtains a certificate for it.
+
+Options:
   --site DIR           Operator-owned static site to serve. Needs index.html;
                        404.html is strongly recommended. This script generates
                        no site: a page shared by many operators is an
                        active-probing signature. Without --site everything is
                        installed and configured but nothing is started.
-
-Options:
   --user NAME          Name of the generated proxy user       (default: alice)
   --secret HEX32       Use this secret instead of generating one
   --direct-port PORT   Direct MTProto listener, public        (default: 8443)
   --carrier-port PORT  WEB carrier listener, loopback         (default: 8080)
   --admin-port PORT    Relay health and metrics, loopback     (default: 8081)
   --carrier-mode MODE  https | https-lanes | websocket | websocket-lanes
-                       Keep the default. The current client implements only the
-                       HTTPS long-poll carrier and does not negotiate, so any
-                       other mode hangs it on "connecting" with no error.
+                       Use https, or https-lanes if the public origin speaks
+                       HTTP/2. The two WebSocket carriers have not been verified
+                       against a shipping client, and v1 has no carrier
+                       negotiation, so a client that cannot drive the selected
+                       mode hangs on "connecting" with no error.
                                                               (default: https)
   --src DIR            Repository checkout to build from (default: this one)
   --config PATH        Configuration file  (default: /etc/telemt/config.toml)
@@ -115,10 +117,15 @@ esac
 
 case "$CARRIER_MODE" in
     https) : ;;
-    https-lanes|websocket|websocket-lanes)
-        warn "carrier mode '$CARRIER_MODE' is not implemented by the current client: it will"
-        warn "render the bridge, create a session, and then hang on \"connecting\" forever."
-        warn "Use https unless you are testing a client that implements this mode."
+    https-lanes)
+        warn "carrier mode 'https-lanes' opens one request lane per stream, so the public"
+        warn "origin must speak HTTP/2 or every lane serialises onto one connection."
+        warn "Caddy does by default; check any CDN or load balancer in front of it."
+        ;;
+    websocket|websocket-lanes)
+        warn "carrier mode '$CARRIER_MODE' has not been verified against a shipping client:"
+        warn "it will render the bridge, create a session, and then hang on \"connecting\"."
+        warn "Use https or https-lanes unless you are testing a client that drives this mode."
         ;;
     *) die "carrier mode '$CARRIER_MODE' is not one of https, https-lanes, websocket, websocket-lanes" ;;
 esac

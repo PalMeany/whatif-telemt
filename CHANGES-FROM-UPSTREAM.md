@@ -11,8 +11,10 @@ with or endorsed by the Telemt project.**
 
 This repository was forked from <https://github.com/telemt/telemt> at commit
 `d851200`, which is **telemt 3.4.25**. Everything below is a change made in
-this fork after that commit: 20 commits, 101 files changed,
-+18,709 / −659 lines.
+this fork after that commit — of the order of twenty commits, some 130 files
+and roughly +20,000 / −900 lines. For the exact delta as it stands now, run
+`git diff --stat d851200..HEAD`, or see
+<https://github.com/PalMeany/whatif-telemt/compare/d851200...main>.
 
 Upstream Telemt has moved on independently since then and is now on the 3.5.x
 line. Upstream's own WEB proxy implementation was written separately and is not
@@ -30,23 +32,24 @@ It implements the client-independent WEB proxy protocol v1 wire contract of
 MTProxy framing and sends every proxy connection through one app-owned WebView
 carrier that looks, to anyone who cannot authenticate, like an ordinary HTTPS
 website. Four carrier modes exist — `https`, `https-lanes`, `websocket` and
-`websocket-lanes` — of which only `https` is driveable by any released client
-today, so the relay now names the affected profiles at start-up rather than
-letting a mode mismatch present as a healthy carrier that passes no data. The
-significant divergence from the reference relay is that streams are terminated
-**in-process**: instead of forwarding each demultiplexed stream to a stock
-MTProxy over loopback TCP, the bytes go straight into telemt's existing client
-pipeline, so fake-TLS handling, Middle-End routing, per-user limits, quotas, IP
-tracking, statistics and masking all apply to WEB clients unchanged, and two
-syscalls and two kernel copies per chunk disappear. The loopback backend remains
-available for deployments that want a separate MTProxy process. Alongside it,
-bridge capabilities are now derived for every secret form a client can actually
-present — including the fronted `ee` fake-TLS secret with each configured
-`tls_domain`, which previously left a user pasting the printed proxy link with
-no bridge at all — while `ee` forms the carrier cannot carry are refused
-outright, the `Host` check normalises case, trailing dots and ports (so a CDN or
-front proxy no longer produces a site-wide 404 with no explanation), and an
-`X-Forwarded-For` list is resolved to its last entry instead of being rejected.
+`websocket-lanes` — of which `https` and `https-lanes` are driveable by a
+released client today, while the two WebSocket carriers have not been verified
+against a shipping client, so the relay now names the affected profiles at
+start-up rather than letting a mode mismatch present as a healthy carrier that
+passes no data. The significant divergence from the reference relay is that
+streams are terminated **in-process**: instead of forwarding each demultiplexed
+stream to a stock MTProxy over loopback TCP, the bytes go straight into
+telemt's existing client pipeline, so fake-TLS handling, Middle-End routing,
+per-user limits, quotas, IP tracking, statistics and masking all apply to WEB
+clients unchanged, and two syscalls and two kernel copies per chunk disappear.
+The loopback backend remains available for deployments that want a separate
+MTProxy process. Alongside it, bridge capabilities are now derived for every
+secret form a WEB client can actually present — the plain 32-hex secret and its
+`dd` random-padding form — while `ee` fake-TLS secrets, which the carrier
+cannot carry and which clients refuse outright, are rejected at configuration
+load, the `Host` check normalises case and ports (so a CDN or front proxy no
+longer produces a site-wide 404 with no explanation), and an `X-Forwarded-For`
+list is resolved to its last entry instead of being rejected.
 
 ## Conformance and hardening
 
@@ -134,8 +137,8 @@ failed health probe is fatal.
   релея, поток завершается **внутри процесса**, а не пересылается стороннему
   MTProxy по loopback TCP, поэтому fake-TLS, Middle-End, лимиты, квоты,
   статистика и маскировка работают для WEB-клиентов без изменений.
-  Возможности (capabilities) выводятся для всех форм секрета, которые клиент
-  действительно может предъявить, включая `ee` с фронтящим доменом.
+  Capability выводятся для обеих форм секрета, которые принимает WEB-клиент
+  (обычная 32-hex и её `dd`-форма); секреты `ee` fake-TLS отвергаются.
 - **Соответствие протоколу и устойчивость**: любой отказ теперь неотличим от
   обычного «404» — и по телу ответа, и по времени, и по состоянию соединения;
   устранены два пути, по которым неаутентифицированный клиент мог достучаться до

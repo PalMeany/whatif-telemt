@@ -5,11 +5,15 @@
  - [Установка через Docker Compose](#telemt-через-docker-compose).
 
 > [!NOTE]
-> [!NOTE]
 >
 > Ссылки ниже ведут на `PalMeany/whatif-telemt`, где релизов пока нет,
-> поэтому `install.sh` и шаг с `wget` будут отдавать 404, пока релиз не выпущен.
-> До этого собирайте из исходников (`cargo build --release`).
+> поэтому `install.sh`, шаг с `wget` и оба варианта с Docker ниже будут отдавать
+> 404, пока релиз не выпущен: корневой `Dockerfile` (его же собирает
+> `docker-compose.yml`) скачивает тот же отсутствующий архив релиза.
+> До этого собирайте из исходников: `cargo build --release` или
+> `docker build -f contrib/web/Dockerfile.source -t whatif-telemt:local .`
+> (см. [Build](../../README.md#build) и
+> [There are no release downloads yet](../../README.md#there-are-no-release-downloads-yet)).
 
 # Очень быстрый старт
 
@@ -39,7 +43,7 @@ tg://proxy?server=IP&port=PORT&secret=SECRET
 
 ### Установка нужной версии
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- 3.3.39
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- 3.4.25.1w
 ```
 
 ### Удаление с полной очисткой
@@ -259,21 +263,21 @@ docker compose logs -f telemt
 docker compose down
 ```
 > [!NOTE]
-> - Директория `./config/` монтируется в `/etc/telemt/` (read-write), что позволяет API атомарно обновлять config.toml
+> - Директория `./config/` монтируется в `/etc/telemt/` (read-write), что позволяет API атомарно обновлять config.toml; контейнер запускается с единственным аргументом `/etc/telemt/config.toml`
 > - По умолчанию публикуются порты 443:443, а контейнер запускается со сброшенными привилегиями (добавлена только `NET_BIND_SERVICE`)  
-> - Если вам действительно нужна сеть хоста (обычно это требуется только для некоторых конфигураций IPv6), раскомментируйте `network_mode: host`
+> - Если вам действительно нужна сеть хоста (обычно это требуется только для некоторых конфигураций IPv6), не правьте файл, а добавьте оверлей: `docker compose -f docker-compose.yml -f docker-compose.host-netfilter.yml up -d --build`
 
 **Запуск без Docker Compose**
 ```bash
-docker build -t telemt:local .
+docker build -t telemt-release:local .
 docker run --name telemt --restart unless-stopped \
   -p 443:443 \
   -p 9090:9090 \
   -p 9091:9091 \
   -e RUST_LOG=info \
-  -v "$PWD/config.toml:/app/config.toml:ro" \
+  -v "$PWD/config/config.toml:/app/config.toml:ro" \
   --read-only \
   --cap-drop ALL --cap-add NET_BIND_SERVICE \
   --ulimit nofile=65536:65536 \
-  telemt:local
+  telemt-release:local
 ```

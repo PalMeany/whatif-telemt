@@ -13,7 +13,8 @@
 > `Hot-Reload` показывает, применяет ли config watcher изменение без перезапуска процесса; `✘` означает, что для runtime-эффекта нужен перезапуск.
 
 # Содержание
- - [Ключи верхнего уровня](#top-level-keys)
+ - [Ключи верхнего уровня](#ключи-верхнего-уровня)
+ - [logging](#logging)
  - [general](#general)
  - [general.modes](#generalmodes)
  - [general.links](#generallinks)
@@ -28,6 +29,7 @@
  - [censorship.tls_fetch](#censorshiptls_fetch)
  - [access](#access)
  - [upstreams](#upstreams)
+ - [web](#web)
 
 # Ключи верхнего уровня
 
@@ -35,12 +37,13 @@
 | --- | ---- | ------- | ---------- |
 | [`include`](#include) | `String` (специальная директива) | — | `✔` |
 | [`show_link`](#show_link) | `"*"` or `String[]` | `[]` (`ShowLink::None`) | `✘` |
+| [`logging`](#logging) | Таблица | значения по умолчанию | `✘` |
 | [`dc_overrides`](#dc_overrides) | `Map<String, String or String[]>` | `{}` | `✘` |
 | [`default_dc`](#default_dc) | `u8` | — (эффективный резервный вариант: `2` в ME маршрутизации) | `✘` |
 | [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
 | [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
 | [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
-| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"beobachten.txt"` | `✘` |
 
 ## include
   - **Ограничения / валидация**: значение должно быть одной строкой в виде `include = "path/to/file.toml"`. Значения параметра обрабатываются перед анализом TOML. Максимальное количество - 10.
@@ -83,6 +86,84 @@
     default_dc = 2
     ```
 
+# [logging]
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| [`destination`](#loggingdestination) | `"stderr"` / `"syslog"` / `"file"` | `"stderr"` | `✘` |
+| [`path`](#loggingpath) | `String` | — | `✘` |
+| [`rotation`](#loggingrotation) | `"never"` / `"minutely"` / `"hourly"` / `"daily"` / `"weekly"` | `"never"` | `✘` |
+| [`max_size_bytes`](#loggingmax_size_bytes) | `u64` | `0` | `✘` |
+| [`max_files`](#loggingmax_files) | `usize` | `0` | `✘` |
+| [`max_age_secs`](#loggingmax_age_secs) | `u64` | `0` | `✘` |
+
+## logging.destination
+  - **Ограничения / валидация**: допустимые значения — `stderr`, `syslog` или `file`. `syslog` поддерживается только на Unix-платформах. Для `file` требуется `logging.path`.
+  - **Описание**: выбирает назначение журнала во время работы. Флаги командной строки переопределяют это значение.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    ```
+## logging.path
+  - **Ограничения / валидация**: обязателен при `logging.destination = "file"`; не должен быть пустым.
+  - **Описание**: путь к файлу, используемому для журналирования в файл. При ротации по времени имя файла используется как префикс для ротируемых файлов.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    ```
+## logging.rotation
+  - **Ограничения / валидация**: допустимые значения — `never`, `minutely`, `hourly`, `daily` или `weekly`.
+  - **Описание**: интервал ротации файлов журнала по времени. `weekly` выполняет ротацию на границе воскресенья по UTC. При `never` запись идёт точно в `logging.path`, если не включена ротация по размеру.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    rotation = "daily"
+    ```
+## logging.max_size_bytes
+  - **Ограничения / валидация**: `0` отключает ротацию по размеру.
+  - **Описание**: выполняет ротацию файлового журнала перед записью следующей записи, если активный файл не пуст и эта запись превысила бы указанный предел в байтах. Записи пишутся целиком и не разбиваются.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    max_size_bytes = 104857600
+    ```
+## logging.max_files
+  - **Ограничения / валидация**: `0` отключает удержание по количеству файлов.
+  - **Описание**: хранит не более указанного числа подходящих файлов журнала, считая активный файл и ротированные архивы. Активный файл никогда не удаляется при очистке.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    rotation = "daily"
+    max_files = 14
+    ```
+## logging.max_age_secs
+  - **Ограничения / валидация**: `0` отключает удержание по возрасту.
+  - **Описание**: удаляет ротированные файлы журнала старше указанного числа секунд, ориентируясь на время изменения файла. Активный файл никогда не удаляется при очистке.
+  - **Пример**:
+
+    ```toml
+    [logging]
+    destination = "file"
+    path = "/var/log/telemt.log"
+    rotation = "daily"
+    max_age_secs = 1209600
+    ```
+
 # [general]
 
 
@@ -110,7 +191,7 @@
 | [`middle_proxy_warm_standby`](#middle_proxy_warm_standby) | `usize` | `16` | `✘` |
 | [`me_init_retry_attempts`](#me_init_retry_attempts) | `u32` | `0` | `✘` |
 | [`me2dc_fallback`](#me2dc_fallback) | `bool` | `true` | `✘` |
-| [`me2dc_fast`](#me2dc_fast) | `bool` | `false` | `✘` |
+| [`me2dc_fast`](#me2dc_fast) | `bool` | `true` | `✘` |
 | [`me_keepalive_enabled`](#me_keepalive_enabled) | `bool` | `true` | `✘` |
 | [`me_keepalive_interval_secs`](#me_keepalive_interval_secs) | `u64` | `8` | `✘` |
 | [`me_keepalive_jitter_secs`](#me_keepalive_jitter_secs) | `u64` | `2` | `✘` |
@@ -135,7 +216,7 @@
 | [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
 | [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
 | [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
-| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"beobachten.txt"` | `✘` |
 | [`hardswap`](#hardswap) | `bool` | `true` | `✔` |
 | [`me_warmup_stagger_enabled`](#me_warmup_stagger_enabled) | `bool` | `true` | `✘` |
 | [`me_warmup_step_delay_ms`](#me_warmup_step_delay_ms) | `u64` | `500` | `✘` |
@@ -1811,7 +1892,7 @@
 | [`client_mss_bulk`](#client_mss_bulk) | `String` | `""` | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | `false` | `✘` |
 | [`proxy_protocol_header_timeout_ms`](#proxy_protocol_header_timeout_ms) | `u64` | `500` | `✘` |
-| [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `[]` | `✘` |
+| [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `["0.0.0.0/0", "::/0"]` | `✘` |
 | [`metrics_port`](#metrics_port) | `u16` | — | `✘` |
 | [`metrics_listen`](#metrics_listen) | `String` | — | `✘` |
 | [`metrics_whitelist`](#metrics_whitelist) | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | `✘` |
@@ -2556,7 +2637,7 @@
 | [`tls_domains`](#tls_domains) | `String[]` | `[]` | `✘` |
 | [`unknown_sni_action`](#unknown_sni_action) | `"drop"`, `"mask"`, `"accept"`, `"reject_handshake"` | `"drop"` | `✘` |
 | [`tls_fetch_scope`](#tls_fetch_scope) | `String` | `""` | `✘` |
-| [`tls_fetch`](#tls_fetch) | `Table` | built-in defaults | `✘` |
+| [`tls_fetch`](#tls_fetch) | `Table` | встроенные значения | `✘` |
 | [`mask`](#mask) | `bool` | `true` | `✘` |
 | [`mask_host`](#mask_host) | `String` | — | `✘` |
 | [`mask_port`](#mask_port) | `u16` | `443` | `✘` |
@@ -2564,8 +2645,8 @@
 | [`fake_cert_len`](#fake_cert_len) | `usize` | `2048` | `✘` |
 | [`tls_emulation`](#tls_emulation) | `bool` | `true` | `✘` |
 | [`tls_front_dir`](#tls_front_dir) | `String` | `"tlsfront"` | `✘` |
-| [`server_hello_delay_min_ms`](#server_hello_delay_min_ms) | `u64` | `0` | `✘` |
-| [`server_hello_delay_max_ms`](#server_hello_delay_max_ms) | `u64` | `0` | `✘` |
+| [`server_hello_delay_min_ms`](#server_hello_delay_min_ms) | `u64` | `8` | `✘` |
+| [`server_hello_delay_max_ms`](#server_hello_delay_max_ms) | `u64` | `24` | `✘` |
 | [`tls_new_session_tickets`](#tls_new_session_tickets) | `u8` | `0` | `✘` |
 | [`tls_full_cert_ttl_secs`](#tls_full_cert_ttl_secs) | `u64` | `90` | `✘` |
 | [`serverhello_compact`](#serverhello_compact) | `bool` | `false` | `✘` |
@@ -2578,8 +2659,8 @@
 | [`mask_shape_above_cap_blur`](#mask_shape_above_cap_blur) | `bool` | `false` | `✘` |
 | [`mask_shape_above_cap_blur_max_bytes`](#mask_shape_above_cap_blur_max_bytes) | `usize` | `512` | `✘` |
 | [`mask_relay_max_bytes`](#mask_relay_max_bytes) | `usize` | `5242880` | `✘` |
-| [`mask_relay_timeout_ms`](mask_relay_timeout_ms) | `u64` | `60_000` | `✘` |
-| [`mask_relay_idle_timeout_ms`](mask_relay_idle_timeout_ms) | `u64` | `5_000` | `✘` |
+| [`mask_relay_timeout_ms`](#mask_relay_timeout_ms) | `u64` | `60_000` | `✘` |
+| [`mask_relay_idle_timeout_ms`](#mask_relay_idle_timeout_ms) | `u64` | `5_000` | `✘` |
 | [`mask_classifier_prefetch_timeout_ms`](#mask_classifier_prefetch_timeout_ms) | `u64` | `5` | `✘` |
 | [`mask_timing_normalization_enabled`](#mask_timing_normalization_enabled) | `bool` | `false` | `✘` |
 | [`mask_timing_normalization_floor_ms`](#mask_timing_normalization_floor_ms) | `u64` | `0` | `✘` |
@@ -2626,7 +2707,7 @@
     [censorship]
     tls_fetch_scope = "fetch"
     ```
-# censorship.tls_fetch
+## tls_fetch
   - **Ограничения / валидация**: Таблица, см. секцию `[censorship.tls_fetch]` ниже.
   - **Описание**: Настройки стратегии получения TLS-front метаданных (поведение загрузки и обновления bootstrap и данных эмуляции TLS)..
   - **Пример**:
@@ -3098,6 +3179,7 @@
 | Ключ | Тип | По умолчанию | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | [`users`](#users) | `Map<String, String>` | `{"default": "000…000"}` | `✔` |
+| [`user_enabled`](#user_enabled-1) | `Map<String, bool>` | `{}` | `✔` |
 | [`user_ad_tags`](#user_ad_tags) | `Map<String, String>` | `{}` | `✔` |
 | [`user_max_tcp_conns`](#user_max_tcp_conns) | `Map<String, usize>` | `{}` | `✔` |
 | [`user_max_tcp_conns_global_each`](#user_max_tcp_conns_global_each) | `usize` | `0` | `✔` |
@@ -3123,6 +3205,16 @@
     [access.users]
     alice = "00112233445566778899aabbccddeeff"
     bob   = "0123456789abcdef0123456789abcdef"
+    ```
+## user_enabled
+  - **Ограничения / валидация**: `Map<String, bool>`.
+  - **Описание**: Необязательные переопределения включённости для отдельных пользователей. Пользователи, отсутствующие в таблице, включены по умолчанию. Значение `false` запрещает новые сессии для этого пользователя; значение `true` принимается, но равносильно удалению переопределения. Операции включения через API удаляют переопределение, а операции отключения записывают `false`.
+  - **Поведение во время работы**: горячая перезагрузка применяет эту таблицу немедленно. Пользователи, отключённые через API или перезагрузку конфигурации, отклоняются после успешной аутентификации, а активные сессии этого имени пользователя отменяются.
+  - **Пример**:
+
+    ```toml
+    [access.user_enabled]
+    alice = false
     ```
 ## user_ad_tags
   - **Ограничения / валидация**: Каждое значение должно содержать **ровно 32 шестнадцатеричных символа** (тот же формат, что и в `general.ad_tag`). Тег со всеми нулями разрешен, но в логи будет записано предупреждение.
@@ -3488,3 +3580,37 @@
     username = "alice"
     password = "secret"
     ```
+
+# [web]
+
+WEB-транспорт прокси: MTProto, переносимый через принадлежащий приложению WebView
+поверх same-origin HTTPS- или WebSocket-носителя. По умолчанию выключен.
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `enabled` | `bool` | `false` | `✘` |
+| `hostname` | `String` (строчный ASCII/IDNA) | `""` | `✘` |
+| `listen` | `String` (`ip:port`) | `"127.0.0.1:8080"` | `✘` |
+| `admin_listen` | `String` (`ip:port`, `""` отключает) | `"127.0.0.1:8081"` | `✘` |
+| `public_dir` | `String` (путь) | — | `✘` |
+| `public_upstream` | `String` (`http://ip:port`) | — | `✘` |
+| `carrier_mode` | `"https" \| "https-lanes" \| "websocket" \| "websocket-lanes"` | `"https"` | `✔` |
+| `derive_user_profiles` | `bool` | `false` | `✔` |
+| `trusted_proxies` | `CIDR[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `limits` | Таблица | значения по умолчанию | `✘` |
+| `timeouts` | Таблица | значения по умолчанию | `✘` |
+| `profiles` | Массив таблиц | `[]` | `✔` |
+
+При `enabled = true` требуется ровно один из ключей `public_dir` и
+`public_upstream`. Профили доступа — производные от `[access.users]` и заданные
+в `[[web.profiles]]` — пересчитываются после перезагрузки конфигурации;
+слушатели, hostname и параметры публичного сайта читаются один раз при запуске.
+
+При `enabled = true` требуется хотя бы одно из двух: `[[web.profiles]]` или
+`derive_user_profiles = true`; конфигурация без того и другого отклоняется при
+запуске.
+
+Все ключи `[web.limits]`, `[web.timeouts]` и `[[web.profiles]]`, а также
+инструкции по развёртыванию и компромиссы режимов носителя описаны в документе
+[WEB proxy transport](../Advanced_settings/WEB_PROXY.en.md) (только на
+английском языке).

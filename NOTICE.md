@@ -91,8 +91,8 @@ project's source, pinned at revision `2873a08`:
   `<!--__PADDING__-->` node at `src/web/bridge.rs:502`. The embedded
   `<script>` span — 18,080 bytes, of which 18,044 bytes are JavaScript — matches
   exactly. Byte-identity is deliberate and enforced: `src/web/bridge.rs:126`
-  pins the SHA-256 of the template, the test at `src/web/bridge.rs:512-533`
-  fails the build on any drift, and `contrib/web/check-bridge-parity.sh`
+  pins the SHA-256 of the template, the test at `src/web/bridge.rs:511-530`
+  fails `cargo test` on any drift, and `contrib/web/check-bridge-parity.sh`
   re-verifies it against a checkout of the reference.
 - **Three string literals are copied verbatim**: the `Permissions-Policy` value
   at `src/web/bridge.rs:18` (408 bytes), the site

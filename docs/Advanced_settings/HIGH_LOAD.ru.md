@@ -26,7 +26,7 @@ LimitNOFILE=1048576
 LimitNPROC=65535
 TasksMax=infinity
 ```
-Если используется **Docker**, задайте `ulimits` в `docker-compose.yaml`:
+Если используется **Docker**, задайте `ulimits` в `docker-compose.yml`:
 ```yaml
 services:
   telemt:

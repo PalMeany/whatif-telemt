@@ -430,10 +430,12 @@ fn warn_on_unsupported_carrier(web: &WebConfig, profiles: &[Arc<WebProfile>]) {
 /// The carrier speaks plaintext HTTP/1.1 on purpose: TLS, ACME, and the
 /// publicly trusted certificate belong to the front proxy. Binding it to a
 /// public interface therefore puts the bridge capability and the session bearer
-/// on the wire in the clear. It is not refused outright, because a container
-/// deployment reaches the relay from a sibling container and must bind
-/// `0.0.0.0` to do so — but that is a decision an operator has to make on
-/// purpose, not one they discover from a cheerful "listener bound" line.
+/// on the wire in the clear. Configuration validation already refuses the
+/// indefensible combination — a non-loopback `listen` with no off-host
+/// `trusted_proxies` — so what reaches here is a container deployment that
+/// named its sibling and had to bind `0.0.0.0` to be reached. That is a
+/// decision an operator has to make on purpose, not one they discover from a
+/// cheerful "listener bound" line, so it still warns.
 fn warn_on_public_listener(address: SocketAddr) {
     if address.ip().is_loopback() {
         return;

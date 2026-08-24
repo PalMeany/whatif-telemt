@@ -205,8 +205,9 @@ probe the container images use.
 
 Every key is documented in
 [docs/Config_params/CONFIG_PARAMS.en.md](docs/Config_params/CONFIG_PARAMS.en.md),
-including the `[web]`, `[web.limits]`, `[web.timeouts]` and `[[web.profiles]]`
-sections added by this fork.
+including the `[web]` section added by this fork; the `[web.limits]`,
+`[web.timeouts]` and `[[web.profiles]]` keys are documented in
+[docs/Advanced_settings/WEB_PROXY.en.md](docs/Advanced_settings/WEB_PROXY.en.md).
 
 ## Documentation
 
@@ -269,7 +270,7 @@ concerning the original project to <https://github.com/telemt/telemt>.
 Patches should build, pass `cargo test`, be formatted with `cargo fmt`, and stay
 scoped to one change. Changes to the WEB transport must keep the bridge document
 byte-identical to the reference carrier — the pinned SHA-256 in
-`src/web/bridge.rs` fails the build otherwise.
+`src/web/bridge.rs` fails `cargo test` otherwise.
 
 Note what §6 of the licence does with a contribution: unless you state
 otherwise, submitting it licenses it under the same terms, and grants the rights

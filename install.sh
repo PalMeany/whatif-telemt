@@ -294,7 +294,7 @@ trap cleanup EXIT INT TERM
 show_help() {
     if [ "$LANG_CHOICE" = "ru" ]; then
         say "Использование: $0 [ <версия> | install | uninstall | purge ] [ опции ]"
-        say "  <версия>     Установить конкретную версию (например, 3.3.15, по умолчанию: latest)"
+        say "  <версия>     Установить конкретную версию (например, 3.4.25.1w, по умолчанию: latest)"
         say "  install      Установить последнюю версию"
         say "  uninstall    Удалить бинарный файл и службу"
         say "  purge        Полностью удалить вместе с конфигурацией, данными и пользователем"
@@ -307,7 +307,7 @@ show_help() {
         say "  -l, --lang   Выбрать язык вывода (1/en или 2/ru)"
     else
         say "Usage: $0 [ <version> | install | uninstall | purge ] [ options ]"
-        say "  <version>    Install specific version (e.g. 3.3.15, default: latest)"
+        say "  <version>    Install specific version (e.g. 3.4.25.1w, default: latest)"
         say "  install      Install the latest version"
         say "  uninstall    Remove the binary and service"
         say "  purge        Remove everything including configuration, data, and user"

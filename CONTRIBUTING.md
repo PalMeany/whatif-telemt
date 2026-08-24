@@ -20,7 +20,7 @@ Issues is **NOT** about:
 - ONLY signed and verified commits
 - ONLY from your name
 - DO NOT commit with `codex`, `claude`, or other AI tools as author/committer
-- PREFER `flow` branch for development, not `main`
+- PREFER a topic branch for development, not `main`
 
 ---
 

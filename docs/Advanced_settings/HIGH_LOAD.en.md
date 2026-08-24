@@ -26,7 +26,7 @@ LimitNOFILE=1048576
 LimitNPROC=65535
 TasksMax=infinity
 ```
-If using **Docker**, configure `ulimits` in `docker-compose.yaml`:
+If using **Docker**, configure `ulimits` in `docker-compose.yml`:
 ```yaml
 services:
   telemt:
@@ -104,8 +104,7 @@ For massive traffic loads, buffering Telemt behind a reverse proxy like HAProxy 
 global
     # Disable detailed logging under load
     log stdout format raw local0 err
-    # maxconn 250000
-    
+    maxconn 250000
     # Buffer tuning
     tune.bufsize 16384
     tune.maxaccept 64

@@ -104,10 +104,10 @@ fn warn_forwarded_chain() {
 
 /// True when the `Host` header names the configured public hostname.
 ///
-/// Host names are case-insensitive, may carry a trailing dot, and may carry any
-/// port when a front proxy or CDN reaches the origin on a non-standard one. All
-/// three are normalised away, because rejecting them produces a blanket 404
-/// that looks exactly like a misconfigured site.
+/// Host names are case-insensitive and may carry any port when a front proxy or
+/// CDN reaches the origin on a non-standard one. Both are normalised away,
+/// because rejecting them produces a blanket 404 that looks exactly like a
+/// misconfigured site; a trailing dot is not — see `request_host`.
 pub(crate) fn host_matches(headers: &HeaderMap<HeaderValue>, hostname: &str) -> bool {
     // More than one `Host` is a request-smuggling primitive and RFC 9112
     // forbids it outright, so it is refused before the value is even read.

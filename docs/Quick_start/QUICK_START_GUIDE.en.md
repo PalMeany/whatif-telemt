@@ -5,11 +5,15 @@ There are three options for installing Telemt:
  - [Installation using Docker Compose](#telemt-via-docker-compose).
 
 > [!NOTE]
-> [!NOTE]
 >
 > The download URLs below point at `PalMeany/whatif-telemt`, which has not
-> published a release yet, so `install.sh` and the `wget` step will 404 until one is tagged.
-> Build from source until then (`cargo build --release`).
+> published a release yet, so `install.sh`, the `wget` step, and both Docker
+> routes below will 404 until one is tagged — the root `Dockerfile` (which
+> `docker-compose.yml` also builds) downloads the same missing release archive.
+> Build from source until then: `cargo build --release`, or
+> `docker build -f contrib/web/Dockerfile.source -t whatif-telemt:local .`
+> (see [Build](../../README.md#build) and
+> [There are no release downloads yet](../../README.md#there-are-no-release-downloads-yet)).
 
 # Very quick start
 
@@ -40,7 +44,7 @@ tg://proxy?server=IP&port=PORT&secret=SECRET
 
 ### Installing a specific version
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- 3.3.39
+curl -fsSL https://raw.githubusercontent.com/PalMeany/whatif-telemt/main/install.sh | sh -s -- 3.4.25.1w
 ```
 
 ### Uninstall with full cleanup
@@ -244,7 +248,10 @@ curl -s http://127.0.0.1:9091/v1/users | jq -r '.data[] | "[\(.username)]", (.li
 
 # Telemt via Docker Compose
 
-**1. Edit `config.toml` in repo root (at least: port, users secrets, tls_domain)**  
+**1. Create a `config/` directory and put your edited `config.toml` in it (at least: port, users secrets, tls_domain):**
+```bash
+mkdir config && mv config.toml config/
+```
 **2. Start container:**
 ```bash
 docker compose up -d --build
@@ -258,34 +265,21 @@ docker compose logs -f telemt
 docker compose down
 ```
 > [!NOTE]
-> - `docker-compose.yml` maps `./config.toml` to `/app/config.toml` (read-only)
+> - `./config/` is mounted at `/etc/telemt/` (read-write), so the Control API can rewrite config.toml with atomic `tmp + rename` writes; the container is started with `/etc/telemt/config.toml` as its only argument
 > - By default it publishes `443:443` and runs with dropped capabilities (only `NET_BIND_SERVICE` is added)
-> - If you really need host networking (usually only for some IPv6 setups) uncomment `network_mode: host`
-> - If you enable mutating Control API endpoints, mount a writable config directory instead of a single `config.toml` file. Telemt persists config changes with atomic `tmp + rename` writes, and a single bind-mounted file can fail with `Device or resource busy`.
-
-Example writable config mount for Control API mutations:
-```yaml
-services:
-  telemt:
-    working_dir: /run/telemt
-    volumes:
-      - ./config:/etc/telemt:rw
-    tmpfs:
-      - /run/telemt:rw,mode=1777,size=4m
-    command: /usr/local/bin/telemt /etc/telemt/config.toml
-```
+> - If you really need host networking (usually only for some IPv6 setups), add the overlay instead of editing the file: `docker compose -f docker-compose.yml -f docker-compose.host-netfilter.yml up -d --build`
 
 **Run without Compose**
 ```bash
-docker build -t telemt:local .
+docker build -t telemt-release:local .
 docker run --name telemt --restart unless-stopped \
   -p 443:443 \
   -p 9090:9090 \
   -p 9091:9091 \
   -e RUST_LOG=info \
-  -v "$PWD/config.toml:/app/config.toml:ro" \
+  -v "$PWD/config/config.toml:/app/config.toml:ro" \
   --read-only \
   --cap-drop ALL --cap-add NET_BIND_SERVICE \
   --ulimit nofile=65536:65536 \
-  telemt:local
+  telemt-release:local
 ```

@@ -210,10 +210,11 @@ telemt [run|start|stop|reload|status] [OPTIONS] [config.toml]
 используют контейнерные образы.
 
 Все параметры описаны в
-[docs/Config_params/CONFIG_PARAMS.en.md](docs/Config_params/CONFIG_PARAMS.en.md),
-включая секции `[web]`, `[web.limits]`, `[web.timeouts]` и `[[web.profiles]]`,
-добавленные этим форком. Русский перевод справочника унаследован от вышестоящего
-проекта и секции `[web]` не содержит.
+[docs/Config_params/CONFIG_PARAMS.ru.md](docs/Config_params/CONFIG_PARAMS.ru.md),
+включая добавленную этим форком секцию `[web]`. Ключи `[web.limits]`,
+`[web.timeouts]` и `[[web.profiles]]` разобраны подробно в
+[docs/Advanced_settings/WEB_PROXY.en.md](docs/Advanced_settings/WEB_PROXY.en.md)
+— этот документ пока существует только на английском.
 
 ## Документация
 
@@ -278,7 +279,7 @@ Issue и pull request по этому форку — в этот репозит�
 Патч должен собираться, проходить `cargo test`, быть отформатирован
 `cargo fmt` и содержать одно изменение. Правки в транспорте WEB обязаны
 сохранять документ моста побайтово идентичным эталонному носителю: закреплённая
-сумма SHA-256 в `src/web/bridge.rs` иначе роняет сборку.
+сумма SHA-256 в `src/web/bridge.rs` иначе роняет `cargo test`.
 
 Учитывайте, что делает с вкладом §6 лицензии: если вы явно не заявите иного,
 отправляя вклад, вы лицензируете его на тех же условиях и предоставляете

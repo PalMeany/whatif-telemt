@@ -13,7 +13,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 > `Hot-Reload` zeigt an, ob ein geänderter Wert vom Config-Watcher ohne Prozessneustart übernommen wird; `✘` bedeutet, dass für den Runtime-Effekt ein Neustart erforderlich ist.
 
 # Inhaltsverzeichnis
- - [Schlüssel auf oberster Ebene](#top-level-keys)
+ - [Schlüssel auf oberster Ebene](#schlüssel-auf-oberster-ebene)
  - [logging](#logging)
  - [general](#general)
  - [general.modes](#generalmodes)
@@ -29,6 +29,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
  - [censorship.tls_fetch](#censorshiptls_fetch)
  - [access](#access)
  - [upstreams](#upstreams)
+ - [web](#web)
 
 # Schlüssel auf oberster Ebene
 
@@ -42,7 +43,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 | [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
 | [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
 | [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
-| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"beobachten.txt"` | `✘` |
 
 ## include
   - **Einschränkungen / Validierung**: Muss eine einzeilige Direktive in der Form `include = "path/to/file.toml"` sein. Includes werden vor dem Parsen von TOML erweitert. Die maximale Einschlusstiefe beträgt 10.
@@ -190,7 +191,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 | [`middle_proxy_warm_standby`](#middle_proxy_warm_standby) | `usize` | `16` | `✘` |
 | [`me_init_retry_attempts`](#me_init_retry_attempts) | `u32` | `0` | `✘` |
 | [`me2dc_fallback`](#me2dc_fallback) | `bool` | `true` | `✘` |
-| [`me2dc_fast`](#me2dc_fast) | `bool` | `false` | `✘` |
+| [`me2dc_fast`](#me2dc_fast) | `bool` | `true` | `✘` |
 | [`me_keepalive_enabled`](#me_keepalive_enabled) | `bool` | `true` | `✘` |
 | [`me_keepalive_interval_secs`](#me_keepalive_interval_secs) | `u64` | `8` | `✘` |
 | [`me_keepalive_jitter_secs`](#me_keepalive_jitter_secs) | `u64` | `2` | `✘` |
@@ -215,7 +216,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 | [`beobachten`](#beobachten) | `bool` | `true` | `✘` |
 | [`beobachten_minutes`](#beobachten_minutes) | `u64` | `10` | `✘` |
 | [`beobachten_flush_secs`](#beobachten_flush_secs) | `u64` | `15` | `✘` |
-| [`beobachten_file`](#beobachten_file) | `String` | `"cache/beobachten.txt"` | `✘` |
+| [`beobachten_file`](#beobachten_file) | `String` | `"beobachten.txt"` | `✘` |
 | [`hardswap`](#hardswap) | `bool` | `true` | `✔` |
 | [`me_warmup_stagger_enabled`](#me_warmup_stagger_enabled) | `bool` | `true` | `✘` |
 | [`me_warmup_step_delay_ms`](#me_warmup_step_delay_ms) | `u64` | `500` | `✘` |
@@ -1889,7 +1890,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
 | [`client_mss_bulk`](#client_mss_bulk) | `String` | `""` | `✘` |
 | [`proxy_protocol`](#proxy_protocol) | `bool` | `false` | `✘` |
 | [`proxy_protocol_header_timeout_ms`](#proxy_protocol_header_timeout_ms) | `u64` | `500` | `✘` |
-| [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `[]` | `✘` |
+| [`proxy_protocol_trusted_cidrs`](#proxy_protocol_trusted_cidrs) | `IpNetwork[]` | `["0.0.0.0/0", "::/0"]` | `✘` |
 | [`metrics_port`](#metrics_port) | `u16` | — | `✘` |
 | [`metrics_listen`](#metrics_listen) | `String` | — | `✘` |
 | [`metrics_whitelist`](#metrics_whitelist) | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | `✘` |
@@ -2638,8 +2639,8 @@ Hinweis: Dieser Abschnitt akzeptiert auch den Legacy-Alias `[server.admin_api]` 
 | [`fake_cert_len`](#fake_cert_len) | `usize` | `2048` | `✘` |
 | [`tls_emulation`](#tls_emulation) | `bool` | `true` | `✘` |
 | [`tls_front_dir`](#tls_front_dir) | `String` | `"tlsfront"` | `✘` |
-| [`server_hello_delay_min_ms`](#server_hello_delay_min_ms) | `u64` | `0` | `✘` |
-| [`server_hello_delay_max_ms`](#server_hello_delay_max_ms) | `u64` | `0` | `✘` |
+| [`server_hello_delay_min_ms`](#server_hello_delay_min_ms) | `u64` | `8` | `✘` |
+| [`server_hello_delay_max_ms`](#server_hello_delay_max_ms) | `u64` | `24` | `✘` |
 | [`tls_new_session_tickets`](#tls_new_session_tickets) | `u8` | `0` | `✘` |
 | [`tls_full_cert_ttl_secs`](#tls_full_cert_ttl_secs) | `u64` | `90` | `✘` |
 | [`serverhello_compact`](#serverhello_compact) | `bool` | `false` | `✘` |
@@ -3572,3 +3573,39 @@ Wenn Backend oder Netzwerk stark bandbreitenbeschränkt sind, reduzieren Sie zue
     username = "alice"
     password = "secret"
     ```
+
+# [web]
+
+WEB-Proxy-Transport: MTProto, das über eine app-eigene WebView auf einem
+Same-Origin-HTTPS- oder -WebSocket-Träger transportiert wird. Standardmäßig
+deaktiviert.
+
+| Schlüssel | Typ | Default | Hot-Reload |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `false` | `✘` |
+| `hostname` | `String` (kleingeschriebenes ASCII/IDNA) | `""` | `✘` |
+| `listen` | `String` (`ip:port`) | `"127.0.0.1:8080"` | `✘` |
+| `admin_listen` | `String` (`ip:port`, `""` deaktiviert) | `"127.0.0.1:8081"` | `✘` |
+| `public_dir` | `String` (Pfad) | — | `✘` |
+| `public_upstream` | `String` (`http://ip:port`) | — | `✘` |
+| `carrier_mode` | `"https" \| "https-lanes" \| "websocket" \| "websocket-lanes"` | `"https"` | `✔` |
+| `derive_user_profiles` | `bool` | `false` | `✔` |
+| `trusted_proxies` | `CIDR[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `limits` | Tabelle | Default-Werte | `✘` |
+| `timeouts` | Tabelle | Default-Werte | `✘` |
+| `profiles` | Array von Tabellen | `[]` | `✔` |
+
+Bei `enabled = true` ist genau einer der Schlüssel `public_dir` und
+`public_upstream` erforderlich. Capability-Profile — aus `[access.users]`
+abgeleitet und in `[[web.profiles]]` deklariert — werden nach einem
+Konfigurations-Reload neu abgeleitet; Listener, Hostname und die Einstellungen
+der öffentlichen Website werden einmalig beim Start gelesen.
+
+Bei `enabled = true` ist mindestens eines von beidem erforderlich:
+`[[web.profiles]]` oder `derive_user_profiles = true`; eine Konfiguration ohne
+beides wird beim Start abgelehnt.
+
+Jeder Schlüssel von `[web.limits]`, `[web.timeouts]` und `[[web.profiles]]`
+sowie die Deployment-Anleitung und die Abwägungen zwischen den Träger-Modi sind
+in [WEB proxy transport](../Advanced_settings/WEB_PROXY.en.md) dokumentiert (nur
+auf Englisch).

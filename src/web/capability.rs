@@ -61,9 +61,10 @@ pub(crate) fn token_hash(token: &[u8; TOKEN_BYTES]) -> [u8; 32] {
 
 /// Decodes an MTProxy secret in hex or base64url form.
 ///
-/// Accepts 16 raw bytes, or 17 bytes when the leading `dd` random-padding byte
-/// is retained. `ee` fake-TLS secrets are accepted with the same 17-byte shape
-/// because a client may derive its capability from the secret it was given.
+/// Accepts 16 raw bytes, or 17 bytes only when the leading byte is the `dd`
+/// random-padding marker. `ee` fake-TLS secrets are refused: a WEB client
+/// rejects them client-side, so a capability derived from one could never be
+/// presented.
 pub(crate) fn decode_secret(value: &str) -> Result<Vec<u8>, &'static str> {
     const INVALID: &str = "secret must decode to 16 bytes, optionally prefixed with dd";
     let value = value.trim();

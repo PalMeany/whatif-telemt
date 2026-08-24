@@ -15,12 +15,12 @@ If telemt is already installed and running, skip to step 5.
 
 ## Quick path
 
-[`install-web.sh`](../../install-web.sh) automates steps 2-9 of this runbook on a
+[`install-web.sh`](../../install-web.sh) automates steps 2-10 of this runbook on a
 clean Debian or Ubuntu host and prints the credentials and the bridge URL at the
 end:
 
 ```bash
-git clone https://gitlab.corp.alterra.host/nuvira-backend/telemt-webp.git /usr/local/src/telemt
+git clone https://github.com/PalMeany/whatif-telemt.git /usr/local/src/telemt
 cd /usr/local/src/telemt
 ./install-web.sh --hostname proxy.example.com --site /path/to/your/site
 ```
@@ -29,7 +29,7 @@ It refuses to guess at anything that matters: it will not invent a public site,
 will not overwrite an existing configuration, and will not run without a
 hostname that is already canonical. Read the rest of this document before
 trusting a host to it — everything the script writes is described below, and
-steps 0, 1, and 10 onwards are still yours to do.
+steps 0, 1, 5 and 11 onwards are still yours to do.
 
 ## 0. Port layout — decide this first
 
@@ -87,7 +87,7 @@ apt update && apt install -y build-essential pkg-config git curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 . "$HOME/.cargo/env"
 
-git clone https://gitlab.corp.alterra.host/nuvira-backend/telemt-webp.git /usr/local/src/telemt
+git clone https://github.com/PalMeany/whatif-telemt.git /usr/local/src/telemt
 cd /usr/local/src/telemt
 cargo build --release --locked          # release profile uses fat LTO: several minutes
 ```
@@ -97,8 +97,8 @@ The binary lands at `target/release/telemt`.
 **Or build elsewhere and copy** — the toolchain must target the server's libc:
 
 ```bash
-docker build -f contrib/web/Dockerfile.source -t telemt-webp:local .
-docker create --name extract telemt-webp:local && \
+docker build -f contrib/web/Dockerfile.source -t whatif-telemt:local .
+docker create --name extract whatif-telemt:local && \
   docker cp extract:/app/telemt ./telemt && docker rm extract
 scp telemt root@YOUR_SERVER:/tmp/telemt
 ```
@@ -465,7 +465,7 @@ anyone reading the reference's own documentation alongside this runbook.
 | Difference | Why |
 |---|---|
 | A `websocket-lanes` session may hold twice `max_streams_per_session` lanes, and a lane past the stream ceiling gets a per-stream `CLOSE` instead of a refused upgrade | the reference's refused upgrade is fatal for the whole bridge; a `CLOSE` is a failure every client already handles |
-| `Host` matching ignores case, a trailing dot, and any port | the reference is byte-exact on `hostname` or `hostname:443`, which 404s everything behind a non-443 origin port or a `Host`-rewriting CDN |
+| `Host` matching ignores case and any port, but not a trailing dot, and a duplicated `Host` header is refused | the reference is byte-exact on `hostname` or `hostname:443`, which 404s everything behind a non-443 origin port or a `Host`-rewriting CDN; `hostname.` is a distinct name no browser sends, and two `Host` headers are a request-smuggling primitive |
 | The bridge page carries a variable-length padding comment | without it `GET /` is the same length on every deployment, so its `Content-Length` alone separates a bridge fetch from an index fetch |
 | The downlink long poll is jittered | an idle carrier otherwise polls on an exact 25 s period forever; the jitter only ever shortens the park, so no client deadline moves |
 | Per-address ceilings count an IPv6 client per `/64` | a subscriber is routinely handed a whole `/64`, so exact-address keying would make those ceilings decorative; both are off by default |
