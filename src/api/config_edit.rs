@@ -6,8 +6,8 @@ use toml::Value as Toml;
 
 use super::ApiShared;
 use super::config_store::{
-    EDITABLE_SECTIONS, compute_revision, current_revision, load_config_for_reload,
-    load_config_from_disk, save_sections_to_disk,
+    EDITABLE_SECTIONS, current_revision, load_config_for_reload, load_config_from_disk,
+    save_sections_to_disk,
 };
 use super::model::ApiFailure;
 use crate::config::ProxyConfig;
