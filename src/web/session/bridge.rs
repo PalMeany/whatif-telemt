@@ -127,6 +127,7 @@ impl AsyncRead for StreamBridge {
         if copied == 0 {
             return Poll::Ready(Ok(()));
         }
+        this.session.count_stream_up(copied);
         let release_cost = copied + completed * QUEUE_ITEM_COST;
         this.session
             .release_pending_locked(&mut state, PendingCharge::data(release_cost, completed));
@@ -228,6 +229,7 @@ impl AsyncWrite for StreamBridge {
         if let Some(stream) = state.streams.get_mut(&this.id) {
             stream.send_credit -= allowance as u64;
         }
+        this.session.count_stream_down(allowance);
         Poll::Ready(Ok(allowance))
     }
 

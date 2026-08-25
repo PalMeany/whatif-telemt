@@ -324,17 +324,44 @@ The same counters appear on telemt's main metrics endpoint under the
 `backend_dials_in_flight`, `pending_bytes`, `pending_items`,
 `sessions_created_total`, `sessions_closed_total`, `streams_opened_total`,
 `streams_rejected_total`, `backend_dial_failures_total`, `bytes_up_total`,
-`bytes_down_total`, `limit_hits_total`, `carrier_connections_dropped_total`,
-`request_timeouts_total`, and `retry_later_responses_total`.
+`bytes_down_total`, `bridge_pages_served_total`, `stream_bytes_up_total`,
+`stream_bytes_down_total`, `limit_hits_total`,
+`carrier_connections_dropped_total`, `request_timeouts_total`, and
+`retry_later_responses_total`.
 
-The last three are the ones worth alerting on: every other failure is answered
-with the site's ordinary 404 by design, so they are the only externally visible
-signal that the relay is refusing work.
+`carrier_connections_dropped_total`, `request_timeouts_total`, and
+`retry_later_responses_total` are the ones worth alerting on: every other
+failure is answered with the site's ordinary 404 by design, so they are the only
+externally visible signal that the relay is refusing work.
 `carrier_connections_dropped_total` rises when the accept-loop budget is full,
 `request_timeouts_total` when a request overran the relay's own deadline, and
 `retry_later_responses_total` when a queue budget or a capacity ceiling handed a
 client a 503. Protocol, authentication, and budget refusals are logged at
 `debug` level with the session id and profile name.
+
+### Diagnosing a carrier that looks healthy
+
+Three counters have no reference counterpart. They exist because the failures
+this guide warns about — a mode no WEB client can speak, a secret in a form the
+client will not accept, a front proxy the WebView cannot get through — all leave
+the relay reporting a perfectly healthy carrier.
+
+- `bridge_pages_served_total` counts pages rendered for a matching capability.
+  Compare it with `sessions_created_total`. Pages served with no sessions
+  created means clients resolved the capability and loaded the bridge, then
+  never reached the carrier: TLS, the front proxy, or the navigation itself.
+  Neither counter moving means no client is presenting a capability at all —
+  a wrong hostname, a wrong secret, or a stale link.
+- `stream_bytes_up_total` and `stream_bytes_down_total` count MTProto payload
+  crossing the backend boundary, where `bytes_up_total` and `bytes_down_total`
+  count carrier bodies and therefore keep rising for framing, WINDOW grants,
+  and empty polls alone. Sessions and streams climbing while the payload
+  counters stay near zero is the signature of streams that are being refused:
+  check `general.modes` (a WEB client needs `classic` or `secure`; `tls` does
+  not help) and `telemt_connections_bad_by_class_total`, whose
+  `direct_modes_disabled` and `direct_mtproto_bad_client` classes name the
+  reason — though that series also counts direct TCP clients, so read it as
+  corroboration rather than as a WEB-only signal.
 
 Because the session bearer travels in a request header on the WebSocket
 upgrade, never enable header logging on the front proxy or on telemt.

@@ -299,6 +299,27 @@ impl Manager {
             .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Counts one bridge page rendered for a matching capability.
+    pub(crate) fn count_bridge_page(&self) {
+        self.metrics
+            .bridge_pages_served
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Counts MTProto payload handed to a backend.
+    pub(crate) fn count_stream_bytes_up(&self, bytes: usize) {
+        self.metrics
+            .stream_bytes_up
+            .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Counts MTProto payload taken from a backend.
+    pub(crate) fn count_stream_bytes_down(&self, bytes: usize) {
+        self.metrics
+            .stream_bytes_down
+            .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Counts a carrier connection refused by the accept-loop budget.
     pub(crate) fn count_carrier_connection_dropped(&self) {
         self.metrics

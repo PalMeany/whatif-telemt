@@ -644,3 +644,131 @@ async fn a_malformed_hello_is_refused_without_consuming_the_bootstrap() {
     assert_eq!(body, frame::encode(FrameType::WELCOME, 0, &[]));
     assert!(header_value(&headers, "x-session-token").is_some());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_rendered_bridge_page_is_counted() {
+    use crate::web::metrics::WebMetricsSource;
+
+    // The counter exists to be read against sessions_created_total: a gap
+    // between them is a client that loaded the bridge and never reached the
+    // carrier. That only holds if an ordinary visit never moves it.
+    let fixture = start_fixture(CarrierMode::Https).await;
+    assert_eq!(fixture.manager.snapshot().bridge_pages_served, 0);
+
+    let (status, _, _) = http_request(fixture.address, &get("/")).await;
+    assert_eq!(status, 200);
+    let (status, _, _) = http_request(
+        fixture.address,
+        &get(&format!("/?bridge={}", encode_token(&[7u8; 32]))),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(fixture.manager.snapshot().bridge_pages_served, 0);
+
+    let (status, _, body) = http_request(fixture.address, &get(&bridge_url())).await;
+    assert_eq!(status, 200);
+    assert!(!body.is_empty());
+    assert_eq!(fixture.manager.snapshot().bridge_pages_served, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn payload_counters_move_only_for_stream_bytes() {
+    use crate::web::metrics::WebMetricsSource;
+
+    // bytes_* counts carrier bodies, so it moves for framing and for polls
+    // that carried nothing. stream_bytes_* must move only for the MTProto
+    // payload that actually crossed the backend boundary.
+    let fixture = start_fixture(CarrierMode::Https).await;
+    let (_, headers, page) = http_request(fixture.address, &get(&bridge_url())).await;
+    assert_eq!(header_value(&headers, "x-carrier-mode"), None);
+    let bootstrap = bootstrap_from_page(&page);
+
+    let (status, headers, _) = http_request(
+        fixture.address,
+        &post(
+            "/api/v1/session",
+            &[
+                ("Authorization", &format!("Bearer {bootstrap}")),
+                ("Content-Type", "application/octet-stream"),
+            ],
+            &frame::encode(FrameType::HELLO, 0, &[1]),
+        ),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let token = header_value(&headers, "x-session-token")
+        .expect("session token")
+        .to_string();
+
+    // A session exists and its creation moved no payload at all.
+    let before = fixture.manager.snapshot();
+    assert_eq!(before.stream_bytes_up, 0);
+    assert_eq!(before.stream_bytes_down, 0);
+
+    let payload = b"web payload".to_vec();
+    let uplink = batch(&[
+        (FrameType::OPEN, 1, Vec::new()),
+        (FrameType::DATA, 1, payload.clone()),
+    ]);
+    let (status, _, _) = http_request(
+        fixture.address,
+        &post(
+            "/api/v1/up",
+            &[
+                ("Authorization", &format!("Bearer {token}")),
+                ("Content-Type", "application/octet-stream"),
+                ("X-Up-Seq", "1"),
+            ],
+            &uplink,
+        ),
+    )
+    .await;
+    assert_eq!(status, 204);
+
+    // The echo backend returns the same bytes, so both directions must land on
+    // exactly the payload length once the poll has drained them.
+    let mut echoed = Vec::new();
+    let mut cursor = 0u64;
+    for _ in 0..40 {
+        let (status, headers, body) = http_request(
+            fixture.address,
+            &post(
+                "/api/v1/down",
+                &[
+                    ("Authorization", &format!("Bearer {token}")),
+                    ("X-Down-Cursor", &cursor.to_string()),
+                ],
+                &[],
+            ),
+        )
+        .await;
+        cursor = header_value(&headers, "x-down-cursor")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(cursor);
+        if status == 200 {
+            echoed.extend_from_slice(&data_payloads(&body, 1));
+        }
+        if echoed.len() >= payload.len() {
+            break;
+        }
+    }
+    assert_eq!(echoed, payload);
+
+    let after = fixture.manager.snapshot();
+    assert_eq!(after.stream_bytes_up, payload.len() as u64);
+    assert_eq!(after.stream_bytes_down, payload.len() as u64);
+    // The carrier moved strictly more than the payload: frame headers, the
+    // OPEN, and the WINDOW grant all count there and nowhere else.
+    assert!(
+        after.bytes_up > after.stream_bytes_up,
+        "carrier uplink {} must exceed payload {}",
+        after.bytes_up,
+        after.stream_bytes_up
+    );
+    assert!(
+        after.bytes_down > after.stream_bytes_down,
+        "carrier downlink {} must exceed payload {}",
+        after.bytes_down,
+        after.stream_bytes_down
+    );
+}

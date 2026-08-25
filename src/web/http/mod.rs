@@ -247,6 +247,7 @@ impl Relay {
         let Some(page) = page else {
             return RootOutcome::Suppressed;
         };
+        self.manager.count_bridge_page();
         let mut response = Response::new(full(Bytes::from(page.body)));
         let response_headers = response.headers_mut();
         insert(response_headers, "content-type", "text/html; charset=utf-8");
