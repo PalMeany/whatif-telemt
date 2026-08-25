@@ -182,7 +182,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/*
+          # Only the archive and its checksum. `dist/` also holds the bare
+          # `telemt` binary this job just tarred; uploading that too makes all
+          # six build jobs contribute a file called `telemt`, which the release
+          # job's flatten step collapses into one arbitrary architecture
+          # published under a name that says nothing about which.
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
 
   # ==========================
   # MUSL
@@ -236,12 +243,19 @@ jobs:
 
           TOOLCHAIN_DIR="$HOME/.musl-aarch64"
           ARCHIVE="aarch64-linux-musl-cross.tgz"
-          # This is the stock musl.cc cross toolchain, not project code. It is
-          # fetched from this repository's own `toolchains` release when one
-          # exists, because musl.cc has a long history of being unreachable;
-          # musl.cc itself is the fallback so a fresh fork builds before anyone
-          # has mirrored anything. To self-host it, upload the archive to a
-          # release tagged `toolchains` on this repository.
+          # This is the stock musl.cc cross toolchain, not project code.
+          #
+          # The mirror in this repository's own `toolchains` release is the
+          # primary source and has to stay that way: musl.cc is not reachable
+          # from GitHub-hosted runners (the 3.4.25.1w run timed out against it
+          # on every one of six retries), which is why the archive is mirrored
+          # here at all. musl.cc is kept only as a last resort for a fork that
+          # has not mirrored it yet.
+          #
+          # The mirrored archive is byte-identical to musl.cc's:
+          #   sha256 c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38
+          # To re-create it on a new fork, download that file and upload it to a
+          # release tagged `toolchains`.
           SOURCES=(
             "https://github.com/${GITHUB_REPOSITORY}/releases/download/toolchains/${ARCHIVE}"
             "https://musl.cc/${ARCHIVE}"
@@ -340,7 +354,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
-          path: dist/*
+          # Only the archive and its checksum. `dist/` also holds the bare
+          # `telemt` binary this job just tarred; uploading that too makes all
+          # six build jobs contribute a file called `telemt`, which the release
+          # job's flatten step collapses into one arbitrary architecture
+          # published under a name that says nothing about which.
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
 
   # ==========================
   # Release
