@@ -10,5 +10,6 @@ mod web;
 mod tests;
 
 pub use load::ProxyConfig;
+pub(crate) use load::{ConfigSourceGraph, LoadedConfig};
 pub use types::*;
 pub use web::*;

@@ -263,7 +263,9 @@ pub(super) async fn read_managed_config(config_path: &Path) -> Result<(Toml, Str
         }
     }
 
-    let revision = compute_revision(&original);
+    // 3.5.x revisions are include-graph aware, so this must agree with
+    // `config_store::current_revision` rather than hash the owner file alone.
+    let revision = current_revision(config_path).await?;
     Ok((Toml::Table(table), revision))
 }
 

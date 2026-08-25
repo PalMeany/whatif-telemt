@@ -249,7 +249,9 @@ fn light_fuzz_tiny_frame_debt_model_stays_within_bounds() {
         if closed_at.is_none() {
             assert!(debt < TINY_FRAME_DEBT_LIMIT);
         }
-        assert!(debt <= u32::MAX);
+        // `debt` is a u32, so its range is the assertion; keep the intent
+        // documented without a comparison clippy proves vacuous.
+        let _: u32 = debt;
     }
 }
 

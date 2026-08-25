@@ -28,7 +28,8 @@ mod unix;
 pub(crate) use unix::spawn_unix_accept_loop;
 
 pub(crate) struct BoundListeners {
-    pub(crate) listeners: Vec<(TcpListener, bool)>,
+    /// Bound socket, its PROXY-protocol flag, and its TLS response fragment size.
+    pub(crate) listeners: Vec<(TcpListener, bool, Option<u16>)>,
     #[cfg(unix)]
     pub(crate) unix_listener: Option<UnixListener>,
 }
@@ -44,6 +45,24 @@ fn default_link_port(config: &ProxyConfig) -> u16 {
         .first()
         .and_then(|listener| listener.port)
         .unwrap_or(config.server.port)
+}
+
+/// Splits the configured client MSS pair into the listener MSS and the TLS
+/// response fragment size (3.5.x `server.client_mss_bulk`).
+///
+/// Linux-only: it is the only platform where the listener MSS is settable per
+/// socket, so elsewhere the handshake value is applied as-is and nothing is
+/// fragmented.
+#[cfg(any(target_os = "linux", test))]
+fn tcp_mss_runtime_profile(
+    handshake_mss: Option<u16>,
+    bulk_mss: Option<u16>,
+) -> (Option<u16>, Option<u16>) {
+    match (handshake_mss, bulk_mss) {
+        (Some(fragment_size), Some(listener_mss)) => (Some(listener_mss), Some(fragment_size)),
+        (listener_mss, None) => (listener_mss, None),
+        (None, Some(_)) => (None, None),
+    }
 }
 
 fn mss_segment_multiplier(client_mss: u16) -> u16 {
@@ -78,7 +97,7 @@ pub(crate) async fn bind_listeners(
             warn!(%addr, "Skipping IPv6 listener: IPv6 disabled by [network]");
             continue;
         }
-        let client_mss = match listener_conf.effective_client_mss(&config.server) {
+        let configured_client_mss = match listener_conf.effective_client_mss(&config.server) {
             Ok(value) => value,
             Err(error) => {
                 warn!(
@@ -89,6 +108,23 @@ pub(crate) async fn bind_listeners(
                 None
             }
         };
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+        let bulk_client_mss = match config.server.client_mss_bulk_value() {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Invalid server.client_mss_bulk after config validation; ignoring"
+                );
+                None
+            }
+        };
+        #[cfg(target_os = "linux")]
+        let (client_mss, tls_response_fragment_size) =
+            tcp_mss_runtime_profile(configured_client_mss, bulk_client_mss);
+        #[cfg(not(target_os = "linux"))]
+        let (client_mss, tls_response_fragment_size): (Option<u16>, Option<u16>) =
+            (configured_client_mss, None);
         let options = ListenOptions {
             reuse_port: listener_conf.reuse_allow,
             ipv6_only: listener_conf.ip.is_ipv6(),
@@ -136,7 +172,11 @@ pub(crate) async fn bind_listeners(
                     print_proxy_links(&public_host, link_port, config);
                 }
 
-                listeners.push((listener, listener_proxy_protocol));
+                listeners.push((
+                    listener,
+                    listener_proxy_protocol,
+                    tls_response_fragment_size,
+                ));
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -269,11 +309,11 @@ pub(crate) async fn bind_listeners(
 /// the port keeps completing TCP handshakes and then resetting every one of them
 /// instead of returning `ECONNREFUSED` and letting clients fail over.
 pub(crate) fn spawn_tcp_accept_loops(
-    listeners: Vec<(TcpListener, bool)>,
+    listeners: Vec<(TcpListener, bool, Option<u16>)>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     shutdown: CancellationToken,
 ) {
-    for (listener, listener_proxy_protocol) in listeners {
+    for (listener, listener_proxy_protocol, tls_response_fragment_size) in listeners {
         let active_runtime = active_runtime.clone();
         let shutdown = shutdown.clone();
 
@@ -378,6 +418,7 @@ pub(crate) fn spawn_tcp_accept_loops(
                                 #[cfg(unix)]
                                 raw_fd,
                                 rst_mode,
+                                tls_response_fragment_size,
                             )
                             .run()
                             .await

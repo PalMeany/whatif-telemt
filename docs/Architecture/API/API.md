@@ -167,7 +167,8 @@ Notes:
 | --- | --- | --- |
 | `400` | `bad_request` | Invalid JSON, validation failures, malformed request body. |
 | `400` | `access_not_editable` | `PATCH /v1/config` body contains an `access` key (managed via users API). |
-| `400` | `section_not_editable` | `PATCH /v1/config` body contains `server`, `network`, or an unknown top-level key. |
+| `400` | `section_not_editable` | `PATCH /v1/config` body contains `network` or an unknown top-level key. |
+| `400` | `field_not_editable` | `PATCH /v1/config` body contains a forbidden nested field under a partially editable section (e.g. `server.api`, `server.port`). |
 | `401` | `unauthorized` | Missing/invalid `Authorization` when `auth_header` is configured. |
 | `403` | `forbidden` | Source IP is not allowed by whitelist. |
 | `403` | `read_only` | Mutating endpoint called while `read_only=true`. |
@@ -260,16 +261,22 @@ bob = ["198.51.100.42/32"]
 
 ### `PatchConfigRequest`
 
-A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `show_link`, `dc_overrides`). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched sections and file comments are preserved.
+A sparse JSON object containing only the top-level config sections to modify. Each key must be one of the editable sections (`general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`) or the partially editable `server` object (only `listeners` is allowed under `server`; see below). Tables within a section are deep-merged field-by-field into the existing config; arrays and scalar values replace the existing value wholesale. Untouched sections and file comments are preserved.
 
 **Rejected keys:**
 - `access` → `400 access_not_editable` (users/secrets are managed via `POST/PATCH /v1/users`).
-- `server`, `network`, or any unknown top-level key → `400 section_not_editable`.
+- `network`, `web`, or any unknown top-level key → `400 section_not_editable`.
+- `server` with any key other than `listeners` (e.g. `port`, `api`, `admin_api`) → `400 field_not_editable`.
 - An object with no editable keys → `400 bad_request` (empty patch).
 
 Example — patch only the SNI domain:
 ```json
 {"censorship": {"tls_domain": "front.example.com"}}
+```
+
+Example — replace `[[server.listeners]]` (other `[server]` fields including `[server.api]` are preserved):
+```json
+{"server": {"listeners": [{"ip": "0.0.0.0", "port": 443, "client_mss": "92"}]}}
 ```
 
 ### `RotateSecretRequest`
@@ -291,10 +298,10 @@ Returned by `GET /v1/config` as the envelope `data`. The fields are exactly the 
 | `timeouts` | `object?` | `[timeouts]` section, if present. |
 | `censorship` | `object?` | `[censorship]` section, if present. |
 | `upstreams` | `object?` | `[upstreams]` section, if present. |
-| `show_link` | `object?` | `[show_link]` section, if present. |
 | `dc_overrides` | `object?` | `[dc_overrides]` section, if present. |
+| `server` | `object?` | Partial `[server]` view when editable nested fields are present. Currently only `listeners` may appear; `api`/`admin_api`, `port`, unix sockets, and other bind-identity fields are never returned. |
 
-Sections absent from the config file are absent from the response (not `null`). Only the editable sections above are returned; `access` (users/secrets), `server` (carries the API `auth_header` and per-node identity), and `network` (per-node addresses) are always excluded.
+Sections absent from the config file are absent from the response (not `null`). Only the editable sections above are returned; `access` (users/secrets) and `network` (per-node addresses) are always excluded. Under `server`, only the nested field-level allowlist (`listeners`) is exposed.
 
 ### `PatchConfigResponse`
 
@@ -303,10 +310,10 @@ Returned by `PATCH /v1/config` on success (`200`, or `202` when a reload was acc
 | Field | Type | Description |
 | --- | --- | --- |
 | `revision` | `string` | SHA-256 hex of the config file after the patch was written. |
-| `restart_required` | `bool` | Deprecated alias of `runtime_reload_required`, kept for compatibility. It carries the identical value; do not treat the two as different signals. |
+| `restart_required` | `bool` | Legacy classifier result: `true` when the old file watcher alone cannot apply every changed field. Use `runtime_reload_required` and `process_restart_required` for new integrations. |
 | `runtime_reload_required` | `bool` | `true` when full effect requires a Maestro runtime-generation reload rather than the legacy hot-field overlay. |
-| `process_restart_required` | `bool` | `true` when process-owned sockets or paths changed and remain deferred after an in-process reload. Equivalent to `deferred_process_fields` being non-empty. |
-| `deferred_process_fields` | `string[]` | Process-owned fields that the active process cannot rebind during generation activation. Baseline is always **the configuration this process is currently running** versus the candidate — the same baseline `GET /v1/system/reload/{id}` reports, so the two never disagree. |
+| `process_restart_required` | `bool` | `true` when process-owned sockets or paths changed and remain deferred after an in-process reload. |
+| `deferred_process_fields` | `string[]` | Process-owned fields that the active process cannot rebind during generation activation. |
 | `changed` | `string[]` | Top-level section names that differed between the old and new config (e.g. `["censorship"]`). |
 | `reload` | `ReloadAccepted?` | Present only when the patch included a valid reload query and Maestro accepted the operation. |
 
@@ -1386,7 +1393,7 @@ Returns the current editable config sections as TOML-shaped JSON, plus the curre
 }
 ```
 
-Top-level sections absent from the config file are absent from the response. Only `GET` and `PATCH` are accepted; any other method returns `405 Method Not Allowed` with `Allow: GET, PATCH`.
+The response is built from the validated, include-expanded configuration and may therefore contain normalized defaults or synthesized listeners that are absent from the root file. Only `GET` and `PATCH` are accepted; any other method returns `405 Method Not Allowed` with `Allow: GET, PATCH`.
 
 ---
 
@@ -1402,19 +1409,20 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | --- | --- | --- |
 | `Authorization` | when configured | Same token as all other endpoints. |
 | `Content-Type: application/json` | recommended | Not enforced, but body must be valid JSON. |
-| `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. If supplied and it does not match the current on-disk revision, returns `409 revision_conflict`. If omitted, the patch applies unconditionally. |
+| `If-Match: <revision>` | no | Optimistic concurrency. `<revision>` is the `revision` value from `GET /v1/config` or `config_hash` from `GET /v1/system/info`. It covers the complete recursive include graph. If supplied and it does not match the current source manifest, returns `409 revision_conflict`. If omitted, the patch applies unconditionally. |
 
-**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `show_link`, `dc_overrides`.
+**Editable sections:** `general`, `timeouts`, `censorship`, `upstreams`, `dc_overrides`, plus partially editable `server` (only nested `listeners`).
 
 **Rejected keys and their error codes:**
 
 | Key | HTTP | `error.code` |
 | --- | --- | --- |
 | `access` | `400` | `access_not_editable` |
-| `server`, `network`, or any unknown key | `400` | `section_not_editable` |
+| `network`, `web`, or any unknown top-level key | `400` | `section_not_editable` |
+| `server` with keys other than `listeners` | `400` | `field_not_editable` |
 | Object with no editable key | `400` | `bad_request` |
 
-**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. File comments and untouched sections are preserved.
+**Merge semantics:** tables are deep-merged field-by-field; arrays and scalar values replace the existing value wholesale. A mutation is written to the single source file that owns every touched semantic section. File comments, the root file when it is not the owner, and all other include files are preserved. A target split across sources, a patch spanning multiple owners, or an include directive nested inside a TOML table returns `409 config_patch_not_atomic` without writing any file.
 
 **Validation:** the merged config is deserialized into the full `ProxyConfig` type and validated before writing. Failures return `400` with a descriptive message; the file is not modified.
 
@@ -1427,9 +1435,9 @@ Applies a sparse patch to the editable config sections. The merged config is ful
 | `reload=instant` | no | Activates a new generation and cancels sessions owned by the previous generation. |
 | `reload=drain` | no | Activates a new generation and lets old sessions finish until `timeout_secs`. |
 | `timeout_secs=1..3600` | for `reload=drain` | Bounded old-generation drain interval. Invalid with `reload=instant`. |
-| `failure_policy=keep_new\|rollback` | no | Defaults to `keep_new`. On `rollback`, a reload that fails or is rejected at the activation barrier both discards the candidate runtime **and restores the pre-patch config file**, so the proxy does not keep enforcing — or restart into — a config the reload rejected. The restore is skipped (and reported in `warnings`) if the file changed after this patch wrote it. |
+| `failure_policy=keep_new\|rollback` | no | Defaults to `keep_new`. `rollback` applies only through the activation barrier, before old-generation teardown. |
 
-Without a `reload` query parameter, the endpoint preserves the legacy behavior: it writes the patch and the file watcher applies only supported hot fields.
+Without a `reload` query parameter, the endpoint writes the patch and the file watcher applies only supported hot fields. With a reload query, coordinator capacity and status are reserved before the source file is replaced. Runtime-owned changes enqueue the validated immutable snapshot after the atomic write. A process-only patch is persisted with `200`, reports its deferred fields, and does not create a reload operation.
 
 **Success `200` or `202` response body** (`data` field of the standard envelope):
 ```json
@@ -1451,12 +1459,12 @@ Without a `reload` query parameter, the endpoint preserves the legacy behavior: 
 }
 ```
 
-- `revision` — SHA-256 hex of the config file after the write.
-- `restart_required` — deprecated alias of `runtime_reload_required` with the identical value.
+- `revision` — SHA-256 hex of the canonical source manifest after the write, including every recursive include path and its raw bytes.
+- `restart_required` — legacy file-watcher classification retained for compatibility.
 - `runtime_reload_required` — reports whether a full Maestro generation reload is needed for runtime effect.
-- `process_restart_required` and `deferred_process_fields` — report process-owned sockets or paths that remain unchanged by an in-process reload.
+- `process_restart_required` and `deferred_process_fields` — report socket policies or process-owned paths that remain unchanged by an in-process reload. A pure listener endpoint move is reloadable only when every retained endpoint keeps identical bind policy and neither the active nor desired listener set uses SYN limiting; same-address MSS, PROXY protocol, backlog, reuse, or SYN-limit changes remain deferred.
 - `changed` — list of top-level section names that differed.
-- `reload` — accepted operation metadata; omitted when no reload query was supplied.
+- `reload` — accepted operation metadata; omitted without a reload query and for process-only patches that cannot change the active generation.
 
 **Status codes:**
 
@@ -1466,13 +1474,14 @@ Without a `reload` query parameter, the endpoint preserves the legacy behavior: 
 | `202` | — | Patch applied and runtime reload accepted. |
 | `400` | `bad_request` | Invalid JSON, empty patch, or config validation/deserialization failure. |
 | `400` | `access_not_editable` | Patch contains an `access` key. |
-| `400` | `section_not_editable` | Patch contains `server`, `network`, or an unknown top-level key. |
+| `400` | `section_not_editable` | Patch contains `network` or an unknown top-level key. |
+| `400` | `field_not_editable` | Patch contains a forbidden nested `server.*` field (anything other than `listeners`). |
 | `401` | `unauthorized` | Missing or invalid `Authorization` header. |
 | `403` | `read_only` | API is in read-only mode. |
 | `405` | `method_not_allowed` | Method other than `GET` or `PATCH` used on `/v1/config`. |
 | `409` | `revision_conflict` | `If-Match` header supplied but does not match current revision. |
 | `409` | `reload_in_progress` | Another runtime reload is active; the patch is not written. |
-| `503` | `maestro_unavailable` | The reload coordinator is shutting down. The reload slot is reserved before the file is touched, so the patch is **not** written in this case. |
+| `409` | `config_patch_not_atomic` | Touched semantic sections have multiple source owners or cannot be mutated as one source-file transaction. |
 | `500` | `internal_error` | I/O or serialization failure. |
 
 **curl example:**
@@ -1501,39 +1510,40 @@ Loads the current on-disk config under the API mutation lock and submits an immu
 }
 ```
 
-The endpoint returns `202` with `ReloadAccepted`. A concurrent non-terminal reload returns `409 reload_in_progress`. The snapshot is loaded **and fully validated** (`ProxyConfig::validate`, the same check startup and SIGHUP apply) before a command is submitted; a config that fails validation — for example one with no configured users — returns `400` and never reaches the activation barrier.
-
-Preparation is bounded by a hard 180-second deadline. Exceeding it fails the reload with `error_kind = "timeout"` and releases the reload slot, so a probe or Middle-End init that never returns cannot wedge every later submission at `409`.
+The endpoint returns `202` with `ReloadAccepted`. A concurrent non-terminal reload returns `409 reload_in_progress`. Config parsing or validation failure is reported before a command is submitted.
 
 ### `GET /v1/system/reload/{id}`
 
-Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activating`, `draining`, `succeeded`, `rolled_back`, or `failed`. Terminal statuses include `finished_at_epoch_secs`; failures include `error` plus `error_kind`, a stable slug from `config_invalid`, `dns_overrides_invalid`, `probe_failed`, `tls_bootstrap_failed`, `middle_end_unavailable`, `revision_changed`, `timeout`, `cancelled`, `internal`. Successful activation may include `warnings` for old-generation cleanup failures and `deferred_process_fields` for process-owned settings.
+Returns `ReloadStatus` with `state` equal to `accepted`, `preparing`, `activating`, `draining`, `succeeded`, `rolled_back`, or `failed`. Terminal statuses include `finished_at_epoch_secs`; failures include `error`. Successful activation may include `warnings` for old-generation cleanup failures and `deferred_process_fields` for process-owned settings.
 
-### `DELETE /v1/system/reload/{id}`
-
-Cancels the in-flight reload. Preparation aborts and releases the reload slot; a `drain` in progress collapses immediately to cancelling the retired generation's remaining sessions. Returns `202` with the current `ReloadStatus`, `409 reload_not_active` when `{id}` is not the active operation, `404 reload_not_found` for an unknown id, and `403 read_only` in read-only mode. Process shutdown cancels the active reload the same way.
-
-### Ownership: process scope versus generation scope
-
-Runtime generation activation rebuilds statistics, upstream routing, replay state, TLS-front cache, IP tracking, admission/route state, per-generation DNS overrides, and Middle-End orchestration.
-
-The following are **process-scoped**: they exist once for the process lifetime and a reload retunes them in place rather than allocating a second copy.
-
-| Resource | Why it is process-scoped |
-| --- | --- |
-| Per-user quota accounting | Charges must be continuous across generations. |
-| Process start instant | `telemt_uptime_seconds` measures process uptime, not generation uptime. |
-| Connection admission budget (`server.max_connections`) | A per-generation semaphore let a `drain` reload run at 2x the configured cap while the retired generation's sessions still held their permits. Reload retunes the single budget via permit add/forget. |
-| Relay buffer pool and Direct copy-buffer envelope | Two committed envelopes at once would double the memory ceiling during a drain. |
-| API, metrics, client TCP/Unix listeners, PID ownership, logging | Changed bind/path fields are reported as deferred and do not cause Maestro to invoke systemd, containerd, or another process supervisor. |
-
-`network.dns_overrides` is deliberately **not** process-scoped. Each generation owns its own snapshot, so sessions and background tasks draining from a retired generation keep resolving through the table they were admitted under.
-
-Connections that a retired generation accepts after it stopped admitting sessions are counted by `telemt_session_admission_closed_total` and logged at debug level, so cutover drops are observable instead of silent.
+Runtime generation activation rebuilds statistics, upstream routing, replay and buffer state, TLS-front cache, IP tracking, admission/route state, and Middle-End orchestration. Per-user quota accounting is process-scoped and remains continuous across generations. A process-owned listener manager can prepare new endpoint sockets without calling `listen(2)`, stop removed acceptors before the runtime swap, and start new acceptors only after the swap. Inbound listener planning depends on normalized config and explicit IPv4/IPv6 policy, never transient outbound connectivity-probe results. Retained endpoints are not rebound, and unsupported same-address policy changes are overlaid with active values and reported as deferred. API, metrics, Unix listeners, PID ownership, and logging remain process-scoped. Maestro does not invoke systemd, containerd, or another process supervisor.
 
 Reload preparation requires every configured TLS-front domain to have a non-default cached profile and requires a ready Middle-End pool when direct fallback is disabled. A candidate that does not satisfy either readiness condition fails without replacing the active generation.
 
 The revision is verified again after preparation. With `failure_policy=rollback`, a changed revision or revision read failure rolls the candidate back; with `failure_policy=keep_new`, the condition is reported in `warnings` and activation continues.
+
+## WEB Proxy Management
+
+The API provides partial operational control for WEB mode; it does not expose a dedicated `/v1/web` resource.
+
+| Operation | Current contract |
+| --- | --- |
+| Read or patch `[web]`, vhosts, profiles, decoys, timeouts, or limits | Not exposed. `GET /v1/config` omits `[web]`; a `web` key in `PATCH /v1/config` returns `400 section_not_editable`. |
+| Persist `server.listeners` | Supported through `PATCH /v1/config`. Arrays replace wholesale. A changed WEB listener is process-owned and remains deferred until process restart. |
+| Apply an externally edited WEB config | Update the owning TOML source, call `POST /v1/system/reload`, then poll `GET /v1/system/reload/{id}`. |
+| Inspect restart requirements | Read `deferred_process_fields` from reload status. `server.listeners` and `web.limits` require process restart. |
+| Manage access users | Use `/v1/users`. Creating a user does not add it to `web.vhosts.profiles`; profile membership remains file-managed. |
+| Disable one user | `POST /v1/users/{username}/disable` updates admission immediately and cancels the user's active sessions. |
+| Rotate a profiled user's secret | Use `/v1/users/{username}/rotate-secret`; the config watcher rebuilds WEB capabilities from the new access snapshot. The API returns the secret, not a `tg://webproxy` link. |
+| Read WEB-specific runtime statistics | No WEB-specific endpoint exists in the current API surface. |
+
+`web.enabled`, `web.carrier`, `web.timeouts`, vhosts, profiles, and decoy snapshots are runtime-generation fields. A changed carrier applies only to newly issued bridge sessions; existing sessions retain their creation-time carrier. WEB listener inventory and trust policy, plus all `[web.limits]`, are process-owned. A successful reload can therefore activate the runtime-owned subset while reporting the process-owned subset as deferred.
+
+Before deleting a user referenced by a WEB profile, remove and apply the profile first. User mutations validate the complete resulting configuration, so a dangling WEB profile is rejected rather than persisted.
+
+The API whitelist is evaluated against the direct TCP peer and does not use the WEB listener's `X-Forwarded-For` policy. Keep the API on a separate loopback or private bind, use a narrow whitelist and a non-empty exact `auth_header`, and do not expose it through the public WEB vhost.
+
+Deployment, TLS-terminator examples, links, and WEB-specific verification are documented in the [WEB proxy guide](../../Advanced_settings/WEB_PROXY.en.md).
 
 ## Mutation Semantics
 
