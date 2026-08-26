@@ -32,13 +32,15 @@ This software has been modified. A description of the changes is in
 | Original repository | <https://github.com/telemt/telemt> |
 | Fork point (commit) | `d851200` |
 | Fork point (version) | telemt 3.4.25 |
+| Upstream base carried | telemt 3.5.2 (`b6b9a18`) |
 | This repository | <https://github.com/PalMeany/whatif-telemt> |
 
-Upstream Telemt has continued independently since that commit and is now on the
-3.5.x line, which contains its own, separately written WEB proxy
-implementation. The WEB proxy transport in this repository is not that
-implementation and the two are not the same code. Nothing here should be read
-as describing, representing, or speaking for upstream Telemt.
+Upstream Telemt has continued independently since the fork point. This
+repository merges upstream releases; it currently carries 3.5.2. The upstream
+3.5.x line contains its own, separately written WEB proxy implementation, which
+this fork removes in favour of its own. The WEB proxy transport here is not
+that implementation and the two are not the same code. Nothing here should be
+read as describing, representing, or speaking for upstream Telemt.
 
 ## Copyright and licence
 

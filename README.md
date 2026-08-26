@@ -14,7 +14,8 @@ and exists to carry the rest: things upstream does not have, has not added yet,
 or never will. Work lands here when it is worth running in production and there
 is no reason to wait for it to land anywhere else.
 
-Inherited at 3.4.25 and belonging to the Telemt project: the MTProto modes
+Inherited from upstream (the fork now carries telemt 3.5.2) and belonging to
+the Telemt project: the MTProto modes
 (classic, `dd` secure, `ee` fake-TLS with SNI fronting), TLS-fronting, the
 Middle-End pool, replay protection, masking, quotas and per-user limits, the
 Control API and the metrics surface.
@@ -46,7 +47,7 @@ The binary identifies itself as this fork:
 
 ```console
 $ telemt --version
-WhatIfTelemt 3.4.25.1w
+WhatIfTelemt 3.5.2.1w
 ```
 
 ## The WEB proxy transport
@@ -132,7 +133,7 @@ so the build wants roughly 2 GB of RAM and several minutes.
 git clone https://github.com/PalMeany/whatif-telemt.git
 cd whatif-telemt
 cargo build --release --locked
-./target/release/telemt --version        # WhatIfTelemt 3.4.25.1w
+./target/release/telemt --version        # WhatIfTelemt 3.5.2.1w
 ./target/release/telemt config.toml      # run in the foreground
 ```
 

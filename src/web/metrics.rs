@@ -3,6 +3,19 @@
 //! The relay's own admin endpoint keeps the reference `tproxy_*` metric names
 //! so existing dashboards keep working, while telemt's main `/metrics` surface
 //! exposes the same values under the `telemt_web_*` prefix.
+//!
+//! Three series have no reference counterpart, and both exist to make the
+//! relay's own failure modes visible from outside:
+//!
+//! - `bridge_pages_served_total` counts pages actually rendered for a matching
+//!   capability. Read against `sessions_created_total` it separates "clients
+//!   loaded the bridge but never reached the carrier" — a front proxy, TLS, or
+//!   navigation problem — from "nothing ever asked for the bridge".
+//! - `stream_bytes_up_total` and `stream_bytes_down_total` count MTProto
+//!   payload crossing the backend boundary. `bytes_*` counts carrier bodies,
+//!   which move for framing, WINDOW grants, and empty polls alike, so it keeps
+//!   rising on a carrier whose streams all die on the handshake. These two do
+//!   not, which is what makes the difference measurable.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +42,12 @@ pub(crate) struct WebMetrics {
     pub(crate) backend_dial_failures: AtomicU64,
     pub(crate) bytes_up: AtomicU64,
     pub(crate) bytes_down: AtomicU64,
+    /// Bridge pages actually rendered for a matching capability.
+    pub(crate) bridge_pages_served: AtomicU64,
+    /// MTProto payload handed to the backends, framing excluded.
+    pub(crate) stream_bytes_up: AtomicU64,
+    /// MTProto payload taken from the backends, framing excluded.
+    pub(crate) stream_bytes_down: AtomicU64,
     pub(crate) limit_hits: AtomicU64,
     /// Connections refused because the accept-loop budget was exhausted.
     pub(crate) carrier_connections_dropped: AtomicU64,
@@ -49,6 +68,9 @@ pub(crate) struct WebMetricsSnapshot {
     pub(crate) backend_dial_failures: u64,
     pub(crate) bytes_up: u64,
     pub(crate) bytes_down: u64,
+    pub(crate) bridge_pages_served: u64,
+    pub(crate) stream_bytes_up: u64,
+    pub(crate) stream_bytes_down: u64,
     pub(crate) limit_hits: u64,
     pub(crate) carrier_connections_dropped: u64,
     pub(crate) request_timeouts: u64,
@@ -67,6 +89,9 @@ impl WebMetrics {
             backend_dial_failures: self.backend_dial_failures.load(Ordering::Relaxed),
             bytes_up: self.bytes_up.load(Ordering::Relaxed),
             bytes_down: self.bytes_down.load(Ordering::Relaxed),
+            bridge_pages_served: self.bridge_pages_served.load(Ordering::Relaxed),
+            stream_bytes_up: self.stream_bytes_up.load(Ordering::Relaxed),
+            stream_bytes_down: self.stream_bytes_down.load(Ordering::Relaxed),
             limit_hits: self.limit_hits.load(Ordering::Relaxed),
             carrier_connections_dropped: self.carrier_connections_dropped.load(Ordering::Relaxed),
             request_timeouts: self.request_timeouts.load(Ordering::Relaxed),
@@ -79,7 +104,7 @@ impl WebMetricsSnapshot {
     /// Renders the snapshot with the given metric-name prefix.
     pub(crate) fn render(&self, prefix: &str) -> String {
         let mut out = String::with_capacity(768);
-        let values: [(&str, u64); 16] = [
+        let values: [(&str, u64); 19] = [
             ("sessions_live", self.capacity.sessions as u64),
             ("streams_live", self.capacity.streams as u64),
             (
@@ -95,6 +120,9 @@ impl WebMetricsSnapshot {
             ("backend_dial_failures_total", self.backend_dial_failures),
             ("bytes_up_total", self.bytes_up),
             ("bytes_down_total", self.bytes_down),
+            ("bridge_pages_served_total", self.bridge_pages_served),
+            ("stream_bytes_up_total", self.stream_bytes_up),
+            ("stream_bytes_down_total", self.stream_bytes_down),
             ("limit_hits_total", self.limit_hits),
             (
                 "carrier_connections_dropped_total",
@@ -162,15 +190,21 @@ mod tests {
                 pending_items: 8,
             },
             bytes_up: 100,
+            bridge_pages_served: 3,
+            stream_bytes_up: 40,
+            stream_bytes_down: 60,
             ..WebMetricsSnapshot::default()
         };
         let text = snapshot.render("tproxy_");
         assert!(text.contains("tproxy_sessions_live 2\n"));
         assert!(text.contains("tproxy_streams_live 5\n"));
         assert!(text.contains("tproxy_bytes_up_total 100\n"));
+        assert!(text.contains("tproxy_bridge_pages_served_total 3\n"));
+        assert!(text.contains("tproxy_stream_bytes_up_total 40\n"));
+        assert!(text.contains("tproxy_stream_bytes_down_total 60\n"));
         assert!(text.contains("tproxy_carrier_connections_dropped_total 0\n"));
         assert!(text.contains("tproxy_request_timeouts_total 0\n"));
         assert!(text.contains("tproxy_retry_later_responses_total 0\n"));
-        assert_eq!(text.lines().count(), 16);
+        assert_eq!(text.lines().count(), 19);
     }
 }

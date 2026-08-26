@@ -382,10 +382,20 @@ tproxy_streams_live
 tproxy_streams_rejected_total        # rising: a limit is too tight
 tproxy_limit_hits_total
 tproxy_backend_dial_failures_total   # only meaningful for loopback backends
+tproxy_bridge_pages_served_total     # compare with sessions_created_total
+tproxy_stream_bytes_up_total         # MTProto payload, not carrier bodies
+tproxy_stream_bytes_down_total
 ```
 
 The same series appear on telemt's own metrics endpoint prefixed
 `telemt_web_`.
+
+The last three answer the two questions a 404-by-design relay otherwise cannot.
+`bridge_pages_served_total` far ahead of `sessions_created_total` means clients
+load the bridge and never reach the carrier — TLS, the front proxy, or the
+navigation. Sessions and streams climbing while the `stream_bytes_*` pair stays
+near zero means the carrier is fine and every stream is being refused; the
+`bytes_*` pair keeps rising there because it counts framing and empty polls too.
 
 ## 13. Troubleshooting
 
@@ -397,7 +407,8 @@ The same series appear on telemt's own metrics endpoint prefixed
 | Every request returns 404, including `/` | `Host` seen by telemt ≠ `web.hostname` | `journalctl -u telemt \| grep "Host does not match"` names both; make the front proxy preserve `Host`, or rewrite it with `header_up Host <hostname>` |
 | Every request returns 404 behind a CDN | the CDN forwards its own origin hostname, and `web.hostname` must be the name clients type | set `web.hostname` to the client-facing name and normalise `Host` at the origin proxy |
 | Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and the exact secret string the client uses |
-| Client connects, carrier looks healthy, no data ever flows | no mode a WEB client can speak is enabled | set `secure = true` and hand out the `dd…` secret; the reject shows as `direct_modes_disabled` in the bad-connect classes |
+| Client connects, carrier looks healthy, no data ever flows | no mode a WEB client can speak is enabled | confirm with `tproxy_stream_bytes_down_total` flat while `tproxy_sessions_created_total` climbs; set `secure = true` and hand out the `dd…` secret. The reject shows as `direct_modes_disabled` in the bad-connect classes |
+| Bridge page is served but no session is ever created | the WebView loaded the page and could not reach the carrier | `tproxy_bridge_pages_served_total` rising with `tproxy_sessions_created_total` flat: check that the front proxy forwards `/api/v1/*` to telemt and does not buffer or rewrite it |
 | Client stays on "connecting" forever; sessions are created and counters look healthy; it connects instantly after switching to another proxy and back | `carrier_mode` selects a WebSocket carrier the client's WebView does not drive | set `carrier_mode = "https"` and restart |
 | Client rejects the secret in its proxy settings | an `ee` fake-TLS secret was handed out | WEB clients accept only plain and `dd` secrets |
 | `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `web.listen` |

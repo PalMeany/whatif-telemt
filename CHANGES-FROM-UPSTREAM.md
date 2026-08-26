@@ -11,16 +11,31 @@ with or endorsed by the Telemt project.**
 
 This repository was forked from <https://github.com/telemt/telemt> at commit
 `d851200`, which is **telemt 3.4.25**. Everything below is a change made in
-this fork after that commit — of the order of twenty commits, some 130 files
-and roughly +20,000 / −900 lines. For the exact delta as it stands now, run
+this fork after that commit. For the exact delta as it stands now, run
 `git diff --stat d851200..HEAD`, or see
 <https://github.com/PalMeany/whatif-telemt/compare/d851200...main>.
 
-Upstream Telemt has moved on independently since then and is now on the 3.5.x
-line. Upstream's own WEB proxy implementation was written separately and is not
-the code described here; the two share the protocol they implement and nothing
-else. None of the work below has been submitted to, reviewed by, or accepted by
-the upstream maintainers.
+## Upstream base
+
+The fork tracks upstream releases by merging them. It currently carries
+**telemt 3.5.2** (`b6b9a18`), merged whole: the configuration `types/` and
+`load/` split, the `proxy/handshake` decomposition, `proxy/authenticated`, the
+`transport/socket` fragmented-send work, `pf` support in the SYN limiter, the
+api `users/` and `config_store/` splits, and include-graph-aware config
+revisions are all upstream's.
+
+Upstream 3.5.x added a **WEB proxy of its own**, written separately against the
+same published protocol. The two share that protocol and nothing else. This
+fork keeps its own implementation and removes upstream's, along with its
+`[web]` configuration surface, loader, validator and listener wiring; a
+`[[server.listeners]]` entry with `transport = "web"` is refused at load time
+with a pointer to `[web]`. Upstream's hot listener-rebind subsystem
+(`maestro/listeners/{plan,bind,control,accept}`, `resolve_reload_config`, and
+`PATCH /v1/config` for `server.listeners`) is also not carried, because it is
+built on the maestro this fork replaced.
+
+None of the work below has been submitted to, reviewed by, or accepted by the
+upstream maintainers.
 
 ## The WEB proxy transport and its carriers
 
@@ -122,10 +137,10 @@ failed health probe is fatal.
 
 Этот репозиторий — форк <https://github.com/telemt/telemt> от коммита
 `d851200` (telemt 3.4.25). **Это неофициальная, изменённая версия Telemt, не
-аффилированная с проектом Telemt и не одобренная им.** С момента форка
-вышестоящий проект развивается независимо (ветка 3.5.x) и содержит собственную,
-написанную отдельно реализацию WEB-прокси — это не тот код, который описан
-здесь.
+аффилированная с проектом Telemt и не одобренная им.** Форк подтягивает
+вышестоящие релизы слиянием и сейчас основан на telemt 3.5.2 (`b6b9a18`).
+Ветка 3.5.x содержит собственную, написанную отдельно реализацию WEB-прокси —
+это не тот код, который описан здесь; здесь она удалена в пользу своей.
 
 Что изменено в этом форке:
 

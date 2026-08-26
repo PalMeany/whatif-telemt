@@ -286,6 +286,23 @@ impl Session {
         }
     }
 
+    /// Reports MTProto payload crossing the backend boundary.
+    ///
+    /// Separate from the carrier counters on purpose: those move for framing,
+    /// WINDOW grants, and empty polls, so they keep rising even when every
+    /// stream is being refused. These two only move for payload.
+    pub(crate) fn count_stream_up(&self, bytes: usize) {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.count_stream_bytes_up(bytes);
+        }
+    }
+
+    pub(crate) fn count_stream_down(&self, bytes: usize) {
+        if let Some(manager) = self.manager.upgrade() {
+            manager.count_stream_bytes_down(bytes);
+        }
+    }
+
     /// Closes the session after a protocol violation on the shared carrier.
     pub(crate) fn protocol_failure(&self) {
         debug!(
