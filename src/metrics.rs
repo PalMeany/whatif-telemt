@@ -446,11 +446,7 @@ async fn render_metrics(
         "# HELP telemt_build_info Build information for the running telemt binary"
     );
     let _ = writeln!(out, "# TYPE telemt_build_info gauge");
-    let _ = writeln!(
-        out,
-        "telemt_build_info{{version=\"{}\"}} 1",
-        crate::VERSION
-    );
+    let _ = writeln!(out, "telemt_build_info{{version=\"{}\"}} 1", crate::VERSION);
 
     let _ = writeln!(out, "# HELP telemt_uptime_seconds Proxy uptime");
     let _ = writeln!(out, "# TYPE telemt_uptime_seconds gauge");
