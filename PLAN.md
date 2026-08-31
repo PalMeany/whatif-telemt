@@ -77,6 +77,39 @@ naming, because each was a real defect rather than a style point:
       cancel after the write, effects ran outside the lock, and three operations
       diverged from the single-operation routes they mirror.
 
+## Phase 7 — closing the gaps the review left open
+
+- [x] End-to-end test that telemt's restored WEB transport is reachable through
+      this fork's accept loop: a real TCP request on a `transport = "web"`
+      listener is answered by the configured decoy, an unknown `Host` is not,
+      and the implementation selector keeps the transport down when told to.
+- [x] The Telegram bot driven against a local Bot API server: what it puts on
+      the wire, how it reads a refusal, and that an oversized reply is split.
+- [x] The batch decision layer split out of `run_batch` and tested directly:
+      atomic abort, rollback relabelling, non-atomic partial application, a
+      spent budget stopping before the write.
+- [x] The panel's parsing assumptions pinned against a real rendered exposition,
+      and its metric set pinned against the exporter in both directions.
+- [x] Audited the 3.5.2 -> 3.5.5 reconciliation by hand, since that review agent
+      died on a session limit: `client_runtime_deps` is field-for-field
+      upstream's, no file is registered by two modules, the API gates run before
+      the new pre-match hooks, `web_runtime` honours `read_only`, a `None`
+      snapshot hash means "do not suppress" rather than "suppress everything",
+      and the hot-reload overlay matches upstream's plus the fork's section.
+- [x] Documented the one bulk limitation left unfixed: a batch whose `access.*`
+      tables are owned by different include files is refused wholesale, because
+      one write cannot span two files.
+- [x] Key-by-key `[fork]` reference in `CONFIG_PARAMS.{en,ru,de}.md`.
+
+Not done, deliberately: no German narrative `FORK_CONFIG.de.md`. The fork's own
+flagship document (`WEB_PROXY.en.md`) is English-only, so German operators get
+the key-by-key table like every other key in the reference.
+
+Not possible here: a Linux build. This toolchain has no `x86_64-unknown-linux-gnu`
+std, so the netfilter SYN-limiter backends were never compiled. No line I changed
+falls inside a `target_os = "linux"` region, which is checked mechanically rather
+than by eye.
+
 ## Known failing tests, all pre-existing
 
 - `proxy::direct_relay::security_tests::*` (4) and

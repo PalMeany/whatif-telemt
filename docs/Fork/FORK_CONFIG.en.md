@@ -190,7 +190,19 @@ revision.
 
 Operation bodies are the same shapes the single-operation routes accept, so
 `user.patch` keeps the tri-state semantics of `PATCH /v1/users/{user}`: an
-absent field is unchanged, `null` removes it.
+absent field is unchanged, `null` removes it. `user.enable` removes the
+`access.user_enabled` key rather than writing `true`, and `user.rotate_secret`
+leaves live sessions alone, both matching the routes they mirror.
+
+One limit is worth knowing before splitting a configuration across includes: a
+batch writes every `access.*` table it touched in **one** file, so if the
+tables it touched are owned by different includes it is refused with `409
+config_patch_not_atomic` and nothing is written. The equivalent single-operation
+calls would each succeed, because each one touches fewer tables. A batch
+containing `user.delete` is unaffected — that operation already writes all eight
+tables through either route — but a batch mixing, say, a create with a patch of
+a quota table kept in a separate include is not. Keep the `access.*` tables in
+one file, or split such a batch by file.
 
 ## Which WEB proxy runs
 

@@ -307,3 +307,151 @@ fn patching_leaves_absent_fields_alone() {
     assert_eq!(cfg.access.user_max_tcp_conns.get("alice"), Some(&4));
     assert_eq!(cfg.access.user_data_quota.get("alice"), Some(&2048));
 }
+
+// Batch-level decisions: what a refusal aborts, what a rollback relabels, and
+// what a spent budget stops. These are the parts `run_batch` only wraps in I/O.
+
+use super::model::BulkOperation;
+use crate::api::bulk::{BatchOutcome, apply_batch, roll_back};
+
+fn operation(
+    action: BulkAction,
+    user: Option<&str>,
+    body: Option<serde_json::Value>,
+) -> BulkOperation {
+    BulkOperation {
+        id: user.map(|name| format!("op-{name}")),
+        action,
+        user: user.map(str::to_string),
+        body,
+    }
+}
+
+fn far_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(3600)
+}
+
+fn statuses(outcome: &BatchOutcome) -> Vec<&'static str> {
+    outcome.results.iter().map(|result| result.status).collect()
+}
+
+#[tokio::test]
+async fn an_atomic_batch_stops_at_the_first_refusal() {
+    let mut cfg = config_with_users(&["alice"]);
+
+    let outcome = apply_batch(
+        &mut cfg,
+        vec![
+            operation(BulkAction::UserCreate, None, create_body("bob")),
+            operation(BulkAction::UserDelete, Some("ghost"), None),
+            operation(BulkAction::UserCreate, None, create_body("carol")),
+        ],
+        true,
+        far_deadline(),
+    )
+    .expect("a batch inside its budget must produce an outcome");
+
+    assert_eq!(statuses(&outcome), vec!["ok", "failed", "skipped"]);
+    assert_eq!(outcome.succeeded, 1);
+    assert_eq!(outcome.failed, 1);
+    assert!(
+        !cfg.access.users.contains_key("carol"),
+        "the operation after the refusal must not have been applied"
+    );
+}
+
+#[tokio::test]
+async fn rolling_back_relabels_the_operations_that_had_applied() {
+    // The defect this covers: an aborted batch reported `ok` beside
+    // `succeeded: 0`, so a provisioning script recorded users that were never
+    // written, with no secret attached to them.
+    let mut cfg = config_with_users(&["alice"]);
+
+    let mut outcome = apply_batch(
+        &mut cfg,
+        vec![
+            operation(BulkAction::UserCreate, None, create_body("bob")),
+            operation(BulkAction::UserDelete, Some("ghost"), None),
+        ],
+        true,
+        far_deadline(),
+    )
+    .expect("a batch inside its budget must produce an outcome");
+    assert_eq!(statuses(&outcome), vec!["ok", "failed"]);
+
+    roll_back(&mut outcome.results);
+
+    assert_eq!(statuses(&outcome), vec!["rolled_back", "failed"]);
+    assert_eq!(outcome.results[0].code, Some("batch_aborted"));
+    assert!(outcome.results[0].secret.is_none());
+    assert_eq!(
+        outcome.results[1].code,
+        Some("not_found"),
+        "a refusal keeps the reason it was refused for"
+    );
+}
+
+#[tokio::test]
+async fn a_non_atomic_batch_applies_what_it_can() {
+    let mut cfg = config_with_users(&["alice"]);
+
+    let outcome = apply_batch(
+        &mut cfg,
+        vec![
+            operation(BulkAction::UserDelete, Some("ghost"), None),
+            operation(BulkAction::UserCreate, None, create_body("bob")),
+        ],
+        false,
+        far_deadline(),
+    )
+    .expect("a batch inside its budget must produce an outcome");
+
+    assert_eq!(statuses(&outcome), vec!["failed", "ok"]);
+    assert_eq!(outcome.succeeded, 1);
+    assert!(cfg.access.users.contains_key("bob"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_that_outruns_its_budget_stops_before_the_write() {
+    // The deadline has to be spent *before* the write, because cancelling after
+    // it would leave the file describing a state the process was never told
+    // about -- and the write runs in `spawn_blocking`, so dropping the future
+    // would not have undone it.
+    let mut cfg = config_with_users(&["alice"]);
+    let deadline = tokio::time::Instant::now();
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+
+    let outcome = apply_batch(
+        &mut cfg,
+        vec![operation(BulkAction::UserCreate, None, create_body("bob"))],
+        true,
+        deadline,
+    );
+
+    assert!(outcome.is_none(), "a spent budget must stop the batch");
+    assert!(
+        !cfg.access.users.contains_key("bob"),
+        "no operation may be applied once the budget is spent"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_user_is_dropped_from_the_views_the_response_attaches() {
+    // `retained` decides which users the response describes afterwards; a user
+    // created and then deleted in one batch has no state to report.
+    let mut cfg = config_with_users(&["alice"]);
+
+    let outcome = apply_batch(
+        &mut cfg,
+        vec![
+            operation(BulkAction::UserCreate, None, create_body("bob")),
+            operation(BulkAction::UserDelete, Some("bob"), None),
+        ],
+        true,
+        far_deadline(),
+    )
+    .expect("a batch inside its budget must produce an outcome");
+
+    assert_eq!(outcome.succeeded, 2);
+    assert!(!outcome.retained.contains("bob"));
+}

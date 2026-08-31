@@ -34,6 +34,9 @@ mod runtime_tasks;
 mod shutdown;
 mod tls_bootstrap;
 mod web_ingress;
+#[cfg(test)]
+#[path = "web_ingress_tests.rs"]
+mod web_ingress_tests;
 
 use arc_swap::ArcSwap;
 use std::net::{IpAddr, SocketAddr};

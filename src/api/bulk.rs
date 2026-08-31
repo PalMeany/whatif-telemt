@@ -127,59 +127,22 @@ async fn run_batch(
     let mut cfg = loaded?;
     ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
 
-    let mut results = Vec::with_capacity(body.operations.len());
-    let mut sections: Vec<AccessSection> = Vec::new();
-    let mut effects: Vec<RuntimeEffect> = Vec::new();
-    let mut secrets: Vec<(usize, String)> = Vec::new();
-    let mut retained: BTreeSet<String> = BTreeSet::new();
-    let mut succeeded = 0usize;
-    let mut failed = 0usize;
-    let mut aborted = false;
-
-    for operation in body.operations {
-        let action = operation.action;
-        let id = operation.id;
-        if aborted {
-            results.push(BulkResult::skipped(id, action, operation.user));
-            continue;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            // Cut the batch short before the write rather than after it: a
-            // partially applied batch that was never reported is the outcome an
-            // operator cannot reconcile.
-            drop(guard);
-            return Err(timed_out(budget));
-        }
-        match apply_operation(&mut cfg, action, operation.user, operation.body) {
-            Ok(applied) => {
-                sections.extend(applied.sections);
-                effects.extend(applied.effects);
-                if let Some(secret) = applied.secret {
-                    secrets.push((results.len(), secret));
-                }
-                if applied.retained {
-                    retained.insert(applied.user.clone());
-                } else {
-                    retained.remove(&applied.user);
-                }
-                succeeded += 1;
-                results.push(BulkResult::ok(id, action, applied.user));
-            }
-            Err(rejected) => {
-                failed += 1;
-                results.push(BulkResult::failed(
-                    id,
-                    action,
-                    rejected.user,
-                    rejected.code,
-                    rejected.message,
-                ));
-                if atomic {
-                    aborted = true;
-                }
-            }
-        }
-    }
+    let Some(outcome) = apply_batch(&mut cfg, body.operations, atomic, deadline) else {
+        // Cut the batch short before the write rather than after it: a
+        // partially applied batch that was never reported is the outcome an
+        // operator cannot reconcile.
+        drop(guard);
+        return Err(timed_out(budget));
+    };
+    let BatchOutcome {
+        mut results,
+        sections,
+        effects,
+        secrets,
+        retained,
+        succeeded,
+        failed,
+    } = outcome;
 
     if failed > 0 && atomic {
         // Nothing was written: the candidate config is dropped with the guard.
@@ -187,9 +150,7 @@ async fn run_batch(
         // so a caller iterating them cannot read `ok` for a user that does not
         // exist.
         drop(guard);
-        for result in &mut results {
-            result.rolled_back();
-        }
+        roll_back(&mut results);
         return Ok(success_response(
             StatusCode::CONFLICT,
             BulkResponse {
@@ -331,6 +292,103 @@ async fn attach_views(
         if let Some(view) = views.remove(user) {
             result.view = Some(view);
         }
+    }
+}
+
+/// What applying a batch to a candidate configuration produced.
+///
+/// Split out of [`run_batch`] so the decisions -- which results are `ok`, what
+/// a refusal aborts, what a rollback relabels -- are testable without a live
+/// API, a config file, or a runtime generation.
+struct BatchOutcome {
+    /// One entry per submitted operation, in submission order.
+    results: Vec<BulkResult>,
+    /// Every `access.*` table the batch dirtied, with repeats.
+    sections: Vec<AccessSection>,
+    /// Runtime actions queued for after the write.
+    effects: Vec<RuntimeEffect>,
+    /// Secrets issued, keyed by their index in `results`.
+    secrets: Vec<(usize, String)>,
+    /// Users the batch leaves in the configuration.
+    retained: BTreeSet<String>,
+    /// Operations that changed the candidate.
+    succeeded: usize,
+    /// Operations that were refused.
+    failed: usize,
+}
+
+/// Applies every operation to the candidate, in order.
+///
+/// Returns nothing when `deadline` passes mid-batch, which the caller turns
+/// into a refusal: stopping here means nothing has been written yet.
+fn apply_batch(
+    cfg: &mut ProxyConfig,
+    operations: Vec<model::BulkOperation>,
+    atomic: bool,
+    deadline: tokio::time::Instant,
+) -> Option<BatchOutcome> {
+    let mut outcome = BatchOutcome {
+        results: Vec::with_capacity(operations.len()),
+        sections: Vec::new(),
+        effects: Vec::new(),
+        secrets: Vec::new(),
+        retained: BTreeSet::new(),
+        succeeded: 0,
+        failed: 0,
+    };
+    let mut aborted = false;
+
+    for operation in operations {
+        let action = operation.action;
+        let id = operation.id;
+        if aborted {
+            outcome
+                .results
+                .push(BulkResult::skipped(id, action, operation.user));
+            continue;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        match apply_operation(cfg, action, operation.user, operation.body) {
+            Ok(applied) => {
+                outcome.sections.extend(applied.sections);
+                outcome.effects.extend(applied.effects);
+                if let Some(secret) = applied.secret {
+                    outcome.secrets.push((outcome.results.len(), secret));
+                }
+                if applied.retained {
+                    outcome.retained.insert(applied.user.clone());
+                } else {
+                    outcome.retained.remove(&applied.user);
+                }
+                outcome.succeeded += 1;
+                outcome
+                    .results
+                    .push(BulkResult::ok(id, action, applied.user));
+            }
+            Err(rejected) => {
+                outcome.failed += 1;
+                outcome.results.push(BulkResult::failed(
+                    id,
+                    action,
+                    rejected.user,
+                    rejected.code,
+                    rejected.message,
+                ));
+                if atomic {
+                    aborted = true;
+                }
+            }
+        }
+    }
+    Some(outcome)
+}
+
+/// Relabels the results of a batch whose candidate was discarded.
+fn roll_back(results: &mut [BulkResult]) {
+    for result in results.iter_mut() {
+        result.rolled_back();
     }
 }
 

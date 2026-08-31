@@ -29,6 +29,7 @@ const UPDATE_BATCH: u32 = 20;
 pub(super) const MAX_MESSAGE_CHARS: usize = 4000;
 
 /// One update the bot cares about: a text message in an allowed chat.
+#[derive(Debug)]
 pub(super) struct Command {
     /// Update sequence number, used to acknowledge the batch.
     pub(super) update_id: i64,

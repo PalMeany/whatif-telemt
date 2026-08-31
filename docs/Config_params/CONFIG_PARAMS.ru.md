@@ -3653,17 +3653,87 @@ WEB-транспорт прокси: MTProto, переносимый через 
 
 Всё, что этот форк добавляет поверх telemt, находится в `[fork]` и больше нигде,
 поэтому любой ключ выше сохраняет то же значение, что и в оригинальном telemt.
-Раздел необязателен, а `[fork] enabled = false` выключает все функции форка
-одним ключом.
+Раздел необязателен; `[fork] enabled = false` выключает все функции форка одним
+ключом. Развёрнутый справочник, включая то, что меняет каждый переключатель в
+выключенном состоянии: [docs/Fork/FORK_CONFIG.ru.md](../Fork/FORK_CONFIG.ru.md).
 
 | Ключ | Тип | По умолчанию | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | `fork.enabled` | `bool` | `true` | `✘` |
 | `fork.web_implementation` | `"auto" \| "telemt" \| "fork" \| "both" \| "off"` | `"auto"` | `✘` |
-| `fork.runtime.*` | `bool` (16 переключателей) | `true` | `✘` |
-| `fork.web.*` | Table | WEB-транспорт форка, выключен | частично |
-| `fork.prometheus.*` | Table | встроенная панель, выключена | `✘` |
-| `fork.telegram.*` | Table | бот администратора, выключен | `✘` |
-| `fork.api.*` | Table | bulk-запросы, выключены | `✘` |
 
-Полный справочник по каждому ключу: [docs/Fork/FORK_CONFIG.ru.md](../Fork/FORK_CONFIG.ru.md).
+## fork.runtime
+
+Шестнадцать переключателей, по одному на каждое отличие рантайма от
+оригинального telemt. Все `bool`, все по умолчанию `true`, все `✘` для
+hot-reload: читаются при старте или при перезагрузке рантайма.
+
+`process_admission_budget`, `process_buffer_pool`, `process_uptime_clock`,
+`reload_cancel`, `reload_deadlines`, `reload_config_rollback`,
+`reload_validate_candidate`, `reload_error_kind`, `reload_config_snapshot_hash`,
+`me_writer_teardown`, `tls_front_cache_budget_release`,
+`synlimit_generation_reconciler`, `shutdown_unbind_listeners_first`,
+`session_admission_closed_metric`, `user_delete_forgets_quota`,
+`rust_log_survives_reload`.
+
+## fork.web
+
+Собственный WEB-транспорт форка, не связанный с `[web]` выше. Схема та же, что
+была, когда транспорт занимал `[web]`; переехало только имя раздела. Полный
+справочник:
+[docs/Advanced_settings/WEB_PROXY.en.md](../Advanced_settings/WEB_PROXY.en.md).
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.web.enabled` | `bool` | `false` | `✘` |
+| `fork.web.listen` | `String` | `"127.0.0.1:8080"` | `✘` |
+| `fork.web.admin_listen` | `String` | `"127.0.0.1:8081"` | `✘` |
+| `fork.web.hostname` | `String` | `""` | `✘` |
+| `fork.web.public_dir` | `String` | — | `✘` |
+| `fork.web.public_upstream` | `String` | — | `✘` |
+| `fork.web.carrier_mode` | `"https" \| "https-lanes" \| "websocket" \| "websocket-lanes"` | `"https"` | `✔` |
+| `fork.web.derive_user_profiles` | `bool` | `false` | `✔` |
+| `fork.web.trusted_proxies` | `IpNetwork[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `fork.web.limits` | Table | см. WEB_PROXY | `✘` |
+| `fork.web.timeouts` | Table | см. WEB_PROXY | `✘` |
+| `fork.web.profiles` | Array of tables | `[]` | `✔` |
+
+## fork.prometheus
+
+Встроенная панель метрик. По умолчанию выключена.
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.prometheus.enabled` | `bool` | `false` | `✘` |
+| `fork.prometheus.path` | `String` | `"/panel"` | `✘` |
+| `fork.prometheus.listen` | `String` | `""` (общий слушатель метрик) | `✘` |
+| `fork.prometheus.whitelist` | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | `✘` |
+| `fork.prometheus.refresh_secs` | `u16` | `5` | `✘` |
+| `fork.prometheus.history_points` | `u16` | `120` (max `1440`) | `✘` |
+| `fork.prometheus.title` | `String` | `""` | `✘` |
+| `fork.prometheus.show_users` | `bool` | `false` | `✘` |
+
+## fork.telegram
+
+Бот администратора. По умолчанию выключен, во включённом состоянии только для чтения.
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.telegram.enabled` | `bool` | `false` | `✘` |
+| `fork.telegram.token` | `String` | `""` | `✘` |
+| `fork.telegram.admins` | `i64[]` | `[]` (нужны и отправитель, **и** чат) | `✘` |
+| `fork.telegram.allow_mutations` | `bool` | `false` | `✘` |
+| `fork.telegram.api_base` | `String` | `"https://api.telegram.org"` | `✘` |
+| `fork.telegram.poll_timeout_secs` | `u16` | `25` (1..=50) | `✘` |
+| `fork.telegram.request_timeout_secs` | `u16` | `30` (должен быть больше таймаута опроса) | `✘` |
+| `fork.telegram.upstream_scope` | `String` | `""` (прямое соединение) | `✘` |
+
+## fork.api
+
+Дополнения форка к control plane.
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.api.bulk_enabled` | `bool` | `false` | `✘` |
+| `fork.api.bulk_max_operations` | `usize` | `100` (max `1000`) | `✘` |
+| `fork.api.bulk_timeout_secs` | `u16` | `10` (1..=14) | `✘` |

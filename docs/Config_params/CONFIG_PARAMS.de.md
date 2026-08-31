@@ -3647,18 +3647,87 @@ auf Englisch).
 # fork
 
 Alles, was dieser Fork zusätzlich zu telemt mitbringt, steht unter `[fork]` und
-sonst nirgends, sodass jeder oben dokumentierte Schlüssel seine Bedeutung aus
-dem unveränderten telemt behält. Der Abschnitt ist optional, und
+sonst nirgends, sodass jeder oben dokumentierte Schlüssel seine Bedeutung aus dem
+unveränderten telemt behält. Der Abschnitt ist optional;
 `[fork] enabled = false` schaltet jede Fork-Funktion mit einem Schlüssel ab.
+Ausführliche Referenz: [docs/Fork/FORK_CONFIG.en.md](../Fork/FORK_CONFIG.en.md).
 
 | Schlüssel | Typ | Standard | Hot-Reload |
 | --- | ---- | ------- | ---------- |
 | `fork.enabled` | `bool` | `true` | `✘` |
 | `fork.web_implementation` | `"auto" \| "telemt" \| "fork" \| "both" \| "off"` | `"auto"` | `✘` |
-| `fork.runtime.*` | `bool` (16 Schalter) | `true` | `✘` |
-| `fork.web.*` | Table | WEB-Transport des Forks, deaktiviert | teilweise |
-| `fork.prometheus.*` | Table | eingebautes Panel, deaktiviert | `✘` |
-| `fork.telegram.*` | Table | Admin-Bot, deaktiviert | `✘` |
-| `fork.api.*` | Table | Bulk-Anfragen, deaktiviert | `✘` |
 
-Vollständige Referenz: [docs/Fork/FORK_CONFIG.en.md](../Fork/FORK_CONFIG.en.md).
+## fork.runtime
+
+Sixteen switches, one per runtime deviation from stock telemt. All `bool`, all
+default `true`, all `✘` for hot-reload: they are read at start-up or on a
+runtime reload.
+
+`process_admission_budget`, `process_buffer_pool`, `process_uptime_clock`,
+`reload_cancel`, `reload_deadlines`, `reload_config_rollback`,
+`reload_validate_candidate`, `reload_error_kind`, `reload_config_snapshot_hash`,
+`me_writer_teardown`, `tls_front_cache_budget_release`,
+`synlimit_generation_reconciler`, `shutdown_unbind_listeners_first`,
+`session_admission_closed_metric`, `user_delete_forgets_quota`,
+`rust_log_survives_reload`.
+
+## fork.web
+
+This fork's own WEB proxy transport, unrelated to `[web]` above. Same schema it
+had when it owned `[web]`; only the section name moved. Full reference:
+[docs/Advanced_settings/WEB_PROXY.en.md](../Advanced_settings/WEB_PROXY.en.md).
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.web.enabled` | `bool` | `false` | `✘` |
+| `fork.web.listen` | `String` | `"127.0.0.1:8080"` | `✘` |
+| `fork.web.admin_listen` | `String` | `"127.0.0.1:8081"` | `✘` |
+| `fork.web.hostname` | `String` | `""` | `✘` |
+| `fork.web.public_dir` | `String` | — | `✘` |
+| `fork.web.public_upstream` | `String` | — | `✘` |
+| `fork.web.carrier_mode` | `"https" \| "https-lanes" \| "websocket" \| "websocket-lanes"` | `"https"` | `✔` |
+| `fork.web.derive_user_profiles` | `bool` | `false` | `✔` |
+| `fork.web.trusted_proxies` | `IpNetwork[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `fork.web.limits` | Table | see WEB_PROXY | `✘` |
+| `fork.web.timeouts` | Table | see WEB_PROXY | `✘` |
+| `fork.web.profiles` | Array of tables | `[]` | `✔` |
+
+## fork.prometheus
+
+Built-in metrics panel. Off by default.
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.prometheus.enabled` | `bool` | `false` | `✘` |
+| `fork.prometheus.path` | `String` | `"/panel"` | `✘` |
+| `fork.prometheus.listen` | `String` | `""` (share the metrics listener) | `✘` |
+| `fork.prometheus.whitelist` | `IpNetwork[]` | `["127.0.0.1/32", "::1/128"]` | `✘` |
+| `fork.prometheus.refresh_secs` | `u16` | `5` | `✘` |
+| `fork.prometheus.history_points` | `u16` | `120` (max `1440`) | `✘` |
+| `fork.prometheus.title` | `String` | `""` | `✘` |
+| `fork.prometheus.show_users` | `bool` | `false` | `✘` |
+
+## fork.telegram
+
+Admin bot. Off by default, read-only when on.
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.telegram.enabled` | `bool` | `false` | `✘` |
+| `fork.telegram.token` | `String` | `""` | `✘` |
+| `fork.telegram.admins` | `i64[]` | `[]` (sender **and** chat must appear) | `✘` |
+| `fork.telegram.allow_mutations` | `bool` | `false` | `✘` |
+| `fork.telegram.api_base` | `String` | `"https://api.telegram.org"` | `✘` |
+| `fork.telegram.poll_timeout_secs` | `u16` | `25` (1..=50) | `✘` |
+| `fork.telegram.request_timeout_secs` | `u16` | `30` (must exceed the poll timeout) | `✘` |
+| `fork.telegram.upstream_scope` | `String` | `""` (dial directly) | `✘` |
+
+## fork.api
+
+Fork-only control-plane surface.
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.api.bulk_enabled` | `bool` | `false` | `✘` |
+| `fork.api.bulk_max_operations` | `usize` | `100` (max `1000`) | `✘` |
+| `fork.api.bulk_timeout_secs` | `u16` | `10` (1..=14) | `✘` |

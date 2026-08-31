@@ -27,6 +27,8 @@ use crate::config::ProxyConfig;
 
 mod client;
 mod commands;
+#[cfg(test)]
+mod tests;
 mod transport;
 
 use client::BotClient;

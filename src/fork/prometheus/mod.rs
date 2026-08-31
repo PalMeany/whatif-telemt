@@ -221,6 +221,67 @@ mod tests {
         }
     }
 
+    /// Mirrors the label pattern the panel script parses with.
+    ///
+    /// Kept byte-identical to the regex in `panel.html`, so a change to one
+    /// without the other fails here rather than in a browser.
+    const LABEL_PATTERN: &str = r#"([A-Za-z_][A-Za-z0-9_]*)="((?:[^"\\]|\\.)*)""#;
+
+    #[tokio::test]
+    async fn the_exposition_matches_what_the_panel_script_parses() {
+        // The page has no test harness of its own, so its parsing assumptions
+        // are asserted against a real rendered exposition here: line-oriented,
+        // one trailing space-separated number, and labels in the exact shape
+        // its regex accepts.
+        assert!(
+            DOCUMENT.contains(LABEL_PATTERN),
+            "panel.html must use the label pattern this test pins"
+        );
+
+        let runtime = crate::maestro::generation::test_runtime_generation(
+            1,
+            crate::config::ProxyConfig::default(),
+        );
+        let exposition = crate::metrics::render_for_runtime(&runtime).await;
+        let pattern = regex::Regex::new(LABEL_PATTERN).expect("the pinned pattern must compile");
+
+        let mut samples = 0usize;
+        for line in exposition.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('#') {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.get(1) == Some(&"TYPE") {
+                    assert!(
+                        fields.len() >= 4,
+                        "the panel reads `# TYPE <name> <type>`: {line}"
+                    );
+                }
+                continue;
+            }
+            let split = line
+                .rfind(' ')
+                .unwrap_or_else(|| panic!("every sample needs a value: {line}"));
+            let value = &line[split + 1..];
+            assert!(
+                value.parse::<f64>().is_ok(),
+                "the panel takes everything after the last space as a number: {line}"
+            );
+            let head = &line[..split];
+            if let Some(brace) = head.find('{') {
+                let labels = &head[brace + 1..head.rfind('}').expect("a label set must close")];
+                assert!(
+                    labels.is_empty() || pattern.is_match(labels),
+                    "the panel's label pattern must accept: {line}"
+                );
+            }
+            samples += 1;
+        }
+        assert!(samples > 50, "the fixture must render a real exposition");
+    }
+
     #[test]
     fn every_placeholder_is_substituted() {
         let response = render(&enabled_config(), &SecureRandom::new());
