@@ -9,7 +9,10 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use fork::{ForkConfig, WebImplementation};
+pub use fork::{
+    ForkApiConfig, ForkConfig, ForkPrometheusConfig, ForkRuntimeConfig, ForkTelegramConfig,
+    WebImplementation,
+};
 pub use load::ProxyConfig;
 pub(crate) use load::{ConfigSourceGraph, LoadedConfig};
 pub use types::*;

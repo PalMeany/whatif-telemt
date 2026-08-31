@@ -559,6 +559,11 @@ async fn run_telemt_core(
     // before any listener is bound, so its handles exist from here on.
     let mut web_ingress = web_ingress::WebIngress::new(&config);
 
+    // Owned by the process and shared by every control-plane writer, so the
+    // HTTP API and the Telegram bot serialise against each other rather than
+    // racing on the configuration file.
+    let config_mutation_lock = Arc::new(tokio::sync::Mutex::new(()));
+
     if config.server.api.enabled {
         let listen = match config.server.api.listen.parse::<SocketAddr>() {
             Ok(listen) => listen,
@@ -583,6 +588,7 @@ async fn run_telemt_core(
             let runtime_watch_rx_api = runtime_watch_rx.clone();
             let web_trace_api = web_ingress.trace();
             let web_runtime_rx_api = web_ingress.subscribe();
+            let mutation_lock_api = config_mutation_lock.clone();
             tokio::spawn(async move {
                 api::serve(
                     listen,
@@ -596,6 +602,7 @@ async fn run_telemt_core(
                     runtime_watch_rx_api,
                     web_trace_api,
                     web_runtime_rx_api,
+                    mutation_lock_api,
                 )
                 .await;
             });
@@ -1050,6 +1057,18 @@ async fn run_telemt_core(
         unix_listener,
         active_runtime.clone(),
         listener_shutdown.clone(),
+    );
+
+    // Process-scoped like the WEB transports: a bot cancelled and respawned on
+    // every reload would drop its long poll and re-deliver what was in flight.
+    crate::fork::telegram::start(
+        &config,
+        api::control::ControlPlane::new(
+            config_path.clone(),
+            config_mutation_lock.clone(),
+            active_runtime.clone(),
+            detected_ips_rx.clone(),
+        ),
     );
 
     // The WEB carrier resolves its runtime pieces per stream, so it follows

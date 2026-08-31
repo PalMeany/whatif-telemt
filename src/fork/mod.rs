@@ -6,8 +6,10 @@
 //! Submodules:
 //! - `prometheus`: the built-in metrics panel
 //! - `switches`: process-wide mirror of switches that cannot reach a config
+//! - `telegram`: the Telegram admin bot
 //! - `web`: this fork's own WEB proxy transport, an alternative to telemt's
 
 pub(crate) mod prometheus;
 pub(crate) mod switches;
+pub(crate) mod telegram;
 pub(crate) mod web;

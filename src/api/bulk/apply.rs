@@ -22,7 +22,7 @@ use super::model::BulkAction;
 /// them mid-batch would leave live sessions inconsistent with a batch that is
 /// later refused as a whole.
 #[derive(Debug)]
-pub(super) enum RuntimeEffect {
+pub(in crate::api) enum RuntimeEffect {
     /// Publishes an enable/disable decision to the live generation.
     SetEnabled { user: String, enabled: bool },
     /// Cancels a user's live sessions.
@@ -37,28 +37,28 @@ pub(super) enum RuntimeEffect {
 
 /// What one applied operation produced.
 #[derive(Debug)]
-pub(super) struct AppliedOperation {
+pub(in crate::api) struct AppliedOperation {
     /// Username the operation acted on.
-    pub(super) user: String,
+    pub(in crate::api) user: String,
     /// Secret this operation issued, when it issued one.
-    pub(super) secret: Option<String>,
+    pub(in crate::api) secret: Option<String>,
     /// Tables the operation dirtied.
-    pub(super) sections: Vec<AccessSection>,
+    pub(in crate::api) sections: Vec<AccessSection>,
     /// Runtime actions to run after the write.
-    pub(super) effects: Vec<RuntimeEffect>,
+    pub(in crate::api) effects: Vec<RuntimeEffect>,
     /// Whether the user still exists after the operation.
-    pub(super) retained: bool,
+    pub(in crate::api) retained: bool,
 }
 
 /// Why one operation was refused.
 #[derive(Debug)]
-pub(super) struct RejectedOperation {
+pub(in crate::api) struct RejectedOperation {
     /// Stable failure code, matching the single-operation route's codes.
-    pub(super) code: &'static str,
+    pub(in crate::api) code: &'static str,
     /// Human-readable reason.
-    pub(super) message: String,
+    pub(in crate::api) message: String,
     /// Username the operation named, when it named a usable one.
-    pub(super) user: Option<String>,
+    pub(in crate::api) user: Option<String>,
 }
 
 impl RejectedOperation {
@@ -74,7 +74,7 @@ impl RejectedOperation {
 type OperationResult = Result<AppliedOperation, RejectedOperation>;
 
 /// Applies one operation to the candidate configuration.
-pub(super) fn apply_operation(
+pub(in crate::api) fn apply_operation(
     cfg: &mut ProxyConfig,
     action: BulkAction,
     user: Option<String>,

@@ -20,6 +20,9 @@ use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
 
 use crate::config::ProxyConfig;
+use crate::ip_tracker::UserIpTracker;
+use crate::proxy::shared_state::ProxySharedState;
+use crate::stats::Stats;
 
 use super::config_store::{
     AccessSection, ensure_expected_revision, load_config_from_disk, parse_if_match,
@@ -35,7 +38,8 @@ mod model;
 #[cfg(test)]
 mod tests;
 
-use apply::{RuntimeEffect, apply_operation};
+pub(super) use apply::{RuntimeEffect, apply_operation};
+pub(crate) use model::BulkAction;
 use model::{BulkRequest, BulkResponse, BulkResult};
 
 /// Path this module owns.
@@ -201,7 +205,20 @@ async fn run_batch(
     let revision = save_access_sections_to_disk(&shared.config_path, &cfg, &sections).await?;
     drop(guard);
 
-    apply_runtime_effects(effects, shared).await;
+    run_runtime_effects(
+        effects,
+        &shared.stats,
+        &shared.ip_tracker,
+        &shared.proxy_shared,
+        shared
+            .active_runtime
+            .load()
+            .config()
+            .fork
+            .runtime_switches()
+            .user_delete_forgets_quota,
+    )
+    .await;
 
     for (index, secret) in secrets {
         results[index].secret = Some(secret);
@@ -221,35 +238,37 @@ async fn run_batch(
 }
 
 /// Runs the deferred runtime actions once the batch is on disk.
-async fn apply_runtime_effects(effects: Vec<RuntimeEffect>, shared: &ApiShared) {
+///
+/// Shared with `crate::api::control`, so the bot and this route apply the same
+/// side effects in the same order.
+pub(super) async fn run_runtime_effects(
+    effects: Vec<RuntimeEffect>,
+    stats: &Stats,
+    ip_tracker: &UserIpTracker,
+    proxy_shared: &ProxySharedState,
+    forget_deleted_user_quota: bool,
+) {
     for effect in effects {
         match effect {
             RuntimeEffect::SetEnabled { user, enabled } => {
-                shared.proxy_shared.set_user_enabled(&user, enabled);
+                proxy_shared.set_user_enabled(&user, enabled);
             }
             RuntimeEffect::CancelSessions { user } => {
-                shared.proxy_shared.cancel_user_sessions(&user);
+                proxy_shared.cancel_user_sessions(&user);
             }
             RuntimeEffect::SetIpLimit { user, limit } => match limit {
-                Some(limit) => shared.ip_tracker.set_user_limit(&user, limit).await,
-                None => shared.ip_tracker.remove_user_limit(&user).await,
+                Some(limit) => ip_tracker.set_user_limit(&user, limit).await,
+                None => ip_tracker.remove_user_limit(&user).await,
             },
             RuntimeEffect::ClearIps { user } => {
-                shared.ip_tracker.clear_user_ips(&user).await;
+                ip_tracker.clear_user_ips(&user).await;
             }
             RuntimeEffect::ForgetUser { user } => {
                 // Quota is process-scoped and outlives both the config edit and
                 // the runtime generation, so a re-created name would otherwise
                 // start pre-charged.
-                if shared
-                    .active_runtime
-                    .load()
-                    .config()
-                    .fork
-                    .runtime_switches()
-                    .user_delete_forgets_quota
-                {
-                    shared.stats.forget_user(&user);
+                if forget_deleted_user_quota {
+                    stats.forget_user(&user);
                 }
             }
         }

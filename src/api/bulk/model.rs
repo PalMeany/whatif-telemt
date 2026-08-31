@@ -46,9 +46,12 @@ pub(super) struct BulkOperation {
 ///
 /// Deliberately limited to the `access.*` tables: those are the ones an
 /// operator provisions in bulk, and they are all owned by one config source,
-/// so the whole batch is one atomic write.
+/// so the whole batch is one atomic write. Every variant is prefixed with the
+/// object it acts on, so the wire names stay readable once more than users are
+/// batchable.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum BulkAction {
+pub(crate) enum BulkAction {
     /// Adds a user; body is a `POST /v1/users` request.
     #[serde(rename = "user.create")]
     UserCreate,
@@ -71,7 +74,7 @@ pub(super) enum BulkAction {
 
 impl BulkAction {
     /// Wire name, so a result reads the same as the request that produced it.
-    pub(super) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             BulkAction::UserCreate => "user.create",
             BulkAction::UserPatch => "user.patch",

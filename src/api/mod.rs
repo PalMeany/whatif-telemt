@@ -34,9 +34,11 @@ use crate::web::control::WebRuntimePublication;
 use crate::web::trace::WebTraceStore;
 
 // Batched user operations under a single config write.
-mod bulk;
+pub(crate) mod bulk;
 mod config_edit;
+// Control-plane operations for callers that are not this HTTP API.
 pub(crate) mod config_store;
+pub(crate) mod control;
 mod events;
 mod http_utils;
 mod model;
@@ -330,6 +332,7 @@ pub async fn serve(
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
     web_trace: Arc<WebTraceStore>,
     web_runtime_rx: watch::Receiver<WebRuntimePublication>,
+    mutation_lock: Arc<Mutex<()>>,
 ) {
     let active_runtime = loop {
         if let Some(active_runtime) = active_runtime_rx.borrow().clone() {
@@ -376,7 +379,7 @@ pub async fn serve(
         config_path,
         quota_state_path,
         detected_ips_rx,
-        mutation_lock: Arc::new(Mutex::new(())),
+        mutation_lock,
         minimal_cache: Arc::new(Mutex::new(None)),
         runtime_edge_connections_cache: Arc::new(Mutex::new(None)),
         runtime_edge_recompute_lock: Arc::new(Mutex::new(())),

@@ -685,7 +685,7 @@ fn empty_user_links() -> UserLinks {
     }
 }
 
-fn build_user_links(
+pub(in crate::api) fn build_user_links(
     cfg: &ProxyConfig,
     secret: &str,
     startup_detected_ip_v4: Option<IpAddr>,

@@ -131,6 +131,7 @@ async fn perform_shutdown(
     // implementations are drained here; each is a no-op when it is not running.
     web_ingress.shutdown().await;
     crate::fork::web::shutdown();
+    crate::fork::telegram::shutdown();
 
     // Graceful ME pool shutdown
     runtime.stop_sessions().await;
