@@ -46,13 +46,19 @@ pub(crate) struct RuntimeLogFilter {
     /// re-derived the filter from `general.log_level` alone would silently
     /// discard an operator's `RUST_LOG=telemt::proxy=trace` mid-incident.
     has_rust_log: bool,
+    /// Whether that memory is honoured on a reload.
+    ///
+    /// Off, `fork.runtime.rust_log_survives_reload` restores telemt's
+    /// behaviour: only the first filter reads `RUST_LOG`.
+    survives_reload: bool,
 }
 
 impl RuntimeLogFilter {
-    pub(crate) fn new(handle: reload::Handle<EnvFilter, Registry>) -> Self {
+    pub(crate) fn new(handle: reload::Handle<EnvFilter, Registry>, survives_reload: bool) -> Self {
         Self {
             handle,
             has_rust_log: std::env::var_os("RUST_LOG").is_some(),
+            survives_reload,
         }
     }
 
@@ -67,7 +73,11 @@ impl RuntimeLogFilter {
     }
 
     pub(crate) fn apply_reload(&self, level: &LogLevel) {
-        self.apply(level);
+        if self.survives_reload {
+            self.apply(level);
+        } else {
+            self.apply_without_env(level);
+        }
     }
 
     pub(crate) fn spawn_watcher(
@@ -88,7 +98,16 @@ impl RuntimeLogFilter {
     }
 
     fn apply(&self, level: &LogLevel) {
-        let runtime_filter = EnvFilter::new(log_filter_spec(self.has_rust_log, level));
+        self.install(log_filter_spec(self.has_rust_log, level));
+    }
+
+    /// Rebuilds the filter from `general.log_level` alone, discarding `RUST_LOG`.
+    fn apply_without_env(&self, level: &LogLevel) {
+        self.install(log_filter_spec(false, level));
+    }
+
+    fn install(&self, spec: String) {
+        let runtime_filter = EnvFilter::new(spec);
         if let Err(error) = self.handle.reload(runtime_filter) {
             tracing::error!(error = %error, "Failed to update runtime log filter");
         }

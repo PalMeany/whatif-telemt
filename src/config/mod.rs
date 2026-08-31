@@ -1,15 +1,15 @@
 //! Configuration.
 
 pub(crate) mod defaults;
+pub mod fork;
 pub mod hot_reload;
 mod load;
 mod types;
-mod web;
 
 #[cfg(test)]
 mod tests;
 
+pub use fork::{ForkConfig, WebImplementation};
 pub use load::ProxyConfig;
 pub(crate) use load::{ConfigSourceGraph, LoadedConfig};
 pub use types::*;
-pub use web::*;

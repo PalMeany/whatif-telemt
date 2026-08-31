@@ -228,6 +228,25 @@ impl RuntimeGeneration {
         self.me_pool_runtime.read().await.clone()
     }
 
+    /// Pins every dependency a client stream needs without retaining the generation.
+    ///
+    /// Telemt's own WEB transport terminates a demultiplexed stream through the
+    /// ordinary authenticated client path, which takes these by value.
+    pub(crate) fn client_runtime_deps(&self) -> crate::proxy::authenticated::ClientRuntimeDeps {
+        crate::proxy::authenticated::ClientRuntimeDeps {
+            config: self.config(),
+            stats: Arc::clone(&self.stats),
+            upstream_manager: Arc::clone(&self.upstream_manager),
+            buffer_pool: Arc::clone(&self.buffer_pool),
+            rng: Arc::clone(&self.rng),
+            me_pool: self.me_pool.clone(),
+            me_pool_runtime: Some(Arc::clone(&self.me_pool_runtime)),
+            route_runtime: Arc::clone(&self.route_runtime),
+            ip_tracker: Arc::clone(&self.ip_tracker),
+            shared: Arc::clone(&self.proxy_shared),
+        }
+    }
+
     /// Registers a session only while admission remains open.
     pub(crate) fn spawn_session<F>(&self, future: F) -> bool
     where

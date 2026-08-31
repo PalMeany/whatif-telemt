@@ -228,7 +228,7 @@ pub(crate) async fn prepare_runtime(
         Duration::from_secs(config.access.replay_window_secs),
     ));
     let buffer_pool = process.buffer_pool();
-    let max_connections = process.connection_limiter().semaphore();
+    let max_connections = process.connection_limiter(&config).semaphore();
     let watches = runtime_tasks::spawn_runtime_tasks(
         &config,
         config_path,
@@ -463,7 +463,7 @@ mod tests {
             None,
             Path::new("config.toml"),
             process,
-            RuntimeLogFilter::new(handle),
+            RuntimeLogFilter::new(handle, true),
             CancellationToken::new(),
         )
         .await
@@ -491,7 +491,7 @@ mod tests {
             None,
             Path::new("config.toml"),
             process,
-            RuntimeLogFilter::new(handle),
+            RuntimeLogFilter::new(handle, true),
             cancel,
         )
         .await

@@ -138,6 +138,24 @@ pub(crate) struct ProcessScope {
     buffer_pool: Arc<BufferPool>,
     direct_buffer_budget: Arc<DirectBufferBudget>,
     budget_inputs_tx: watch::Sender<Arc<DirectBufferBudgetInputs>>,
+    /// Fork switches resolved once, at start-up.
+    ///
+    /// Which resources a generation is handed is a structural decision taken
+    /// while the process boots, so it is captured here rather than re-read per
+    /// generation: a reload that flipped it mid-flight would leave the two
+    /// generations sharing half a budget.
+    switches: ProcessSwitches,
+}
+
+/// The `[fork.runtime]` switches this scope acts on.
+#[derive(Debug, Clone, Copy)]
+struct ProcessSwitches {
+    /// Share one admission budget across generations.
+    admission_budget: bool,
+    /// Share one relay buffer pool across generations.
+    buffer_pool: bool,
+    /// Seed generation stats with the process start instant.
+    uptime_clock: bool,
 }
 
 impl ProcessScope {
@@ -154,6 +172,7 @@ impl ProcessScope {
             shared: ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone()),
             max_connections: config.server.max_connections,
         }));
+        let fork = config.fork.runtime_switches();
         Arc::new(Self {
             started_at: Instant::now(),
             quota_store: Arc::new(QuotaStore::default()),
@@ -164,12 +183,24 @@ impl ProcessScope {
             )),
             direct_buffer_budget,
             budget_inputs_tx,
+            switches: ProcessSwitches {
+                admission_budget: fork.process_admission_budget,
+                buffer_pool: fork.process_buffer_pool,
+                uptime_clock: fork.process_uptime_clock,
+            },
         })
     }
 
-    /// Process start instant shared by every generation's `Stats`.
+    /// Start instant a new generation's `Stats` is seeded with.
+    ///
+    /// With `fork.runtime.process_uptime_clock` off this is the moment the
+    /// generation is built, so uptime restarts on every reload as telemt's does.
     pub(crate) fn started_at(&self) -> Instant {
-        self.started_at
+        if self.switches.uptime_clock {
+            self.started_at
+        } else {
+            Instant::now()
+        }
     }
 
     /// Per-user quota accounting that must survive reloads.
@@ -177,14 +208,32 @@ impl ProcessScope {
         self.quota_store.clone()
     }
 
-    /// Process-wide connection admission budget.
-    pub(crate) fn connection_limiter(&self) -> Arc<ConnectionLimiter> {
-        self.connection_limiter.clone()
+    /// Connection admission budget a generation is handed.
+    ///
+    /// With `fork.runtime.process_admission_budget` off each generation gets
+    /// its own limiter, so a drain admits up to twice `server.max_connections`
+    /// while both generations are live, exactly as telemt does.
+    pub(crate) fn connection_limiter(&self, config: &ProxyConfig) -> Arc<ConnectionLimiter> {
+        if self.switches.admission_budget {
+            self.connection_limiter.clone()
+        } else {
+            ConnectionLimiter::new(config.server.max_connections)
+        }
     }
 
-    /// Process-wide relay buffer pool.
+    /// Relay buffer pool a generation is handed.
+    ///
+    /// With `fork.runtime.process_buffer_pool` off each generation allocates
+    /// its own pool, as telemt does.
     pub(crate) fn buffer_pool(&self) -> Arc<BufferPool> {
-        self.buffer_pool.clone()
+        if self.switches.buffer_pool {
+            self.buffer_pool.clone()
+        } else {
+            Arc::new(BufferPool::with_config(
+                BUFFER_POOL_BUFFER_BYTES,
+                BUFFER_POOL_MAX_BUFFERS,
+            ))
+        }
     }
 
     /// Process-wide Direct copy-buffer envelope.
@@ -214,8 +263,10 @@ impl ProcessScope {
         stats: Arc<Stats>,
         shared: Arc<ProxySharedState>,
     ) {
-        self.connection_limiter
-            .retune(config.server.max_connections);
+        if self.switches.admission_budget {
+            self.connection_limiter
+                .retune(config.server.max_connections);
+        }
         self.budget_inputs_tx
             .send_replace(Arc::new(DirectBufferBudgetInputs {
                 stats,

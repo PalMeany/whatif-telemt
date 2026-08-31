@@ -1,312 +1,468 @@
-//! Relay-to-client downlink polling with newest-poll-wins parking.
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use tokio::sync::Notify;
+use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::web::error::WebError;
+use super::resident::{OwnedBatchBody, PendingCounts, PendingResponseLease};
+use super::{
+    DownBatch, PendingClass, PollResult, QUEUE_ITEM_COST, QueuedFrame, SessionState, WebSession,
+};
+use crate::web::frame::{self, FrameType};
+use crate::web::manager::ManagerError;
 
-use super::Session;
-use super::state::{LaneQueue, PendingCharge, SessionState};
-
-/// Clears the parked-poll marker if this poll still owns it.
-///
-/// A dropped HTTP request future must not leave `down_active` set, otherwise
-/// the next poll on that queue would park behind a caller that no longer runs.
-struct PollGuard<'a> {
-    session: &'a Session,
-    lane: Option<u32>,
-    mine: Arc<Notify>,
-}
-
-impl Drop for PollGuard<'_> {
-    fn drop(&mut self) {
-        let mut state = self.session.state.lock();
-        if let Some(queue) = queue_mut(&mut state, self.lane)
-            && owns(queue, &self.mine)
-        {
-            queue.down_active = false;
-            queue.superseded = None;
+impl WebSession {
+    /// Polls pending downlink frames with cursor replay and newest-poll-wins semantics.
+    pub(crate) async fn poll_down(&self, cursor: u64) -> Result<PollResult, ManagerError> {
+        if !self.carrier().is_multiplexed() {
+            return Err(ManagerError::Protocol);
         }
-    }
-}
-
-impl Session {
-    /// Waits for the next downlink batch of the shared carrier.
-    pub(crate) async fn poll(&self, cursor: u64) -> Result<(Bytes, u64), WebError> {
-        if self.uses_lanes() {
-            return Err(WebError::Protocol);
-        }
-        let (body, next, _) = self.poll_queue(None, cursor).await?;
-        Ok((body, next))
-    }
-
-    /// Waits for the next downlink batch of one carrier lane.
-    ///
-    /// The third result element reports that the lane finished and the client
-    /// should stop polling it.
-    pub(crate) async fn poll_lane(
-        &self,
-        lane_id: u32,
-        cursor: u64,
-    ) -> Result<(Bytes, u64, bool), WebError> {
-        if !self.uses_lanes() || lane_id > crate::web::frame::MAX_STREAM_ID {
-            return Err(WebError::Protocol);
-        }
-        self.poll_queue(Some(lane_id), cursor).await
-    }
-
-    async fn poll_queue(
-        &self,
-        lane: Option<u32>,
-        cursor: u64,
-    ) -> Result<(Bytes, u64, bool), WebError> {
-        let mine = Arc::new(Notify::new());
-        let notify = {
+        let (epoch, healthy) = {
             let mut state = self.state.lock();
             if state.closed {
-                return Err(WebError::Closed);
-            }
-            if queue_mut(&mut state, lane).is_none() {
-                // A lane whose queue is gone but whose stream id is still
-                // tombstoned has simply been evicted after it finished. The
-                // bridge is told the lane is closed and stops polling it; a 404
-                // here would instead read as parent-carrier failure and cost
-                // the client every other lane on the session.
-                if let Some(id) = lane
-                    && state.closed_streams.contains(&id)
-                {
-                    return Ok((Bytes::new(), cursor, true));
-                }
-                return Err(WebError::Protocol);
+                return Err(ManagerError::Closed);
             }
             state.last_activity = Instant::now();
-            match self.acknowledge_locked(&mut state, lane, cursor) {
-                Acknowledged::Replay(body, next) => return Ok((body, next, false)),
-                Acknowledged::Protocol => {
+            if let Some(unacked) = &state.unacked {
+                if cursor == unacked.base_cursor {
+                    return Ok(PollResult {
+                        body: unacked.body.clone(),
+                        next_cursor: unacked.next_cursor,
+                        lane_closed: false,
+                    });
+                }
+                if cursor != unacked.next_cursor {
                     drop(state);
-                    self.fail(lane);
-                    return Err(WebError::Protocol);
+                    self.close();
+                    return Err(ManagerError::Protocol);
                 }
-                Acknowledged::Continue => {}
-            }
-            let queue = queue_mut(&mut state, lane).expect("queue presence checked");
-            // Newest poll wins: an already parked poll is released with its own
-            // cursor instead of refusing the fresh request.
-            if queue.down_active
-                && let Some(previous) = queue.superseded.take()
-            {
-                previous.notify_waiters();
-            }
-            queue.superseded = Some(mine.clone());
-            queue.down_active = true;
-            queue.notify.clone()
-        };
-        let _guard = PollGuard {
-            session: self,
-            lane,
-            mine: mine.clone(),
-        };
-
-        let deadline = tokio::time::sleep(self.long_poll_delay());
-        tokio::pin!(deadline);
-        loop {
-            // Registration happens before the state check so a batch queued
-            // between the check and the await cannot be missed.
-            let queued = notify.notified();
-            let superseded = mine.notified();
-            tokio::pin!(queued);
-            tokio::pin!(superseded);
-            queued.as_mut().enable();
-            superseded.as_mut().enable();
-
-            {
-                let mut state = self.state.lock();
-                match self.collect_locked(&mut state, lane, cursor, &mine) {
-                    Collected::Batch(body, next) => {
-                        drop(state);
-                        self.count_down(body.len());
-                        return Ok((body, next, false));
-                    }
-                    Collected::Superseded => return Ok((Bytes::new(), cursor, false)),
-                    Collected::LaneClosed => return Ok((Bytes::new(), cursor, true)),
-                    Collected::SessionClosed => return Err(WebError::Closed),
-                    Collected::Park => {}
+                let carrier_health_eligible = unacked.carrier_health_eligible;
+                self.release_unacked_locked(&mut state);
+                state.carrier_health_downlink |= carrier_health_eligible;
+                if carrier_health_eligible {
+                    state.carrier_health_activity_at = Some(Instant::now());
                 }
+            } else if cursor != state.down_cursor {
+                drop(state);
+                self.close();
+                return Err(ManagerError::Protocol);
             }
-
-            tokio::select! {
-                _ = &mut queued => {}
-                _ = &mut superseded => {
-                    notify.notify_waiters();
-                    return Ok((Bytes::new(), cursor, false));
-                }
-                _ = &mut deadline => {
-                    let mut state = self.state.lock();
-                    let collected = self.collect_locked(&mut state, lane, cursor, &mine);
-                    match collected {
-                        Collected::Batch(body, next) => {
-                            drop(state);
-                            self.count_down(body.len());
-                            return Ok((body, next, false));
-                        }
-                        Collected::Superseded => {
-                            drop(state);
-                            notify.notify_waiters();
-                            return Ok((Bytes::new(), cursor, false));
-                        }
-                        Collected::LaneClosed => return Ok((Bytes::new(), cursor, true)),
-                        Collected::SessionClosed => return Err(WebError::Closed),
-                        Collected::Park => {
-                            if let Some(queue) = queue_mut(&mut state, lane) {
-                                queue.down_active = false;
-                                queue.superseded = None;
-                            }
-                            state.last_activity = Instant::now();
-                            return Ok((Bytes::new(), cursor, false));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Long-poll parking period with a per-poll jitter applied.
-    ///
-    /// An idle carrier otherwise emits a byte-identical request and response
-    /// pair on an exact period forever, which is a timing signature no amount
-    /// of payload shaping hides. The jitter only ever shortens the park, so a
-    /// client's own deadline is never overrun.
-    fn long_poll_delay(&self) -> Duration {
-        let configured = self.timeouts.long_poll_ms;
-        let span = configured / 8;
-        if span == 0 {
-            return Duration::from_millis(configured);
-        }
-        let mut sample = [0u8; 8];
-        self.rng.fill(&mut sample);
-        let jitter = u64::from_be_bytes(sample) % span;
-        Duration::from_millis(configured - jitter)
-    }
-
-    /// Applies the client cursor to the queue's replay window.
-    fn acknowledge_locked(
-        &self,
-        state: &mut SessionState,
-        lane: Option<u32>,
-        cursor: u64,
-    ) -> Acknowledged {
-        let charged = {
-            let Some(queue) = queue_mut(state, lane) else {
-                return Acknowledged::Protocol;
+            let Some(epoch) = state.down_epoch.checked_add(1) else {
+                drop(state);
+                self.close();
+                return Err(ManagerError::Protocol);
             };
-            if queue.unacked.is_empty() {
-                if cursor != queue.down_cursor {
-                    return Acknowledged::Protocol;
+            state.down_epoch = epoch;
+            let healthy = self.carrier_health_ready_locked(&mut state, Instant::now());
+            (state.down_epoch, healthy)
+        };
+        if healthy {
+            self.finish_carrier_health();
+        }
+        self.down_notify.notify_waiters();
+
+        let deadline = Duration::from_secs(self.timeouts.long_poll_secs);
+        let poll = async {
+            loop {
+                let notified = self.down_notify.notified();
+                {
+                    let mut state = self.state.lock();
+                    if state.down_epoch != epoch {
+                        return Ok(PollResult {
+                            body: Bytes::new(),
+                            next_cursor: cursor,
+                            lane_closed: false,
+                        });
+                    }
+                    if !state.pending_frames.is_empty() {
+                        let batch = match self.take_down_batch_locked(&mut state, cursor) {
+                            Ok(batch) => batch,
+                            Err(ManagerError::Backpressure) => {
+                                return Err(ManagerError::Backpressure);
+                            }
+                            Err(error) => {
+                                drop(state);
+                                self.close();
+                                return Err(error);
+                            }
+                        };
+                        let result = PollResult {
+                            body: batch.body.clone(),
+                            next_cursor: batch.next_cursor,
+                            lane_closed: false,
+                        };
+                        if let Some(manager) = self.manager.upgrade() {
+                            manager.record_down(result.body.len());
+                        }
+                        state.unacked = Some(batch);
+                        return Ok(result);
+                    }
+                    if state.closed {
+                        return Err(ManagerError::Closed);
+                    }
                 }
-                PendingCharge::default()
-            } else if cursor == queue.unacked_base {
-                return Acknowledged::Replay(queue.unacked.clone(), queue.down_cursor);
-            } else if cursor != queue.down_cursor {
-                return Acknowledged::Protocol;
-            } else {
-                let charged = queue.unacked_charge;
-                queue.unacked = Bytes::new();
-                queue.unacked_charge = PendingCharge::default();
-                charged
+                notified.await;
             }
         };
-        self.release_pending_locked(state, charged);
-        Acknowledged::Continue
+        match tokio::time::timeout(deadline, poll).await {
+            Ok(result) => result,
+            Err(_) => {
+                let mut state = self.state.lock();
+                if state.down_epoch == epoch {
+                    state.last_activity = Instant::now();
+                }
+                Ok(PollResult {
+                    body: Bytes::new(),
+                    next_cursor: cursor,
+                    lane_closed: false,
+                })
+            }
+        }
     }
 
-    /// Takes the next batch, or reports why the poll must keep waiting.
-    fn collect_locked(
+    /// Reserves session and process queue capacity while the session lock is held.
+    pub(super) fn reserve_locked(
         &self,
         state: &mut SessionState,
-        lane: Option<u32>,
-        cursor: u64,
-        mine: &Arc<Notify>,
-    ) -> Collected {
-        let closed = state.closed;
-        let batch_bytes = self.limits.carrier_batch_bytes;
-        let lane_finished = match lane {
-            Some(id) if id != 0 => {
-                !state.streams.contains_key(&id) && state.closed_streams.contains(&id)
+        bytes: usize,
+        items: usize,
+        class: PendingClass,
+    ) -> bool {
+        if bytes == 0 && items == 0 {
+            return true;
+        }
+        let data_byte_limit = self
+            .limits
+            .pending_bytes_per_session
+            .saturating_sub(self.limits.control_bytes_per_session);
+        let item_reserve =
+            16usize.saturating_add(self.limits.max_streams_per_session.saturating_mul(3));
+        let data_item_limit = self
+            .limits
+            .pending_items_per_session
+            .saturating_sub(item_reserve);
+        let resident = self.resident.snapshot();
+        let pending_bytes = state.pending_bytes.saturating_add(resident.bytes());
+        let pending_items = state.pending_items.saturating_add(resident.items());
+        let pending_control_bytes = state
+            .pending_control_bytes
+            .saturating_add(resident.control_bytes);
+        let pending_control_items = state
+            .pending_control_items
+            .saturating_add(resident.control_items);
+        if state.closed {
+            return false;
+        }
+        let control = class == PendingClass::Control;
+        let fits = if control {
+            bytes <= self.limits.control_bytes_per_session
+                && items <= item_reserve
+                && pending_bytes <= self.limits.pending_bytes_per_session.saturating_sub(bytes)
+                && pending_items <= self.limits.pending_items_per_session.saturating_sub(items)
+                && pending_control_bytes
+                    <= self.limits.control_bytes_per_session.saturating_sub(bytes)
+                && pending_control_items <= item_reserve.saturating_sub(items)
+        } else {
+            let data_bytes = pending_bytes.saturating_sub(pending_control_bytes);
+            let data_items = pending_items.saturating_sub(pending_control_items);
+            let (byte_limit, item_limit) = if class == PendingClass::Downlink {
+                let uplink_bytes = self.limits.max_body_bytes.saturating_add(
+                    self.limits
+                        .max_frames_per_body
+                        .saturating_mul(QUEUE_ITEM_COST),
+                );
+                (
+                    data_byte_limit.saturating_sub(uplink_bytes),
+                    data_item_limit.saturating_sub(self.limits.max_frames_per_body),
+                )
+            } else {
+                (data_byte_limit, data_item_limit)
+            };
+            bytes <= byte_limit
+                && items <= item_limit
+                && data_bytes <= byte_limit - bytes
+                && data_items <= item_limit - items
+        };
+        if !fits {
+            return false;
+        }
+        let Some(manager) = self.manager.upgrade() else {
+            return false;
+        };
+        if !manager.try_reserve_pending(
+            self.profile_key,
+            bytes,
+            items,
+            control,
+            class == PendingClass::Downlink,
+        ) {
+            return false;
+        }
+        state.pending_bytes += bytes;
+        state.pending_items += items;
+        if control {
+            state.pending_control_bytes += bytes;
+            state.pending_control_items += items;
+        }
+        true
+    }
+
+    /// Releases session and process queue capacity while the session lock is held.
+    pub(super) fn release_locked(
+        &self,
+        state: &mut SessionState,
+        bytes: usize,
+        items: usize,
+        control: bool,
+    ) {
+        state.pending_bytes = state.pending_bytes.saturating_sub(bytes);
+        state.pending_items = state.pending_items.saturating_sub(items);
+        if control {
+            state.pending_control_bytes = state.pending_control_bytes.saturating_sub(bytes);
+            state.pending_control_items = state.pending_control_items.saturating_sub(items);
+        }
+        if let Some(manager) = self.manager.upgrade() {
+            manager.release_pending(self.profile_key, bytes, items, control);
+        }
+    }
+
+    pub(super) fn release_local_locked(
+        &self,
+        state: &mut SessionState,
+        bytes: usize,
+        items: usize,
+        control: bool,
+    ) {
+        state.pending_bytes = state.pending_bytes.saturating_sub(bytes);
+        state.pending_items = state.pending_items.saturating_sub(items);
+        if control {
+            state.pending_control_bytes = state.pending_control_bytes.saturating_sub(bytes);
+            state.pending_control_items = state.pending_control_items.saturating_sub(items);
+        }
+    }
+
+    /// Coalesces one flow-control update into the bounded control queue.
+    pub(super) fn queue_window_locked(
+        &self,
+        state: &mut SessionState,
+        stream_id: u32,
+        amount: u32,
+    ) -> bool {
+        if amount == 0 {
+            return true;
+        }
+        if self.carrier().uses_lanes() {
+            return self.queue_control_locked(
+                state,
+                FrameType::Window,
+                stream_id,
+                &frame::window_payload(amount),
+            );
+        }
+        if let Some(index) = state.pending_windows.get(&stream_id).copied()
+            && let Some(queued) = state.pending_frames.get_mut(index)
+        {
+            let previous = u32::from_be_bytes(
+                queued.encoded[frame::HEADER_BYTES..frame::HEADER_BYTES + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+            if let Some(total) = previous.checked_add(amount) {
+                queued.encoded[frame::HEADER_BYTES..frame::HEADER_BYTES + 4]
+                    .copy_from_slice(&total.to_be_bytes());
+                self.down_notify.notify_waiters();
+                return true;
             }
-            _ => false,
+        }
+        self.queue_control_locked(
+            state,
+            FrameType::Window,
+            stream_id,
+            &frame::window_payload(amount),
+        )
+    }
+
+    /// Appends one control frame under both reserved queue budgets.
+    pub(super) fn queue_control_locked(
+        &self,
+        state: &mut SessionState,
+        frame_type: FrameType,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> bool {
+        self.queue_frame_locked(state, frame_type, stream_id, payload, true)
+    }
+
+    /// Appends one server-to-client DATA frame under downlink data budgets.
+    pub(super) fn queue_data_locked(
+        &self,
+        state: &mut SessionState,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> bool {
+        if self.carrier().uses_lanes() {
+            return self.queue_frame_locked(state, FrameType::Data, stream_id, payload, false);
+        }
+        let can_coalesce = state.pending_frames.back().is_some_and(|last| {
+            last.frame_type == FrameType::Data
+                && last.stream_id == stream_id
+                && last.encoded.len() - frame::HEADER_BYTES + payload.len()
+                    <= self.limits.max_frame_payload_bytes
+        });
+        if can_coalesce {
+            if !self.reserve_locked(state, payload.len(), 0, PendingClass::Downlink) {
+                return false;
+            }
+            let Some(last) = state.pending_frames.back_mut() else {
+                return false;
+            };
+            last.encoded.extend_from_slice(payload);
+            last.cost += payload.len();
+            let payload_len = (last.encoded.len() - frame::HEADER_BYTES) as u32;
+            last.encoded[4..8].copy_from_slice(&payload_len.to_be_bytes());
+            return true;
+        }
+        self.queue_frame_locked(state, FrameType::Data, stream_id, payload, false)
+    }
+
+    fn queue_frame_locked(
+        &self,
+        state: &mut SessionState,
+        frame_type: FrameType,
+        stream_id: u32,
+        payload: &[u8],
+        control: bool,
+    ) -> bool {
+        if self.carrier().uses_lanes() {
+            return self.queue_lane_frame_locked(state, frame_type, stream_id, payload, control);
+        }
+        let cost = frame::HEADER_BYTES + payload.len() + QUEUE_ITEM_COST;
+        let class = if control {
+            PendingClass::Control
+        } else {
+            PendingClass::Downlink
         };
-        let Some(queue) = queue_mut(state, lane) else {
-            return Collected::LaneClosed;
+        if !self.reserve_locked(state, cost, 1, class) {
+            return false;
+        }
+        let mut encoded = BytesMut::with_capacity(frame::HEADER_BYTES + payload.len());
+        encoded.put_u8(frame_type as u8);
+        encoded.put_u8((stream_id >> 16) as u8);
+        encoded.put_u8((stream_id >> 8) as u8);
+        encoded.put_u8(stream_id as u8);
+        encoded.put_u32(payload.len() as u32);
+        encoded.extend_from_slice(payload);
+        let index = state.pending_frames.len();
+        state.pending_frames.push_back(QueuedFrame {
+            encoded,
+            frame_type,
+            stream_id,
+            control,
+            cost,
+        });
+        if frame_type == FrameType::Window {
+            state.pending_windows.insert(stream_id, index);
+        }
+        self.down_notify.notify_waiters();
+        true
+    }
+
+    fn take_down_batch_locked(
+        &self,
+        state: &mut SessionState,
+        cursor: u64,
+    ) -> Result<DownBatch, ManagerError> {
+        let next_cursor = state
+            .down_cursor
+            .checked_add(1)
+            .ok_or(ManagerError::Protocol)?;
+        let mut count = 0usize;
+        let mut body_len = 0usize;
+        for queued in &state.pending_frames {
+            if count >= self.limits.max_frames_per_body
+                || (count != 0
+                    && body_len.saturating_add(queued.encoded.len())
+                        > self.limits.carrier_batch_bytes)
+            {
+                break;
+            }
+            body_len += queued.encoded.len();
+            count += 1;
+        }
+        let Some(manager) = self.manager.upgrade() else {
+            return Err(ManagerError::Closed);
         };
-        if !owns(queue, mine) {
-            return Collected::Superseded;
+        let Some(_staging) = manager.try_downlink_staging_budget(body_len) else {
+            return Err(ManagerError::Backpressure);
+        };
+        let mut body = BytesMut::with_capacity(body_len);
+        let mut data_bytes = 0usize;
+        let mut data_items = 0usize;
+        let mut control_bytes = 0usize;
+        let mut control_items = 0usize;
+        for index in 0..count {
+            let Some(queued) = state.pending_frames.get(index) else {
+                break;
+            };
+            if queued.frame_type == FrameType::Window
+                && state.pending_windows.get(&queued.stream_id) == Some(&index)
+            {
+                state.pending_windows.remove(&queued.stream_id);
+            }
         }
-        if !queue.pending_frames.is_empty() {
-            let batch = queue.take_down_batch(batch_bytes);
-            let body = Bytes::from(batch.body);
-            queue.down_cursor += 1;
-            queue.unacked_base = cursor;
-            queue.unacked = body.clone();
-            queue.unacked_charge = batch.charge;
-            queue.down_active = false;
-            queue.superseded = None;
-            let next = queue.down_cursor;
-            return Collected::Batch(body, next);
+        for _ in 0..count {
+            let Some(queued) = state.pending_frames.pop_front() else {
+                break;
+            };
+            body.extend_from_slice(&queued.encoded);
+            if queued.control {
+                control_bytes += queued.cost;
+                control_items += 1;
+            } else {
+                data_bytes += queued.cost;
+                data_items += 1;
+            }
         }
-        if closed {
-            queue.down_active = false;
-            queue.superseded = None;
-            return Collected::SessionClosed;
+        for index in state.pending_windows.values_mut() {
+            *index = index.saturating_sub(count);
         }
-        if lane_finished {
-            queue.down_active = false;
-            queue.superseded = None;
-            return Collected::LaneClosed;
-        }
-        Collected::Park
+        state.down_cursor = next_cursor;
+        let counts = PendingCounts {
+            data_bytes,
+            data_items,
+            control_bytes,
+            control_items,
+        };
+        let lease = PendingResponseLease::new(self, counts, None);
+        let body = Bytes::from_owner(OwnedBatchBody::new(body.freeze(), Arc::clone(&lease)));
+        Ok(DownBatch {
+            body,
+            lease,
+            base_cursor: cursor,
+            next_cursor,
+            data_bytes,
+            data_items,
+            control_bytes,
+            control_items,
+            carrier_health_eligible: state.negotiation_phase
+                == super::SessionNegotiationPhase::Committed,
+        })
     }
 
-    /// Routes a downlink protocol violation to the right blast radius.
-    fn fail(&self, lane: Option<u32>) {
-        match lane {
-            Some(lane_id) => self.lane_protocol_failure(lane_id),
-            None => self.protocol_failure(),
+    fn release_unacked_locked(&self, state: &mut SessionState) {
+        let Some(batch) = state.unacked.take() else {
+            return;
+        };
+        batch.lease.detach();
+        self.release_local_locked(state, batch.data_bytes, batch.data_items, false);
+        self.release_local_locked(state, batch.control_bytes, batch.control_items, true);
+        for stream in state.streams.values_mut() {
+            if let Some(waker) = stream.write_waker.take() {
+                waker.wake();
+            }
         }
     }
 }
 
-/// Result of applying the client cursor.
-enum Acknowledged {
-    /// The client repeated the previous cursor; replay the same batch.
-    Replay(Bytes, u64),
-    /// The cursor is neither the previous nor the current one.
-    Protocol,
-    /// The cursor advanced; the poll may park.
-    Continue,
-}
-
-/// Result of one parked-poll wake-up.
-enum Collected {
-    Batch(Bytes, u64),
-    Superseded,
-    LaneClosed,
-    SessionClosed,
-    Park,
-}
-
-fn owns(queue: &LaneQueue, mine: &Arc<Notify>) -> bool {
-    queue
-        .superseded
-        .as_ref()
-        .is_some_and(|current| Arc::ptr_eq(current, mine))
-}
-
-fn queue_mut(state: &mut SessionState, lane: Option<u32>) -> Option<&mut LaneQueue> {
-    match lane {
-        Some(lane_id) => state.lanes.get_mut(&lane_id),
-        None => Some(&mut state.main),
-    }
-}
+#[cfg(test)]
+#[path = "downlink_tests.rs"]
+mod tests;

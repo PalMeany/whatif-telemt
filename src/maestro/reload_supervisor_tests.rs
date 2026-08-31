@@ -17,7 +17,7 @@ struct ReloadFixture {
 fn runtime_log_filter() -> RuntimeLogFilter {
     let (_layer, handle) =
         tracing_subscriber::reload::Layer::<EnvFilter, Registry>::new(EnvFilter::new("info"));
-    RuntimeLogFilter::new(handle)
+    RuntimeLogFilter::new(handle, true)
 }
 
 /// Config that fails `ProxyConfig::validate()` deterministically, without any
@@ -65,6 +65,7 @@ async fn fixture_with_teardown(
         detected_ips_tx,
         runtime_log_filter: runtime_log_filter(),
         runtime_watch_tx,
+        deadlines: true,
         forced_middle_end_teardown,
     });
     let command = ReloadCommand {
@@ -443,6 +444,7 @@ async fn quiesce_joins_idle_supervisor_and_rejects_later_submissions() {
         detected_ips_tx,
         runtime_log_filter(),
         runtime_watch_tx,
+        true,
     );
 
     tokio::time::timeout(Duration::from_secs(1), handle.quiesce())
@@ -487,6 +489,7 @@ async fn quiesce_returns_within_its_budget_with_a_reload_in_flight() {
         detected_ips_tx,
         runtime_log_filter(),
         runtime_watch_tx,
+        true,
     );
 
     // An invalid candidate keeps preparation deterministic and offline while
@@ -532,6 +535,7 @@ async fn real_reload_releases_the_slot_when_preparation_fails() {
         detected_ips_tx,
         runtime_log_filter: runtime_log_filter(),
         runtime_watch_tx,
+        deadlines: true,
         forced_middle_end_teardown: None,
     };
 
@@ -596,6 +600,7 @@ async fn failed_preparation_under_rollback_policy_restores_the_config_file() {
         detected_ips_tx,
         runtime_log_filter: runtime_log_filter(),
         runtime_watch_tx,
+        deadlines: true,
         forced_middle_end_teardown: None,
     };
 

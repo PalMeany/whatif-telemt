@@ -116,7 +116,14 @@ pub(crate) fn spawn_unix_accept_loop(
                         }
                     });
                     if !admitted {
-                        runtime.stats.increment_session_admission_closed_total();
+                        if runtime
+                            .config()
+                            .fork
+                            .runtime_switches()
+                            .session_admission_closed_metric
+                        {
+                            runtime.stats.increment_session_admission_closed_total();
+                        }
                         debug!(
                             generation = runtime.id,
                             "Dropping accepted unix connection: generation stopped admitting"

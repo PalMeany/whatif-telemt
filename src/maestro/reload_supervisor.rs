@@ -64,6 +64,11 @@ pub(crate) struct ReloadSupervisor {
     detected_ips_tx: watch::Sender<(Option<std::net::IpAddr>, Option<std::net::IpAddr>)>,
     runtime_log_filter: RuntimeLogFilter,
     runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
+    /// Whether `fork.runtime.reload_deadlines` bounds the reload state machine.
+    ///
+    /// Read once at start-up: the deadlines exist to keep shutdown reachable,
+    /// so a reload must not be able to remove its own ceiling mid-flight.
+    deadlines: bool,
     /// Test-only override that forces a Middle-End teardown outcome.
     ///
     /// Fixtures cannot build a real `MePool`, so without this the teardown
@@ -77,6 +82,8 @@ pub(crate) struct ReloadSupervisorHandle {
     control: ReloadControl,
     shutdown: CancellationToken,
     join: tokio::task::JoinHandle<()>,
+    /// Whether the quiesce budget applies.
+    deadlines: bool,
 }
 
 impl ReloadSupervisorHandle {
@@ -91,6 +98,12 @@ impl ReloadSupervisorHandle {
         self.control.begin_shutdown().await;
         self.shutdown.cancel();
         let mut join = self.join;
+        if !self.deadlines {
+            if let Err(error) = (&mut join).await {
+                warn!(error = %error, "Reload supervisor failed while quiescing");
+            }
+            return;
+        }
         match tokio::time::timeout(QUIESCE_TIMEOUT, &mut join).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -203,6 +216,7 @@ impl ReloadSupervisor {
         detected_ips_tx: watch::Sender<(Option<std::net::IpAddr>, Option<std::net::IpAddr>)>,
         runtime_log_filter: RuntimeLogFilter,
         runtime_watch_tx: watch::Sender<Option<RuntimeWatchState>>,
+        deadlines: bool,
     ) -> ReloadSupervisorHandle {
         let supervisor = Self {
             active_runtime,
@@ -213,6 +227,7 @@ impl ReloadSupervisor {
             detected_ips_tx,
             runtime_log_filter,
             runtime_watch_tx,
+            deadlines,
             #[cfg(test)]
             forced_middle_end_teardown: None,
         };
@@ -223,6 +238,7 @@ impl ReloadSupervisor {
             control,
             shutdown,
             join,
+            deadlines,
         }
     }
 
@@ -235,14 +251,17 @@ impl ReloadSupervisor {
                     // run it so the reload terminates instead of leaving the
                     // status stuck in a non-terminal phase. `reload` observes
                     // the same token, so this collapses immediately.
-                    if self.control.in_progress().await.is_some()
-                        && let Ok(Some(command)) = tokio::time::timeout(
-                            SHUTDOWN_COMMAND_GRACE,
-                            self.commands.recv(),
-                        )
-                        .await
-                    {
-                        self.reload(command, &shutdown).await;
+                    if self.control.in_progress().await.is_some() {
+                        let grace = if self.deadlines {
+                            SHUTDOWN_COMMAND_GRACE
+                        } else {
+                            Duration::from_secs(0)
+                        };
+                        if let Ok(Some(command)) =
+                            tokio::time::timeout(grace, self.commands.recv()).await
+                        {
+                            self.reload(command, &shutdown).await;
+                        }
                     }
                     break;
                 }
@@ -339,7 +358,7 @@ impl ReloadSupervisor {
 
         let prepare_cancel = cancel.child_token();
         let deadline_hit = Arc::new(AtomicBool::new(false));
-        let deadline = {
+        let deadline = self.deadlines.then(|| {
             let prepare_cancel = prepare_cancel.clone();
             let deadline_hit = deadline_hit.clone();
             tokio::spawn(async move {
@@ -347,7 +366,7 @@ impl ReloadSupervisor {
                 deadline_hit.store(true, Ordering::Release);
                 prepare_cancel.cancel();
             })
-        };
+        });
         let prepared = prepare_runtime(
             command.target_generation,
             command.config.as_ref().clone(),
@@ -358,7 +377,9 @@ impl ReloadSupervisor {
             prepare_cancel,
         )
         .await;
-        deadline.abort();
+        if let Some(deadline) = deadline {
+            deadline.abort();
+        }
 
         let prepared = match prepared {
             Ok(prepared) => prepared,

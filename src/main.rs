@@ -26,6 +26,7 @@ mod crypto;
 #[cfg(unix)]
 mod daemon;
 mod error;
+mod fork;
 mod healthcheck;
 mod ip_tracker;
 #[cfg(test)]

@@ -23,9 +23,11 @@ mod logging;
 mod network;
 mod policies;
 mod server;
-// Secret-form policy shared with the handshake. The configuration surface of
-// the WEB transport lives in `super::web`.
 mod web;
+// WEB carrier tokens and fixed-slot policy helpers remain independent from bulky config types.
+mod web_carrier;
+// WEB debug capture policy is reusable by config reload and process storage.
+mod web_debug;
 
 pub use access::{AccessConfig, CidrRateLimitKey, RateLimitBps};
 #[allow(unused_imports)]
@@ -50,10 +52,18 @@ pub use server::{
     WebClientIpSource,
 };
 #[allow(unused_imports)]
-// The `[web]` section itself is owned by `super::web`, telemt's own WEB proxy
-// transport. Only the secret-form enum is shared: the MTProto handshake uses it
-// to pin one logical stream to the secret form its profile was issued for.
-pub use web::WebSecretMode;
+pub use web::{
+    WebCarrierNegotiationAggressiveness, WebConfig, WebDecoyConfig, WebLimitsConfig,
+    WebProfileConfig, WebSecretMode, WebTimeoutsConfig, WebVhostConfig,
+};
+pub(crate) use web::{
+    WebRuntimeConfig, WebRuntimeDecoy, WebRuntimeProfile, WebRuntimeVhost, WebStaticAsset,
+    WebStaticSite,
+};
+#[allow(unused_imports)]
+pub use web_carrier::{WebCarrier, WebCarriers};
+pub(crate) use web_debug::web_debug_fits_limits;
+pub use web_debug::{WebDebugBodyCapture, WebDebugConfig};
 
 fn default_quota_state_path() -> PathBuf {
     PathBuf::from("telemt.limit.json")

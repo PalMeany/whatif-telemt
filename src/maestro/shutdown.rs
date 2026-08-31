@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use super::generation::RuntimeGeneration;
 use super::helpers::{format_uptime, unit_label};
 use super::reload_supervisor::ReloadSupervisorHandle;
+use super::web_ingress::WebIngress;
 use crate::stats::Stats;
 use crate::synlimit_control;
 
@@ -55,6 +56,7 @@ pub(crate) async fn wait_for_shutdown(
     synlimit_controller: synlimit_control::SynlimitController,
     reload_supervisor: ReloadSupervisorHandle,
     listener_shutdown: CancellationToken,
+    web_ingress: Arc<WebIngress>,
 ) {
     let signal = wait_for_shutdown_signal().await;
     perform_shutdown(
@@ -65,6 +67,7 @@ pub(crate) async fn wait_for_shutdown(
         synlimit_controller,
         reload_supervisor,
         listener_shutdown,
+        web_ingress,
     )
     .await;
 }
@@ -98,14 +101,18 @@ async fn perform_shutdown(
     synlimit_controller: synlimit_control::SynlimitController,
     reload_supervisor: ReloadSupervisorHandle,
     listener_shutdown: CancellationToken,
+    web_ingress: Arc<WebIngress>,
 ) {
     let shutdown_started_at = Instant::now();
     info!(signal = %signal, "Received shutdown signal");
 
+    let switches = *active_runtime.load().config().fork.runtime_switches();
     // First thing: unbind the listeners. Closing session admission alone leaves
     // the fds bound, so new clients keep completing a handshake and getting an
     // RST for the whole shutdown window instead of a clean ECONNREFUSED.
-    listener_shutdown.cancel();
+    if switches.shutdown_unbind_listeners_first {
+        listener_shutdown.cancel();
+    }
     reload_supervisor.quiesce().await;
     let runtime = active_runtime.load_full();
     let stats = runtime.stats.as_ref();
@@ -120,8 +127,10 @@ async fn perform_shutdown(
     info!("Uptime: {}", format_uptime(uptime_secs));
 
     // Close WEB carrier sessions before draining proxy sessions, so their
-    // demultiplexed streams end through the normal session drain.
-    crate::web::shutdown();
+    // demultiplexed streams end through the normal session drain. Both
+    // implementations are drained here; each is a no-op when it is not running.
+    web_ingress.shutdown().await;
+    crate::fork::web::shutdown();
 
     // Graceful ME pool shutdown
     runtime.stop_sessions().await;
@@ -142,13 +151,21 @@ async fn perform_shutdown(
         }
         // The broadcast only signals clients; cancel the writer tasks and drop
         // their sockets too.
-        let cancelled = pool.shutdown().await;
-        if cancelled > 0 {
-            info!(
-                cancelled_writers = cancelled,
-                "ME shutdown: writers cancelled"
-            );
+        if switches.me_writer_teardown {
+            let cancelled = pool.shutdown().await;
+            if cancelled > 0 {
+                info!(
+                    cancelled_writers = cancelled,
+                    "ME shutdown: writers cancelled"
+                );
+            }
         }
+    }
+
+    // Telemt stops listeners late; with the fork switch off, match it so the
+    // shutdown sequence has exactly one place that unbinds.
+    if !switches.shutdown_unbind_listeners_first {
+        listener_shutdown.cancel();
     }
 
     synlimit_controller.shutdown().await;

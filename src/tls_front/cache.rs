@@ -101,6 +101,9 @@ impl Drop for TlsFrontCache {
     /// admitted: `try_reserve_full_cert_sent_entry` eventually returns false for
     /// every client and the exported metric stays permanently wrong.
     fn drop(&mut self) {
+        if !crate::fork::switches::tls_front_cache_budget_release() {
+            return;
+        }
         let mut retained = 0usize;
         for shard in &mut self.full_cert_sent_shards {
             retained = retained.saturating_add(shard.get_mut().len());

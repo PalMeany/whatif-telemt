@@ -30,6 +30,8 @@ use crate::startup::StartupTracker;
 use crate::stats::Stats;
 use crate::transport::UpstreamManager;
 use crate::transport::middle_proxy::MePool;
+use crate::web::control::WebRuntimePublication;
+use crate::web::trace::WebTraceStore;
 
 mod config_edit;
 pub(crate) mod config_store;
@@ -47,6 +49,9 @@ mod runtime_stats;
 mod runtime_watch;
 mod runtime_zero;
 mod users;
+// WEB runtime status and bounded controls remain separate from general API DTOs.
+mod web_runtime;
+mod web_status;
 
 use config_store::{
     current_revision, ensure_expected_revision, load_config_for_reload, load_config_from_disk,
@@ -124,6 +129,8 @@ pub(super) struct ApiProcess {
     pub(super) startup_tracker: Arc<StartupTracker>,
     pub(super) reload_control: ReloadControl,
     pub(super) active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    pub(super) web_trace: Arc<WebTraceStore>,
+    pub(super) web_runtime_rx: watch::Receiver<WebRuntimePublication>,
 }
 
 /// Per-request view: process state plus the generation serving this request.
@@ -148,6 +155,8 @@ pub(super) struct ApiShared {
     pub(super) proxy_shared: Arc<ProxySharedState>,
     pub(super) reload_control: ReloadControl,
     pub(super) active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
+    pub(super) web_trace: Arc<WebTraceStore>,
+    pub(super) web_runtime_rx: watch::Receiver<WebRuntimePublication>,
 }
 
 impl ApiProcess {
@@ -172,6 +181,8 @@ impl ApiProcess {
             startup_tracker: self.startup_tracker.clone(),
             reload_control: self.reload_control.clone(),
             active_runtime: self.active_runtime.clone(),
+            web_trace: self.web_trace.clone(),
+            web_runtime_rx: self.web_runtime_rx.clone(),
         }
     }
 }
@@ -247,6 +258,9 @@ async fn submit_reload_from_disk(
 }
 
 fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
+    if let Some(allow) = web_runtime::allowed_methods(path) {
+        return Some(allow);
+    }
     match path {
         "/v1/health"
         | "/v1/health/ready"
@@ -276,7 +290,8 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         | "/v1/runtime/tls-fingerprints"
         | "/v1/stats/users/active-ips"
         | "/v1/stats/users/quota"
-        | "/v1/stats/users" => Some(ALLOW_GET),
+        | "/v1/stats/users"
+        | "/web-status" => Some(ALLOW_GET),
         "/v1/system/reload" => Some(ALLOW_POST),
         "/v1/users" => Some(ALLOW_GET_POST),
         "/v1/config" => Some(ALLOW_GET_PATCH),
@@ -284,6 +299,8 @@ fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
         _ if user_action_route_matches(path, "/rotate-secret") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/enable") => Some(ALLOW_POST),
         _ if user_action_route_matches(path, "/disable") => Some(ALLOW_POST),
+        // `DELETE` is answered only while `fork.runtime.reload_cancel` is on;
+        // the handler narrows this to `GET` when it is not.
         _ if reload_status_route_id(path).is_some() => Some(ALLOW_GET_DELETE),
         _ if path
             .strip_prefix("/v1/users/")
@@ -306,6 +323,8 @@ pub async fn serve(
     reload_control: ReloadControl,
     mut active_runtime_rx: watch::Receiver<Option<Arc<ArcSwap<RuntimeGeneration>>>>,
     mut runtime_watch_rx: watch::Receiver<Option<RuntimeWatchState>>,
+    web_trace: Arc<WebTraceStore>,
+    web_runtime_rx: watch::Receiver<WebRuntimePublication>,
 ) {
     let active_runtime = loop {
         if let Some(active_runtime) = active_runtime_rx.borrow().clone() {
@@ -339,7 +358,7 @@ pub async fn serve(
         }
     };
 
-    info!("API endpoint: http://{}/v1/*", listen);
+    info!("API endpoint: http://{}/v1/* and /web-status", listen);
 
     let runtime_state = Arc::new(ApiRuntimeState {
         process_started_at_epoch_secs,
@@ -365,6 +384,8 @@ pub async fn serve(
         startup_tracker,
         reload_control,
         active_runtime,
+        web_trace,
+        web_runtime_rx,
     });
 
     spawn_runtime_watchers(
@@ -512,7 +533,31 @@ async fn handle(
     let body_limit = api_cfg.request_body_limit_bytes;
 
     let result: Result<Response<Full<Bytes>>, ApiFailure> = async {
+        if web_runtime::is_route(normalized_path) {
+            let web_mutation = method == Method::POST;
+            let result = web_runtime::handle(
+                method,
+                normalized_path,
+                query.as_deref(),
+                req,
+                shared.as_ref(),
+                cfg.as_ref(),
+                request_id,
+                body_limit,
+            )
+            .await;
+            if web_mutation && let Err(error) = &result {
+                shared.runtime_events.record(
+                    "api.web.control.failed",
+                    format!("path={} code={}", normalized_path, error.code),
+                );
+            }
+            return result;
+        }
         match (method.as_str(), normalized_path) {
+            ("GET", "/web-status") => {
+                Ok(web_status::render(query.as_deref(), &shared.web_trace).await)
+            }
             ("GET", "/v1/health") => {
                 let revision = current_revision(&shared.config_path).await?;
                 let data = HealthData {
@@ -859,6 +904,9 @@ async fn handle(
                 if method == Method::DELETE
                     && let Some(reload_id) = reload_status_route_id(normalized_path)
                 {
+                    if !cfg.fork.runtime_switches().reload_cancel {
+                        return Err(ApiFailure::method_not_allowed(ALLOW_GET));
+                    }
                     if api_cfg.read_only {
                         return Ok(error_response(
                             request_id,

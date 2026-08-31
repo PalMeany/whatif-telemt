@@ -22,3 +22,5 @@ target
 
 proxy-secret
 coverage-html/
+# macOS Finder metadata
+.DS_Store

@@ -1,3 +1,4 @@
+use super::fork::*;
 use super::*;
 
 #[derive(Debug)]
@@ -37,9 +38,11 @@ fn known_config_keys_for_suggestion() -> Vec<&'static str> {
         LISTENER_CONFIG_KEYS,
         WEB_CONFIG_KEYS,
         WEB_LIMITS_CONFIG_KEYS,
+        WEB_DEBUG_CONFIG_KEYS,
         WEB_TIMEOUTS_CONFIG_KEYS,
+        WEB_VHOST_CONFIG_KEYS,
+        WEB_DECOY_CONFIG_KEYS,
         WEB_PROFILE_CONFIG_KEYS,
-        WEB_PROFILE_LIMITS_CONFIG_KEYS,
         TIMEOUTS_CONFIG_KEYS,
         CENSORSHIP_CONFIG_KEYS,
         TLS_FETCH_CONFIG_KEYS,
@@ -51,6 +54,9 @@ fn known_config_keys_for_suggestion() -> Vec<&'static str> {
         LINKS_CONFIG_KEYS,
         LOGGING_CONFIG_KEYS,
     ] {
+        keys.extend_from_slice(group);
+    }
+    for group in FORK_KEY_GROUPS {
         keys.extend_from_slice(group);
     }
     keys
@@ -251,6 +257,14 @@ pub(super) fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<Unkn
         parsed_toml,
         &mut unknown,
         &known_for_suggestion,
+        &["web", "debug"],
+        WEB_DEBUG_CONFIG_KEYS,
+    );
+    check_fork_tables(parsed_toml, &mut unknown, &known_for_suggestion);
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
         &["timeouts"],
         TIMEOUTS_CONFIG_KEYS,
     );
@@ -291,26 +305,37 @@ pub(super) fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<Unkn
         }
     }
 
-    if let Some(profiles) = table_at(parsed_toml, &["web"])
-        .and_then(|table| table.get("profiles"))
+    if let Some(vhosts) = table_at(parsed_toml, &["web"])
+        .and_then(|table| table.get("vhosts"))
         .and_then(toml::Value::as_array)
     {
-        for (idx, profile) in profiles.iter().enumerate() {
+        for (idx, vhost) in vhosts.iter().enumerate() {
             check_nested_table_value(
                 &mut unknown,
                 &known_for_suggestion,
-                format!("web.profiles[{idx}]"),
-                profile,
-                WEB_PROFILE_CONFIG_KEYS,
+                format!("web.vhosts[{idx}]"),
+                vhost,
+                WEB_VHOST_CONFIG_KEYS,
             );
-            if let Some(limits) = profile.get("limits") {
+            if let Some(decoy) = vhost.get("decoy") {
                 check_nested_table_value(
                     &mut unknown,
                     &known_for_suggestion,
-                    format!("web.profiles[{idx}].limits"),
-                    limits,
-                    WEB_PROFILE_LIMITS_CONFIG_KEYS,
+                    format!("web.vhosts[{idx}].decoy"),
+                    decoy,
+                    WEB_DECOY_CONFIG_KEYS,
                 );
+            }
+            if let Some(profiles) = vhost.get("profiles").and_then(toml::Value::as_array) {
+                for (profile_idx, profile) in profiles.iter().enumerate() {
+                    check_nested_table_value(
+                        &mut unknown,
+                        &known_for_suggestion,
+                        format!("web.vhosts[{idx}].profiles[{profile_idx}]"),
+                        profile,
+                        WEB_PROFILE_CONFIG_KEYS,
+                    );
+                }
             }
         }
     }
@@ -345,4 +370,52 @@ pub(super) fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<Unkn
     }
 
     unknown
+}
+
+/// Walks every table under `[fork]`, this fork's own configuration section.
+fn check_fork_tables(
+    parsed_toml: &toml::Value,
+    unknown: &mut Vec<UnknownConfigKey>,
+    known_for_suggestion: &[&'static str],
+) {
+    for (path, allowed) in [
+        (&["fork"][..], FORK_CONFIG_KEYS),
+        (&["fork", "runtime"][..], FORK_RUNTIME_CONFIG_KEYS),
+        (&["fork", "prometheus"][..], FORK_PROMETHEUS_CONFIG_KEYS),
+        (&["fork", "telegram"][..], FORK_TELEGRAM_CONFIG_KEYS),
+        (&["fork", "api"][..], FORK_API_CONFIG_KEYS),
+        (&["fork", "web"][..], FORK_WEB_CONFIG_KEYS),
+        (&["fork", "web", "limits"][..], FORK_WEB_LIMITS_CONFIG_KEYS),
+        (
+            &["fork", "web", "timeouts"][..],
+            FORK_WEB_TIMEOUTS_CONFIG_KEYS,
+        ),
+    ] {
+        check_known_table(parsed_toml, unknown, known_for_suggestion, path, allowed);
+    }
+
+    let Some(profiles) = table_at(parsed_toml, &["fork", "web"])
+        .and_then(|table| table.get("profiles"))
+        .and_then(toml::Value::as_array)
+    else {
+        return;
+    };
+    for (idx, profile) in profiles.iter().enumerate() {
+        check_nested_table_value(
+            unknown,
+            known_for_suggestion,
+            format!("fork.web.profiles[{idx}]"),
+            profile,
+            FORK_WEB_PROFILE_CONFIG_KEYS,
+        );
+        if let Some(limits) = profile.get("limits") {
+            check_nested_table_value(
+                unknown,
+                known_for_suggestion,
+                format!("fork.web.profiles[{idx}].limits"),
+                limits,
+                FORK_WEB_PROFILE_LIMITS_CONFIG_KEYS,
+            );
+        }
+    }
 }

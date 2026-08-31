@@ -12,8 +12,8 @@ use tracing::warn;
 use crate::error::{ProxyError, Result};
 
 use super::defaults::*;
+use super::fork::ForkConfig;
 use super::types::*;
-use super::web::WebConfig;
 
 // Domain names, mask targets, and legacy scalar normalization helpers.
 mod normalize;
@@ -23,6 +23,8 @@ mod includes;
 mod strict_keys;
 // Precomputed user authentication data for handshake hot paths.
 mod runtime_auth;
+// Immutable WEB routing and decoy snapshot for telemt's own WEB transport.
+mod runtime_web;
 // Post-deserialization validation helpers.
 mod decode;
 mod effective;
@@ -31,6 +33,7 @@ mod validate_core;
 mod validate_me;
 mod validate_runtime;
 mod validate_server;
+mod validate_web;
 mod validation;
 
 use self::includes::{hash_rendered_snapshot, normalize_config_path, preprocess_includes};
@@ -97,9 +100,19 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub server: ServerConfig,
 
-    /// WEB carrier ingress and public-site fallback configuration.
+    /// Telemt's own WEB carrier ingress and public-site fallback.
+    ///
+    /// Bound through a `[[server.listeners]]` entry with `transport = "web"`.
+    /// This fork's alternative WEB transport is `[fork.web]`.
     #[serde(default)]
     pub web: WebConfig,
+
+    /// Everything this fork adds on top of telemt.
+    ///
+    /// Kept in one section so a configuration written for stock telemt keeps
+    /// its exact meaning here.
+    #[serde(default)]
+    pub fork: ForkConfig,
 
     /// Timeout values used by client, fallback, and upstream operations.
     #[serde(default)]
@@ -209,8 +222,27 @@ impl ProxyConfig {
         Ok(())
     }
 
+    /// Rebuilds validated WEB capabilities and immutable decoy snapshots.
+    pub(crate) fn rebuild_runtime_web(&mut self) -> Result<()> {
+        runtime_web::rebuild(self)
+    }
+
     pub(crate) fn runtime_user_auth(&self) -> Option<&UserAuthSnapshot> {
         self.runtime_user_auth.as_deref()
+    }
+
+    /// Reports whether the document asks for telemt's own WEB transport.
+    ///
+    /// That transport is a client-listener transport rather than a section of
+    /// its own, so wanting it means both enabling `[web]` and naming the
+    /// transport on a listener.
+    pub fn telemt_web_requested(&self) -> bool {
+        self.web.enabled
+            && self
+                .server
+                .listeners
+                .iter()
+                .any(|listener| listener.transport == ListenerTransport::Web)
     }
 
     /// Validates cross-field configuration invariants after deserialization.
@@ -220,7 +252,7 @@ impl ProxyConfig {
         }
 
         validate_logging_config(&self.logging)?;
-        self.web.validate()?;
+        self.fork.validate(self.telemt_web_requested())?;
 
         if !self.general.modes.classic && !self.general.modes.secure && !self.general.modes.tls {
             return Err(ProxyError::Config("No modes enabled".to_string()));

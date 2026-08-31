@@ -89,7 +89,17 @@ async fn watch_active_runtime_configs<F, Fut>(
         return;
     }
     let initial_config = current.config_rx.borrow().clone();
+    let follow_generations = initial_config
+        .fork
+        .runtime_switches()
+        .synlimit_generation_reconciler;
     on_config(current.generation_id, initial_config).await;
+
+    // Telemt reconciles once at start-up and never again; with the fork switch
+    // off, stop here rather than keeping a task that would never act.
+    if !follow_generations {
+        return;
+    }
 
     loop {
         tokio::select! {

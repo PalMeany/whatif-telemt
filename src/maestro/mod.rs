@@ -33,6 +33,7 @@ pub(crate) mod runtime_build;
 mod runtime_tasks;
 mod shutdown;
 mod tls_bootstrap;
+mod web_ingress;
 
 use arc_swap::ArcSwap;
 use std::net::{IpAddr, SocketAddr};
@@ -407,7 +408,10 @@ async fn run_telemt_core(
             _logging_guard = Some(guard);
         }
     }
-    let runtime_log_filter = runtime_tasks::RuntimeLogFilter::new(filter_handle);
+    let runtime_log_filter = runtime_tasks::RuntimeLogFilter::new(
+        filter_handle,
+        config.fork.runtime_switches().rust_log_survives_reload,
+    );
 
     startup_tracker
         .complete_component(
@@ -456,6 +460,10 @@ async fn run_telemt_core(
 
     // Everything that must outlive a runtime generation lives here; a reload
     // retunes it in place rather than minting a second copy.
+    // Published before any generation exists: the two switches mirrored here
+    // are read from `Drop` and from the process-owned reload status store,
+    // neither of which can reach a configuration handle.
+    crate::fork::switches::publish(&config);
     let process_scope = process_scope::ProcessScope::new(&config).await;
     let stats = Arc::new(Stats::with_quota_store(
         process_scope.quota_store(),
@@ -547,6 +555,10 @@ async fn run_telemt_core(
         )
         .await;
 
+    // Telemt's own WEB transport is process-owned, and the API task starts
+    // before any listener is bound, so its handles exist from here on.
+    let mut web_ingress = web_ingress::WebIngress::new(&config);
+
     if config.server.api.enabled {
         let listen = match config.server.api.listen.parse::<SocketAddr>() {
             Ok(listen) => listen,
@@ -569,6 +581,8 @@ async fn run_telemt_core(
             let reload_control_api = reload_control.clone();
             let active_runtime_rx_api = active_runtime_rx.clone();
             let runtime_watch_rx_api = runtime_watch_rx.clone();
+            let web_trace_api = web_ingress.trace();
+            let web_runtime_rx_api = web_ingress.subscribe();
             tokio::spawn(async move {
                 api::serve(
                     listen,
@@ -580,6 +594,8 @@ async fn run_telemt_core(
                     reload_control_api,
                     active_runtime_rx_api,
                     runtime_watch_rx_api,
+                    web_trace_api,
+                    web_runtime_rx_api,
                 )
                 .await;
             });
@@ -658,7 +674,7 @@ async fn run_telemt_core(
 
     // Connection concurrency limit (0 = unlimited). Process-scoped: every
     // generation admits against this one budget.
-    let max_connections = process_scope.connection_limiter().semaphore();
+    let max_connections = process_scope.connection_limiter(&config).semaphore();
 
     let me2dc_fallback = config.general.me2dc_fallback;
     let me_init_retry_attempts = config.general.me_init_retry_attempts;
@@ -967,6 +983,7 @@ async fn run_telemt_core(
         detected_ips_tx,
         runtime_log_filter,
         runtime_watch_tx.clone(),
+        config.fork.runtime_switches().reload_deadlines,
     );
 
     let bound = listeners::bind_listeners(
@@ -996,7 +1013,7 @@ async fn run_telemt_core(
     // below it may no longer be able to read the site directory it was told to
     // serve, and after the listeners are live a failure is a restart loop.
     let web_config_dir = config_path.parent().map(std::path::Path::to_path_buf);
-    if let Err(error) = crate::web::preflight(&config, web_config_dir.as_ref()) {
+    if let Err(error) = crate::fork::web::preflight(&config, web_config_dir.as_ref()) {
         error!(%error, "WEB proxy configuration is invalid. Exiting.");
         std::process::exit(1);
     }
@@ -1004,7 +1021,7 @@ async fn run_telemt_core(
     // On Unix, caller supplies privilege drop after bind (may require root for port < 1024).
     drop_after_bind();
 
-    let synlimit_controller = synlimit_control::spawn_synlimit_controller(runtime_watch_rx);
+    let synlimit_controller = synlimit_control::spawn_synlimit_controller(runtime_watch_rx.clone());
 
     runtime_tasks::spawn_metrics_if_configured(&config, &startup_tracker, active_runtime.clone())
         .await;
@@ -1019,7 +1036,15 @@ async fn run_telemt_core(
     // Owned by the process: shutdown drops the listening sockets so the port
     // stops completing handshakes it is only going to reset.
     let listener_shutdown = tokio_util::sync::CancellationToken::new();
-    listeners::spawn_tcp_accept_loops(listeners, active_runtime.clone(), listener_shutdown.clone());
+    let web_runtime = web_ingress.start(&listeners, active_runtime.clone());
+    web_ingress.spawn_policy_watcher(runtime_watch_rx.clone());
+    let web_ingress = Arc::new(web_ingress);
+    listeners::spawn_tcp_accept_loops(
+        listeners,
+        active_runtime.clone(),
+        listener_shutdown.clone(),
+        web_runtime,
+    );
     #[cfg(unix)]
     listeners::spawn_unix_accept_loop(
         unix_listener,
@@ -1030,7 +1055,7 @@ async fn run_telemt_core(
     // The WEB carrier resolves its runtime pieces per stream, so it follows
     // configuration reloads through the active generation like every listener.
     if let Err(error) =
-        crate::web::start(&config, web_config_dir.as_ref(), active_runtime.clone()).await
+        crate::fork::web::start(&config, web_config_dir.as_ref(), active_runtime.clone()).await
     {
         // `web.enabled = true` is a request for a transport. Carrying on
         // without it leaves the unit green while every client gets the front
@@ -1046,6 +1071,7 @@ async fn run_telemt_core(
         synlimit_controller,
         reload_supervisor,
         listener_shutdown,
+        web_ingress,
     )
     .await;
 

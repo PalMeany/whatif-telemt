@@ -10,11 +10,12 @@ use tokio::net::UnixListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{ProxyConfig, RstOnCloseMode};
+use crate::config::{ListenerTransport, ProxyConfig, RstOnCloseMode, WebClientIpSource};
 use crate::proxy::ClientHandler;
 use crate::startup::{COMPONENT_LISTENERS_BIND, StartupTracker};
 use crate::transport::socket::set_linger_zero;
 use crate::transport::{ListenOptions, create_listener, find_listener_processes};
+use crate::web::manager::WebProcessRuntime;
 
 use super::generation::RuntimeGeneration;
 use super::helpers::{
@@ -28,10 +29,30 @@ mod unix;
 pub(crate) use unix::spawn_unix_accept_loop;
 
 pub(crate) struct BoundListeners {
-    /// Bound socket, its PROXY-protocol flag, and its TLS response fragment size.
-    pub(crate) listeners: Vec<(TcpListener, bool, Option<u16>)>,
+    /// Bound client listeners, each with the policy its accept loop needs.
+    pub(crate) listeners: Vec<BoundListener>,
     #[cfg(unix)]
     pub(crate) unix_listener: Option<UnixListener>,
+}
+
+/// One bound client listener and the per-listener policy its accept loop needs.
+pub(crate) struct BoundListener {
+    /// Bound socket.
+    pub(crate) listener: TcpListener,
+    /// Whether the peer speaks the PROXY protocol before anything else.
+    pub(crate) proxy_protocol: bool,
+    /// Fragment size applied to the first fake-TLS response, when configured.
+    pub(crate) tls_response_fragment_size: Option<u16>,
+    /// Which transport answers on this socket.
+    ///
+    /// `Web` selects telemt's own WEB transport, which terminates HTTP here
+    /// instead of an MTProto handshake. This fork's alternative WEB transport
+    /// owns its own listener under `[fork.web]` and never appears here.
+    pub(crate) transport: ListenerTransport,
+    /// Trusted L7 source used to recover a WEB client's identity address.
+    pub(crate) web_client_ip_source: WebClientIpSource,
+    /// Front proxies allowed to assert that address.
+    pub(crate) web_trusted_proxy_cidrs: Arc<[ipnetwork::IpNetwork]>,
 }
 
 fn listener_port_or_legacy(listener: &crate::config::ListenerConfig, config: &ProxyConfig) -> u16 {
@@ -172,11 +193,16 @@ pub(crate) async fn bind_listeners(
                     print_proxy_links(&public_host, link_port, config);
                 }
 
-                listeners.push((
+                listeners.push(BoundListener {
                     listener,
-                    listener_proxy_protocol,
+                    proxy_protocol: listener_proxy_protocol,
                     tls_response_fragment_size,
-                ));
+                    transport: listener_conf.transport,
+                    web_client_ip_source: listener_conf.web_client_ip_source,
+                    web_trusted_proxy_cidrs: Arc::from(
+                        listener_conf.web_trusted_proxy_cidrs.clone(),
+                    ),
+                });
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -309,13 +335,23 @@ pub(crate) async fn bind_listeners(
 /// the port keeps completing TCP handshakes and then resetting every one of them
 /// instead of returning `ECONNREFUSED` and letting clients fail over.
 pub(crate) fn spawn_tcp_accept_loops(
-    listeners: Vec<(TcpListener, bool, Option<u16>)>,
+    listeners: Vec<BoundListener>,
     active_runtime: Arc<ArcSwap<RuntimeGeneration>>,
     shutdown: CancellationToken,
+    web_runtime: Option<Arc<WebProcessRuntime>>,
 ) {
-    for (listener, listener_proxy_protocol, tls_response_fragment_size) in listeners {
+    for bound in listeners {
+        let BoundListener {
+            listener,
+            proxy_protocol: listener_proxy_protocol,
+            tls_response_fragment_size,
+            transport,
+            web_client_ip_source,
+            web_trusted_proxy_cidrs,
+        } = bound;
         let active_runtime = active_runtime.clone();
         let shutdown = shutdown.clone();
+        let web_runtime = web_runtime.clone();
 
         tokio::spawn(async move {
             loop {
@@ -330,9 +366,35 @@ pub(crate) fn spawn_tcp_accept_loops(
                 };
                 match accepted {
                     Ok((stream, peer_addr)) => {
+                        // Telemt's own WEB transport terminates HTTP on this
+                        // socket; it never reaches the MTProto handshake below.
+                        if transport == ListenerTransport::Web {
+                            let Some(web_runtime) = web_runtime.as_ref() else {
+                                error!("WEB listener has no process runtime; closing it");
+                                return;
+                            };
+                            let Some(connection_permit) = web_runtime.try_http_connection() else {
+                                drop(stream);
+                                continue;
+                            };
+                            tokio::spawn(crate::web::http::serve_connection(
+                                stream,
+                                peer_addr,
+                                web_client_ip_source,
+                                Arc::clone(&web_trusted_proxy_cidrs),
+                                Arc::clone(web_runtime),
+                                shutdown.clone(),
+                                connection_permit,
+                            ));
+                            continue;
+                        }
                         let runtime = active_runtime.load_full();
                         let config = runtime.config();
                         let rst_mode = config.general.rst_on_close;
+                        let count_admission_closed = config
+                            .fork
+                            .runtime_switches()
+                            .session_admission_closed_metric;
                         #[cfg(unix)]
                         let raw_fd = {
                             use std::os::unix::io::AsRawFd;
@@ -503,7 +565,9 @@ pub(crate) fn spawn_tcp_accept_loops(
                             // Cutover closed this generation's admission gate
                             // between accept and registration. Count and log it
                             // instead of dropping the socket silently.
-                            runtime.stats.increment_session_admission_closed_total();
+                            if count_admission_closed {
+                                runtime.stats.increment_session_admission_closed_total();
+                            }
                             debug!(
                                 peer = %peer_addr,
                                 generation = runtime.id,

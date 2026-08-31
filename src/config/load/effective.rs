@@ -217,5 +217,6 @@ pub(super) fn apply(config: &mut ProxyConfig) -> Result<()> {
     validate_logging_config(&config.logging)?;
     validate_upstreams(config)?;
     config.rebuild_runtime_user_auth()?;
+    config.rebuild_runtime_web()?;
     Ok(())
 }

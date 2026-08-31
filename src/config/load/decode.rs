@@ -14,8 +14,12 @@ pub(super) fn decode_source_graph(graph: ConfigSourceGraph) -> Result<DecodedSou
     } = graph;
     let source_files: BTreeSet<PathBuf> = source_contents.keys().cloned().collect();
 
-    let parsed_toml: toml::Value =
+    let mut parsed_toml: toml::Value =
         toml::from_str(&processed).map_err(|e| ProxyError::Config(e.to_string()))?;
+    // Runs before strict-key checking so a legacy `[web]` is measured against
+    // the schema it was written for, not against telemt's own WEB transport.
+    crate::config::fork::legacy::migrate_fork_web_section(&mut parsed_toml)?;
+    let parsed_toml = parsed_toml;
     handle_unknown_config_keys(&parsed_toml)?;
     let general_table = parsed_toml
         .get("general")

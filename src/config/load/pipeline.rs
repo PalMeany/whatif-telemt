@@ -7,8 +7,15 @@ pub(super) fn load_source_graph(graph: ConfigSourceGraph) -> Result<LoadedConfig
     validate_runtime::validate(&mut config)?;
     validate_me::validate(&mut config)?;
     validate_server::validate(&mut config)?;
-    // telemt's own WEB transport owns its section end to end.
-    config.web.validate()?;
+    // Which WEB transport the operator asked for is settled before either one
+    // starts complaining about its own half-written section.
+    config
+        .fork
+        .validate_selection(config.telemt_web_requested())?;
+    validate_web::validate(&mut config)?;
+    // Fork-only features validate themselves; the rest of the document is
+    // stock telemt and was already checked above.
+    config.fork.validate(config.telemt_web_requested())?;
     effective::apply(&mut config)?;
     Ok(LoadedConfig {
         config,

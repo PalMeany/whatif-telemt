@@ -558,7 +558,9 @@ pub(super) async fn delete_user(
     // Quota lives in the process-scoped QuotaStore and outlives both this config
     // edit and the current runtime generation, so it has to be dropped
     // explicitly: otherwise re-creating the same username starts pre-charged.
-    shared.stats.forget_user(user);
+    if cfg.fork.runtime_switches().user_delete_forgets_quota {
+        shared.stats.forget_user(user);
+    }
 
     Ok((user.to_string(), revision))
 }

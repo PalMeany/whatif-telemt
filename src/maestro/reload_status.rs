@@ -216,7 +216,9 @@ impl ReloadStatusStore {
             .find(|status| status.reload_id == reload_id)
         {
             status.state = phase;
-            status.error_kind = error.as_ref().map(ReloadError::kind);
+            status.error_kind = crate::fork::switches::reload_error_kind()
+                .then(|| error.as_ref().map(ReloadError::kind))
+                .flatten();
             status.error = error.map(|error| error.to_string());
             status.finished_at_epoch_secs = Some(now_epoch_secs());
         }

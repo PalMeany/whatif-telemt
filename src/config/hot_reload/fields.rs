@@ -89,6 +89,7 @@ pub struct HotFields {
     pub user_max_unique_ips_global_each: usize,
     pub user_max_unique_ips_mode: crate::config::UserMaxUniqueIpsMode,
     pub user_max_unique_ips_window_secs: u64,
+    pub web_debug: WebDebugConfig,
 }
 
 impl HotFields {
@@ -218,6 +219,7 @@ impl HotFields {
             user_max_unique_ips_global_each: cfg.access.user_max_unique_ips_global_each,
             user_max_unique_ips_mode: cfg.access.user_max_unique_ips_mode,
             user_max_unique_ips_window_secs: cfg.access.user_max_unique_ips_window_secs,
+            web_debug: cfg.web.debug.clone(),
         }
     }
 }
@@ -337,13 +339,22 @@ pub(super) fn overlay_hot_fields(old: &ProxyConfig, new: &ProxyConfig) -> ProxyC
     cfg.access.user_max_unique_ips_global_each = new.access.user_max_unique_ips_global_each;
     cfg.access.user_max_unique_ips_mode = new.access.user_max_unique_ips_mode;
     cfg.access.user_max_unique_ips_window_secs = new.access.user_max_unique_ips_window_secs;
-    let process_limits = cfg.web.limits.clone();
+    // Both WEB transports follow a hot reload the same way: profiles and
+    // policy move, ceilings are process resources sized once at start-up and
+    // stay on the running value.
+    let process_limits = cfg.fork.web.limits.clone();
+    cfg.fork.web = new.fork.web.clone();
+    cfg.fork.web.limits = process_limits;
+    let telemt_process_limits = cfg.web.limits.clone();
     cfg.web = new.web.clone();
-    cfg.web.limits = process_limits;
+    cfg.web.limits = telemt_process_limits;
+    if !web_debug_fits_limits(&cfg.web.debug, &cfg.web.limits) {
+        cfg.web.debug = old.web.debug.clone();
+    }
     if cfg.rebuild_runtime_user_auth().is_err() {
         cfg.runtime_user_auth = None;
     }
-    if false {
+    if cfg.rebuild_runtime_web().is_err() {
         cfg.web = old.web.clone();
     }
 

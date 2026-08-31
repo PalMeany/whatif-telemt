@@ -60,13 +60,13 @@ pub(super) fn validate(config: &mut ProxyConfig) -> Result<()> {
         .client_mss_bulk_value()
         .map_err(|error| ProxyError::Config(format!("server.client_mss_bulk {error}")))?;
     for (idx, listener) in config.server.listeners.iter().enumerate() {
-        // telemt's WEB transport owns its own listener under `[web]`; it is not
-        // a client-listener transport here. Refusing at load time beats binding
-        // a listener that would silently answer MTProxy on a WEB port.
-        if listener.transport == ListenerTransport::Web {
+        // A WEB listener answers HTTP, never an MTProxy handshake, so refusing
+        // it here beats binding a port that would silently answer the wrong
+        // protocol. `[fork.web]` is a different transport with its own listener.
+        if listener.transport == ListenerTransport::Web && !config.web.enabled {
             return Err(ProxyError::Config(format!(
-                "server.listeners[{idx}].transport = \"web\" is not supported; \
-                 configure the WEB proxy transport under [web] instead"
+                "server.listeners[{idx}].transport = \"web\" needs [web] enabled = true; \
+                 this fork's own WEB transport is configured under [fork.web] instead"
             )));
         }
         if listener.client_mss.is_some() {

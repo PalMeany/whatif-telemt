@@ -281,11 +281,19 @@ pub(super) async fn load_config_for_reload(
         .await
         .map_err(|error| ApiFailure::internal(format!("failed to join config loader: {}", error)))?
         .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {}", error)))?;
-    loaded
-        .config
-        .validate()
-        .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {}", error)))?;
-    Ok((loaded.config, Some(loaded.rendered_hash)))
+    let switches = *loaded.config.fork.runtime_switches();
+    // `ProxyConfig::load` runs the loader's own checks only. Without this, a
+    // bare reload can install a config that is fatal at start-up, after which
+    // every handshake fails and only a restart recovers.
+    if switches.reload_validate_candidate {
+        loaded.config.validate().map_err(|error| {
+            ApiFailure::bad_request(format!("invalid runtime config: {}", error))
+        })?;
+    }
+    let snapshot_hash = switches
+        .reload_config_snapshot_hash
+        .then_some(loaded.rendered_hash);
+    Ok((loaded.config, snapshot_hash))
 }
 
 /// Puts `previous_content` back only if `path` still holds `expected_revision`.

@@ -62,9 +62,16 @@ pub(super) async fn patch_config(
     // Captured for `failure_policy=rollback`: the merged config is committed to
     // disk here and the live generation's watcher hot-applies it, so a rolled
     // back reload has to be able to put these bytes back.
-    let wants_rollback = reload_request
-        .as_ref()
-        .is_some_and(|request| request.failure_policy == ReloadFailurePolicy::Rollback);
+    let wants_rollback = shared
+        .active_runtime
+        .load()
+        .config()
+        .fork
+        .runtime_switches()
+        .reload_config_rollback
+        && reload_request
+            .as_ref()
+            .is_some_and(|request| request.failure_policy == ReloadFailurePolicy::Rollback);
     let previous_content = if wants_rollback {
         Some(
             tokio::fs::read_to_string(&shared.config_path)
