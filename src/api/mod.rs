@@ -33,6 +33,8 @@ use crate::transport::middle_proxy::MePool;
 use crate::web::control::WebRuntimePublication;
 use crate::web::trace::WebTraceStore;
 
+// Batched user operations under a single config write.
+mod bulk;
 mod config_edit;
 pub(crate) mod config_store;
 mod events;
@@ -259,6 +261,9 @@ async fn submit_reload_from_disk(
 
 fn allowed_methods_for_path(path: &str) -> Option<&'static str> {
     if let Some(allow) = web_runtime::allowed_methods(path) {
+        return Some(allow);
+    }
+    if let Some(allow) = bulk::allowed_methods(path) {
         return Some(allow);
     }
     match path {
@@ -533,6 +538,17 @@ async fn handle(
     let body_limit = api_cfg.request_body_limit_bytes;
 
     let result: Result<Response<Full<Bytes>>, ApiFailure> = async {
+        if bulk::is_route(normalized_path) {
+            return bulk::handle(
+                method,
+                req,
+                shared.as_ref(),
+                cfg.as_ref(),
+                body_limit,
+                api_cfg.read_only,
+            )
+            .await;
+        }
         if web_runtime::is_route(normalized_path) {
             let web_mutation = method == Method::POST;
             let result = web_runtime::handle(

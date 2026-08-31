@@ -1,0 +1,297 @@
+//! `POST /v1/bulk`: many user operations, one config write.
+//!
+//! The single-operation routes each take the mutation lock, load the config
+//! from disk, write it back and fsync. Provisioning a hundred users that way
+//! costs a hundred of each, and every write invalidates the caller's revision
+//! for the next request. This route loads once, applies the whole batch in
+//! memory, writes once, and then performs the runtime side effects.
+//!
+//! Off by default; enabled with `[fork.api] bulk_enabled = true`.
+//!
+//! Submodules:
+//! - `apply`: in-memory application of one operation to a candidate config
+//! - `model`: request and response wire types
+
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use http_body_util::Full;
+use hyper::body::{Bytes, Incoming};
+use hyper::{Method, Request, Response, StatusCode};
+
+use crate::config::ProxyConfig;
+
+use super::config_store::{
+    AccessSection, ensure_expected_revision, load_config_from_disk, parse_if_match,
+    save_access_sections_to_disk,
+};
+use super::http_utils::{read_json, success_response};
+use super::model::ApiFailure;
+use super::users::users_from_config;
+use super::{ALLOW_POST, ApiShared};
+
+mod apply;
+mod model;
+#[cfg(test)]
+mod tests;
+
+use apply::{RuntimeEffect, apply_operation};
+use model::{BulkRequest, BulkResponse, BulkResult};
+
+/// Path this module owns.
+const BULK_PATH: &str = "/v1/bulk";
+
+/// Methods allowed on the bulk route, or nothing when it is not one.
+pub(super) fn allowed_methods(path: &str) -> Option<&'static str> {
+    (path == BULK_PATH).then_some(ALLOW_POST)
+}
+
+/// Reports whether a normalized path belongs to this module.
+pub(super) fn is_route(path: &str) -> bool {
+    path == BULK_PATH
+}
+
+/// Answers `POST /v1/bulk`.
+pub(super) async fn handle(
+    method: Method,
+    request: Request<Incoming>,
+    shared: &ApiShared,
+    config: &ProxyConfig,
+    body_limit: usize,
+    read_only: bool,
+) -> Result<Response<Full<Bytes>>, ApiFailure> {
+    if method != Method::POST {
+        return Err(ApiFailure::method_not_allowed(ALLOW_POST));
+    }
+    if !config.fork.bulk_enabled() {
+        return Err(ApiFailure::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Bulk requests are disabled; enable them with [fork.api] bulk_enabled = true",
+        ));
+    }
+    if read_only {
+        return Err(ApiFailure::new(
+            StatusCode::FORBIDDEN,
+            "read_only",
+            "API runs in read-only mode",
+        ));
+    }
+
+    let expected_revision = parse_if_match(request.headers());
+    let body = read_json::<BulkRequest>(request.into_body(), body_limit).await?;
+    let max_operations = config.fork.api.bulk_max_operations;
+    if body.operations.is_empty() {
+        return Err(ApiFailure::bad_request("operations must not be empty"));
+    }
+    if body.operations.len() > max_operations {
+        return Err(ApiFailure::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_many_operations",
+            format!("a batch may carry at most {max_operations} operations"),
+        ));
+    }
+
+    let budget = Duration::from_secs(u64::from(config.fork.api.bulk_timeout_secs));
+    // The API listener drops a connection after its own deadline with no
+    // response at all, so a batch that would outrun it is cut short here and
+    // reports what it did instead of vanishing.
+    match tokio::time::timeout(budget, run_batch(body, expected_revision, shared)).await {
+        Ok(result) => result,
+        Err(_) => Err(ApiFailure::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "bulk_timeout",
+            format!(
+                "the batch exceeded fork.api.bulk_timeout_secs = {}",
+                config.fork.api.bulk_timeout_secs
+            ),
+        )),
+    }
+}
+
+/// Applies one batch and writes it.
+async fn run_batch(
+    body: BulkRequest,
+    expected_revision: Option<String>,
+    shared: &ApiShared,
+) -> Result<Response<Full<Bytes>>, ApiFailure> {
+    let atomic = body.atomic;
+    let guard = shared.mutation_lock.lock().await;
+    let mut cfg = load_config_from_disk(&shared.config_path).await?;
+    ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
+
+    let mut results = Vec::with_capacity(body.operations.len());
+    let mut sections: Vec<AccessSection> = Vec::new();
+    let mut effects: Vec<RuntimeEffect> = Vec::new();
+    let mut secrets: Vec<(usize, String)> = Vec::new();
+    let mut retained: BTreeSet<String> = BTreeSet::new();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut aborted = false;
+
+    for operation in body.operations {
+        let action = operation.action;
+        let id = operation.id;
+        if aborted {
+            results.push(BulkResult::skipped(id, action, operation.user));
+            continue;
+        }
+        match apply_operation(&mut cfg, action, operation.user, operation.body) {
+            Ok(applied) => {
+                sections.extend(applied.sections);
+                effects.extend(applied.effects);
+                if let Some(secret) = applied.secret {
+                    secrets.push((results.len(), secret));
+                }
+                if applied.retained {
+                    retained.insert(applied.user.clone());
+                } else {
+                    retained.remove(&applied.user);
+                }
+                succeeded += 1;
+                results.push(BulkResult::ok(id, action, applied.user));
+            }
+            Err(rejected) => {
+                failed += 1;
+                results.push(BulkResult::failed(
+                    id,
+                    action,
+                    rejected.user,
+                    rejected.code,
+                    rejected.message,
+                ));
+                if atomic {
+                    aborted = true;
+                }
+            }
+        }
+    }
+
+    if failed > 0 && atomic {
+        // Nothing was written: the candidate config is dropped with the guard.
+        drop(guard);
+        return Ok(success_response(
+            StatusCode::CONFLICT,
+            BulkResponse {
+                applied: false,
+                succeeded: 0,
+                failed,
+                results,
+            },
+            crate::api::config_store::current_revision(&shared.config_path).await?,
+        ));
+    }
+
+    if succeeded == 0 {
+        drop(guard);
+        return Ok(success_response(
+            StatusCode::OK,
+            BulkResponse {
+                applied: false,
+                succeeded,
+                failed,
+                results,
+            },
+            crate::api::config_store::current_revision(&shared.config_path).await?,
+        ));
+    }
+
+    cfg.validate()
+        .map_err(|error| ApiFailure::bad_request(format!("config validation failed: {}", error)))?;
+    let revision = save_access_sections_to_disk(&shared.config_path, &cfg, &sections).await?;
+    drop(guard);
+
+    apply_runtime_effects(effects, shared).await;
+
+    for (index, secret) in secrets {
+        results[index].secret = Some(secret);
+    }
+    attach_views(&mut results, &retained, &cfg, shared).await;
+
+    Ok(success_response(
+        StatusCode::OK,
+        BulkResponse {
+            applied: failed == 0,
+            succeeded,
+            failed,
+            results,
+        },
+        revision,
+    ))
+}
+
+/// Runs the deferred runtime actions once the batch is on disk.
+async fn apply_runtime_effects(effects: Vec<RuntimeEffect>, shared: &ApiShared) {
+    for effect in effects {
+        match effect {
+            RuntimeEffect::SetEnabled { user, enabled } => {
+                shared.proxy_shared.set_user_enabled(&user, enabled);
+            }
+            RuntimeEffect::CancelSessions { user } => {
+                shared.proxy_shared.cancel_user_sessions(&user);
+            }
+            RuntimeEffect::SetIpLimit { user, limit } => match limit {
+                Some(limit) => shared.ip_tracker.set_user_limit(&user, limit).await,
+                None => shared.ip_tracker.remove_user_limit(&user).await,
+            },
+            RuntimeEffect::ClearIps { user } => {
+                shared.ip_tracker.clear_user_ips(&user).await;
+            }
+            RuntimeEffect::ForgetUser { user } => {
+                // Quota is process-scoped and outlives both the config edit and
+                // the runtime generation, so a re-created name would otherwise
+                // start pre-charged.
+                if shared
+                    .active_runtime
+                    .load()
+                    .config()
+                    .fork
+                    .runtime_switches()
+                    .user_delete_forgets_quota
+                {
+                    shared.stats.forget_user(&user);
+                }
+            }
+        }
+    }
+}
+
+/// Attaches the post-batch view of every user the batch kept.
+async fn attach_views(
+    results: &mut [BulkResult],
+    retained: &BTreeSet<String>,
+    cfg: &ProxyConfig,
+    shared: &ApiShared,
+) {
+    if retained.is_empty() {
+        return;
+    }
+    let (detected_ip_v4, detected_ip_v6) = shared.detected_link_ips();
+    let mut views = users_from_config(
+        cfg,
+        &shared.stats,
+        &shared.ip_tracker,
+        detected_ip_v4,
+        detected_ip_v6,
+        None,
+    )
+    .await
+    .into_iter()
+    .filter(|view| retained.contains(&view.username))
+    .map(|view| (view.username.clone(), view))
+    .collect::<std::collections::HashMap<_, _>>();
+
+    for result in results.iter_mut() {
+        if result.status != "ok" {
+            continue;
+        }
+        let Some(user) = result.user.as_deref() else {
+            continue;
+        };
+        // One user may appear in several operations; the last one wins the
+        // single view, which is also the state that is now on disk.
+        if let Some(view) = views.remove(user) {
+            result.view = Some(view);
+        }
+    }
+}
