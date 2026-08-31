@@ -81,7 +81,7 @@ proxy.example.com {
 # `header_up X-Forwarded-For` — Caddy warns that it is unnecessary.
 #
 # If a CDN fronts Caddy, telemt still matches the Host header against
-# web.hostname, which must be the name clients type into their app. When the CDN
+# fork.web.hostname, which must be the name clients type into their app. When the CDN
 # rewrites Host to the origin name, normalise it back inside the site block:
 #
 #   header_up Host cdn.example.com

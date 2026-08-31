@@ -14,7 +14,7 @@ and exists to carry the rest: things upstream does not have, has not added yet,
 or never will. Work lands here when it is worth running in production and there
 is no reason to wait for it to land anywhere else.
 
-Inherited from upstream (the fork now carries telemt 3.5.2) and belonging to
+Inherited from upstream (the fork now carries telemt 3.5.5) and belonging to
 the Telemt project: the MTProto modes
 (classic, `dd` secure, `ee` fake-TLS with SNI fronting), TLS-fronting, the
 Middle-End pool, replay protection, masking, quotas and per-user limits, the
@@ -35,19 +35,26 @@ Added here, and described in full in
   front-proxy templates, a build-from-source Dockerfile and an unattended
   installer;
 - **hardening of the 3.4.25 runtime reload subsystem**, which this fork found to
-  be incomplete under review.
+  be incomplete under review;
+- a **`[fork]` configuration section** that owns every one of the above, so a
+  configuration written for stock telemt keeps its exact meaning here and
+  `[fork] enabled = false` turns the whole fork off in one key
+  ([docs/Fork/FORK_CONFIG.en.md](docs/Fork/FORK_CONFIG.en.md));
+- a **built-in Prometheus panel**, a **Telegram admin bot** and **bulk API
+  requests** — all off by default, all under `[fork]`.
 
 Upstream has continued independently since the fork point and is now on the
 3.5.x line. The two codebases have diverged, and a feature present in one is not
 necessarily present in the other; upstream's 3.5.x contains its own, separately
-written WEB proxy implementation, which is not the code in this repository.
+written WEB proxy implementation; this build carries both, and
+`fork.web_implementation` selects which one runs.
 Report problems with this fork here — not to the Telemt project.
 
 The binary identifies itself as this fork:
 
 ```console
 $ telemt --version
-WhatIfTelemt 3.5.2.1w
+WhatIfTelemt 3.5.5.1w
 ```
 
 ## The WEB proxy transport
@@ -133,7 +140,7 @@ so the build wants roughly 2 GB of RAM and several minutes.
 git clone https://github.com/PalMeany/whatif-telemt.git
 cd whatif-telemt
 cargo build --release --locked
-./target/release/telemt --version        # WhatIfTelemt 3.5.2.1w
+./target/release/telemt --version        # WhatIfTelemt 3.5.5.1w
 ./target/release/telemt config.toml      # run in the foreground
 ```
 

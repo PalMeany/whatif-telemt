@@ -210,7 +210,7 @@ that application on a loopback port and use `public_upstream` instead of
 Append to `/etc/telemt/config.toml`:
 
 ```toml
-[web]
+[fork.web]
 enabled = true
 hostname = "proxy.example.com"
 listen = "127.0.0.1:8080"
@@ -401,17 +401,17 @@ near zero means the carrier is fine and every stream is being refused; the
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Failed to bind WEB proxy listener` at start-up | 8080/8081 already used | change `web.listen` / `web.admin_listen` |
+| `Failed to bind WEB proxy listener` at start-up | 8080/8081 already used | change `fork.web.listen` / `fork.web.admin_listen` |
 | telemt exits with `No listeners. Exiting.` | no usable `[[server.listeners]]` | check the listener block and that the port is free |
 | Caddy fails to start | telemt already holds 443 | see step 0: the front proxy owns 443 |
-| Every request returns 404, including `/` | `Host` seen by telemt ≠ `web.hostname` | `journalctl -u telemt \| grep "Host does not match"` names both; make the front proxy preserve `Host`, or rewrite it with `header_up Host <hostname>` |
-| Every request returns 404 behind a CDN | the CDN forwards its own origin hostname, and `web.hostname` must be the name clients type | set `web.hostname` to the client-facing name and normalise `Host` at the origin proxy |
+| Every request returns 404, including `/` | `Host` seen by telemt ≠ `fork.web.hostname` | `journalctl -u telemt \| grep "Host does not match"` names both; make the front proxy preserve `Host`, or rewrite it with `header_up Host <hostname>` |
+| Every request returns 404 behind a CDN | the CDN forwards its own origin hostname, and `fork.web.hostname` must be the name clients type | set `fork.web.hostname` to the client-facing name and normalise `Host` at the origin proxy |
 | Bridge URL returns the ordinary index | wrong secret, wrong hostname, or non-canonical `?bridge=` | re-derive with the exact hostname and the exact secret string the client uses |
 | Client connects, carrier looks healthy, no data ever flows | no mode a WEB client can speak is enabled | confirm with `tproxy_stream_bytes_down_total` flat while `tproxy_sessions_created_total` climbs; set `secure = true` and hand out the `dd…` secret. The reject shows as `direct_modes_disabled` in the bad-connect classes |
 | Bridge page is served but no session is ever created | the WebView loaded the page and could not reach the carrier | `tproxy_bridge_pages_served_total` rising with `tproxy_sessions_created_total` flat: check that the front proxy forwards `/api/v1/*` to telemt and does not buffer or rewrite it |
 | Client stays on "connecting" forever; sessions are created and counters look healthy; it connects instantly after switching to another proxy and back | `carrier_mode` selects a WebSocket carrier the client's WebView does not drive | set `carrier_mode = "https"` and restart |
 | Client rejects the secret in its proxy settings | an `ee` fake-TLS secret was handed out | WEB clients accept only plain and `dd` secrets |
-| `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `web.listen` |
+| `502 Bad Gateway` | telemt down or wrong upstream port | `systemctl status telemt`, check `fork.web.listen` |
 | Caddy exits with `permission denied` on a log file | `/var/log/caddy` missing or not writable by `caddy` | drop the `log` block, or `mkdir -p /var/log/caddy && chown caddy:caddy /var/log/caddy` |
 | Caddy warns `Unnecessary header_up X-Forwarded-For` | Caddy already sets the header | remove the directive |
 | Client address logged as the CDN, or requests rejected | a CDN fronts Caddy | do not front this hostname with a CDN: long polls and WebSocket carriers need unbuffered pass-through |
@@ -431,9 +431,9 @@ systemctl restart telemt
 ```
 
 Configuration-only changes are picked up by the config watcher, but under
-`[web]` only the capability profiles reload: `[access.users]`,
-`[[web.profiles]]`, and the keys that shape them (`derive_user_profiles`,
-`carrier_mode`, each profile's `backend` and `[web.profiles.limits]`). Adding a
+`[fork.web]` only the capability profiles reload: `[access.users]`,
+`[[fork.web.profiles]]`, and the keys that shape them (`derive_user_profiles`,
+`carrier_mode`, each profile's `backend` and `[fork.web.profiles.limits]`). Adding a
 user therefore needs no restart, and a rotated or deleted secret loses the
 sessions it opened.
 
@@ -441,9 +441,9 @@ The relay re-derives that set on a periodic refresh rather than as a step of the
 reload, so revocation is eventual, not immediate — restart telemt when a leaked
 secret has to stop relaying at a known moment.
 
-Every other `[web]` key is read once at start-up and needs a restart:
+Every other `[fork.web]` key is read once at start-up and needs a restart:
 `enabled`, `hostname`, `listen`, `admin_listen`, `public_dir`,
-`public_upstream`, `trusted_proxies`, `[web.limits]`, and `[web.timeouts]`.
+`public_upstream`, `trusted_proxies`, `[fork.web.limits]`, and `[fork.web.timeouts]`.
 That includes `enabled`: a reload cannot turn the transport off, which is why
 step 15 restarts.
 
@@ -453,7 +453,7 @@ Turn the transport off without touching anything else — it is additive, and
 telemt behaves exactly as before when it is disabled:
 
 ```bash
-sed -i 's/^enabled = true/enabled = false/' /etc/telemt/config.toml   # inside [web]
+sed -i 's/^enabled = true/enabled = false/' /etc/telemt/config.toml   # inside [fork.web]
 systemctl restart telemt
 ```
 

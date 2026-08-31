@@ -36,6 +36,7 @@ This document lists all configuration keys accepted by `config.toml`.
  - [access](#access)
  - [upstreams](#upstreams)
  - [web](#web)
+ - [fork](#fork)
 
 # Top-level keys
 
@@ -3621,3 +3622,22 @@ refused at start-up.
 Every key of `[web.limits]`, `[web.timeouts]`, and `[[web.profiles]]`, together
 with deployment instructions and the carrier-mode trade-offs, is documented in
 [WEB proxy transport](../Advanced_settings/WEB_PROXY.en.md).
+
+# fork
+
+Everything this fork adds on top of telemt lives under `[fork]` and nowhere
+else, so every key documented above keeps the meaning it has in stock telemt.
+The section is optional and `[fork] enabled = false` turns every fork-only
+feature off in one key.
+
+| Key | Type | Default | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.enabled` | `bool` | `true` | `✘` |
+| `fork.web_implementation` | `"auto" \| "telemt" \| "fork" \| "both" \| "off"` | `"auto"` | `✘` |
+| `fork.runtime.*` | `bool` (16 switches) | `true` | `✘` |
+| `fork.web.*` | Table | this fork's WEB transport, disabled | partial |
+| `fork.prometheus.*` | Table | built-in panel, disabled | `✘` |
+| `fork.telegram.*` | Table | admin bot, disabled | `✘` |
+| `fork.api.*` | Table | bulk requests, disabled | `✘` |
+
+Full reference, key by key: [docs/Fork/FORK_CONFIG.en.md](../Fork/FORK_CONFIG.en.md).

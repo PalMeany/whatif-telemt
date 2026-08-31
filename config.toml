@@ -60,12 +60,44 @@ tls_front_dir = "tlsfront"   # Cache directory for TLS emulation
 # format: "username" = "32_hex_chars_secret"
 hello = "00000000000000000000000000000000"
 
-# === WEB Proxy Transport ===
+# === Fork Features ===
+# Everything this build adds on top of telemt lives under [fork] and nowhere
+# else, so a configuration written for stock telemt keeps its exact meaning.
+# Deleting this whole section leaves a working proxy.
+# Full reference: docs/Fork/FORK_CONFIG.en.md
+# [fork]
+# enabled = true                    # master switch for every fork-only feature
+# web_implementation = "auto"       # auto | telemt | fork | both | off
+
+# --- Fork runtime behaviour ---
+# One switch per deviation from stock telemt, all on by default. Turning one
+# off restores what telemt does; see the reference for what each one changes.
+# [fork.runtime]
+# process_admission_budget = true       # one connection semaphore for the process
+# process_buffer_pool = true            # one relay buffer pool for the process
+# process_uptime_clock = true           # uptime measures the process, not the generation
+# reload_cancel = true                  # DELETE /v1/system/reload/{id}
+# reload_deadlines = true               # bound prepare, quiesce and teardown
+# reload_config_rollback = true         # failure_policy=rollback restores the file
+# reload_validate_candidate = true      # validate() a reload candidate
+# reload_error_kind = true              # stable error_kind slug in reload status
+# reload_config_snapshot_hash = true    # seed the new watcher from the reload's snapshot
+# me_writer_teardown = true             # cancel retired middle-end writers
+# tls_front_cache_budget_release = true # return a retired cache's reservations
+# synlimit_generation_reconciler = true # re-reconcile SYN rules on cutover
+# shutdown_unbind_listeners_first = true# unbind sockets first at SIGTERM
+# session_admission_closed_metric = true# export telemt_session_admission_closed_total
+# user_delete_forgets_quota = true      # a deleted user's quota is dropped
+# rust_log_survives_reload = true       # keep RUST_LOG across a reload
+
+# --- This fork's WEB proxy transport ---
 # Carries MTProto through an app-owned WebView over a same-origin HTTPS or
-# WebSocket carrier, so the proxy looks like an ordinary website.
+# WebSocket carrier, so the proxy looks like an ordinary website. Telemt's own
+# WEB transport is the separate [web] section below; the two are different
+# implementations and can run side by side.
 # Requires a TLS-terminating front proxy (Caddy/nginx) for the public hostname.
 # Full reference: docs/Advanced_settings/WEB_PROXY.en.md
-# [web]
+# [fork.web]
 # enabled = true
 # hostname = "proxy.example.com"    # must match the front proxy certificate
 # listen = "127.0.0.1:8080"         # carrier listener: plaintext, keep it on loopback
@@ -77,10 +109,61 @@ hello = "00000000000000000000000000000000"
 # trusted_proxies = ["127.0.0.0/8", "::1/128"]
 
 # Optional: bind one secret to its own backend, carrier mode, and ceilings.
-# [[web.profiles]]
+# [[fork.web.profiles]]
 # name = "media"
 # secret = "000102030405060708090a0b0c0d0e0f"
 # backend = "internal"              # or "127.0.0.1:2398" for a stock MTProxy
 # carrier_mode = "https"            # https | https-lanes; the WebSocket modes are not yet
 #                                   verified against a shipping client, and a client that
 #                                   cannot drive one hangs on "connecting" with no error
+
+# --- Built-in Prometheus panel ---
+# A self-contained HTML page that scrapes this process's own /metrics and draws
+# it in the browser. No external reference, no scrape target to stand up.
+# [fork.prometheus]
+# enabled = true
+# path = "/panel"                   # must not shadow /metrics or /beobachten
+# listen = ""                       # empty shares the metrics listener and its whitelist
+# whitelist = ["127.0.0.1/32", "::1/128"]  # only used with a dedicated listen
+# refresh_secs = 5
+# history_points = 120
+# show_users = false                # per-user rows carry usernames as labels
+
+# --- Telegram admin bot ---
+# Long-polls the Bot API and answers status commands. Read-only until
+# allow_mutations is set. Bot API traffic follows [[upstreams]].
+# [fork.telegram]
+# enabled = true
+# token = "123456:replace-with-the-token-from-BotFather"
+# admins = [111111111]              # Telegram user ids allowed to talk to it
+# allow_mutations = false           # /adduser, /deluser, /enable, /disable, /rotate
+# api_base = "https://api.telegram.org"
+# poll_timeout_secs = 25
+# request_timeout_secs = 30
+
+# --- Fork API surface ---
+# POST /v1/bulk: many user operations under one config write.
+# [fork.api]
+# bulk_enabled = true
+# bulk_max_operations = 100
+# bulk_timeout_secs = 10
+
+# === Telemt WEB Proxy Transport ===
+# Telemt's own WEB transport, bound as a [[server.listeners]] entry rather than
+# owning a listener of its own. Unrelated to [fork.web] above.
+# Full reference: docs/WEB/WEB_PROXY.en.md in the upstream repository.
+# [web]
+# enabled = true
+# carrier = "https"
+#
+# [[web.vhosts]]
+# host = "proxy.example.com"
+# public_addr = "203.0.113.10:443"
+# decoy = { mode = "static_directory", directory = "/srv/site" }
+# profiles = [{ user = "hello", secret_mode = "dd" }]
+#
+# [[server.listeners]]
+# ip = "127.0.0.1"
+# port = 8080
+# transport = "web"
+# web_trusted_proxy_cidrs = ["127.0.0.0/8"]

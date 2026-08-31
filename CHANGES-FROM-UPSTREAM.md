@@ -18,21 +18,29 @@ this fork after that commit. For the exact delta as it stands now, run
 ## Upstream base
 
 The fork tracks upstream releases by merging them. It currently carries
-**telemt 3.5.2** (`b6b9a18`), merged whole: the configuration `types/` and
+**telemt 3.5.5** (`ac71d92`), merged whole: the configuration `types/` and
 `load/` split, the `proxy/handshake` decomposition, `proxy/authenticated`, the
 `transport/socket` fragmented-send work, `pf` support in the SYN limiter, the
-api `users/` and `config_store/` splits, and include-graph-aware config
-revisions are all upstream's.
+api `users/` and `config_store/` splits, include-graph-aware config revisions,
+the tier-2 warm-writer fallback in middle-proxy selection, and the per-user
+metric `_total` suffixes are all upstream's.
 
 Upstream 3.5.x added a **WEB proxy of its own**, written separately against the
-same published protocol. The two share that protocol and nothing else. This
-fork keeps its own implementation and removes upstream's, along with its
-`[web]` configuration surface, loader, validator and listener wiring; a
-`[[server.listeners]]` entry with `transport = "web"` is refused at load time
-with a pointer to `[web]`. Upstream's hot listener-rebind subsystem
+same published protocol. The two share that protocol and nothing else. Both are
+present in this build: upstream's under `[web]`, bound as a
+`[[server.listeners]]` entry with `transport = "web"`, and this fork's under
+`[fork.web]` with its own listener. `fork.web_implementation` selects between
+them, and either or both can run. Upstream's WEB module needs nothing from the
+listener subsystem this fork replaced, so it is wired to this fork's accept
+loop instead of to upstream's `ListenerManager`.
+
+Upstream's hot listener-rebind subsystem
 (`maestro/listeners/{plan,bind,control,accept}`, `resolve_reload_config`, and
-`PATCH /v1/config` for `server.listeners`) is also not carried, because it is
-built on the maestro this fork replaced.
+`PATCH /v1/config` for `server.listeners`) is still not carried, because it is
+built on the maestro this fork replaced. Upstream's activation-gated
+`spawn_config_watcher` is also not taken: it is upstream's fix for the same
+lost-write race this fork closes with a config snapshot hash threaded through
+the reload command, and running both is untested.
 
 None of the work below has been submitted to, reviewed by, or accepted by the
 upstream maintainers.
@@ -112,7 +120,7 @@ lane carrier and a lane WebSocket.
 Deploying the WEB transport needs a TLS front proxy that owns port 443, which
 the stock quick-start does not account for, so this fork adds a from-scratch
 runbook ([contrib/web/DEPLOY.md](contrib/web/DEPLOY.md)) covering port layout,
-DNS, building, service account and unit, base and `[web]` configuration, front
+DNS, building, service account and unit, base and `[fork.web]` configuration, front
 proxy, firewall, start-up order, verification, observability, troubleshooting,
 updates and rollback. It ships front-proxy templates for Caddy
 (`contrib/web/Caddyfile.example`) and nginx (`contrib/web/nginx.conf.example`)
@@ -131,6 +139,60 @@ capability; it refuses to put the direct MTProto listener on 443; it writes the
 bridge capability to a root-owned `0600` file rather than to stdout; and a
 failed health probe is fatal.
 
+## The `[fork]` configuration section
+
+Every fork-only feature is configured under `[fork]` and nowhere else
+(`src/config/fork/**`, documented in
+[docs/Fork/FORK_CONFIG.en.md](docs/Fork/FORK_CONFIG.en.md)). A configuration
+written for stock telemt therefore keeps its exact meaning here, and deleting
+the section leaves a working proxy.
+
+`[fork.runtime]` carries one switch per runtime deviation from telemt — sixteen
+of them, all defaulting to on — and `[fork] enabled = false` turns the lot off
+in one key, so a fork-only behaviour can be bisected against upstream's without
+editing anything else. Three deviations deliberately have no switch, because
+"off" for them would mean reinstating deleted code rather than taking a
+different branch: the single process-wide Direct copy-buffer controller,
+generation-scoped `dns_overrides`, and the reload ticket's `Drop` safety net.
+Product identification has none either, because TELEMT PUBLIC LICENSE 3.3 §3
+requires a modified build to identify itself as unofficial.
+
+This fork's WEB transport moved from `[web]` to `[fork.web]` when upstream's
+`[web]` came back. A legacy fork-schema `[web]` is detected on the raw document
+and migrated with a deprecation warning; a `[web]` mixing keys from both schemas
+is refused rather than guessed at.
+
+## Operator features
+
+Three additions that upstream does not have, all off by default and all under
+`[fork]`:
+
+- **A built-in Prometheus panel** (`src/fork/prometheus/**`): one self-contained
+  HTML document served next to the exposition this process already renders. It
+  has no external reference of any kind — the page scrapes `/metrics` from its
+  own origin and draws it client-side — so it works on a host with no outbound
+  network and adds no dependency to the binary. It reads `# TYPE` rather than
+  guessing from the name, because several series here are gauges despite a
+  `_total` suffix, and it drops negative counter deltas, because a reload mints
+  a fresh `Stats` and a reset is not a rate. By default it shares the metrics
+  listener and its whitelist; `[fork.prometheus] listen` gives it one of its own
+  serving the panel and nothing else.
+- **A Telegram admin bot** (`src/fork/telegram/**`): a process-scoped task that
+  long-polls the Bot API and answers a fixed command set. It writes through the
+  same control plane and the same mutation lock as the HTTP API, so the two
+  cannot race on the configuration file. Bot API traffic is routed through the
+  configured `[[upstreams]]`, which matters more here than anywhere else in the
+  tree: a host that needs a SOCKS or Shadowsocks egress to reach Telegram would
+  otherwise have the bot dial `api.telegram.org` directly and announce the
+  proxy's real address. Read-only until `allow_mutations` is set, and an update
+  from a chat outside the admin list is dropped without a reply.
+- **Bulk API requests** (`src/api/bulk/**`): `POST /v1/bulk` applies many user
+  operations under one config load, one fsynced write and one set of runtime
+  side effects, where the single-operation routes cost all three per operation
+  and each write invalidates the caller's revision for the next request.
+  Batches are atomic by default and refusals carry the same stable codes the
+  single-operation routes use.
+
 ---
 
 ## Кратко по-русски
@@ -138,13 +200,14 @@ failed health probe is fatal.
 Этот репозиторий — форк <https://github.com/telemt/telemt> от коммита
 `d851200` (telemt 3.4.25). **Это неофициальная, изменённая версия Telemt, не
 аффилированная с проектом Telemt и не одобренная им.** Форк подтягивает
-вышестоящие релизы слиянием и сейчас основан на telemt 3.5.2 (`b6b9a18`).
-Ветка 3.5.x содержит собственную, написанную отдельно реализацию WEB-прокси —
-это не тот код, который описан здесь; здесь она удалена в пользу своей.
+вышестоящие релизы слиянием и сейчас основан на telemt 3.5.5 (`ac71d92`).
+Ветка 3.5.x содержит собственную, написанную отдельно реализацию WEB-прокси.
+Здесь присутствуют обе: апстримная в `[web]`, форковая в `[fork.web]`, а
+`fork.web_implementation` выбирает, какая из них работает.
 
 Что изменено в этом форке:
 
-- **Транспорт WEB-прокси** (`src/web/**`, `src/config/web/**`): реализация
+- **Транспорт WEB-прокси** (`src/fork/web/**`, `src/config/fork/web/**`): реализация
   клиентонезависимого протокола WEB proxy v1 из
   `telegramdesktop/tproxy-server`. Клиент Telegram сохраняет обычный формат
   MTProxy, но проводит все соединения через один WebView-носитель, который для
@@ -159,9 +222,16 @@ failed health probe is fatal.
   устранены два пути, по которым неаутентифицированный клиент мог достучаться до
   приложения оператора; переработан учёт очереди кадров; отказ в потоке больше не
   рвёт всю сессию; ограничены все операции записи; секреты из
-  `[[web.profiles]]` применяются при перезагрузке конфигурации; ошибка запуска
-  WEB-транспорта стала фатальной; документ моста закреплён по SHA-256 против
-  эталона. Отдельно усилена подсистема перезагрузки конфигурации из 3.4.25.
+  `[[fork.web.profiles]]` применяются при перезагрузке конфигурации; ошибка
+  запуска WEB-транспорта стала фатальной; документ моста закреплён по SHA-256
+  против эталона. Отдельно усилена подсистема перезагрузки конфигурации из
+  3.4.25.
+- **Раздел `[fork]`**: все функции форка настраиваются только в нём, поэтому
+  конфиг от оригинального telemt сохраняет прежний смысл, а
+  `[fork] enabled = false` выключает всё одним ключом. Справочник —
+  [docs/Fork/FORK_CONFIG.ru.md](docs/Fork/FORK_CONFIG.ru.md).
+- **Встроенная панель Prometheus, Telegram-бот администратора и bulk-запросы к
+  API** — все выключены по умолчанию и настраиваются в `[fork]`.
 - **Инструменты развёртывания**: пошаговый рунбук
   ([contrib/web/DEPLOY.md](contrib/web/DEPLOY.md)), шаблоны фронт-прокси для
   Caddy и nginx, Dockerfile для сборки из исходников и неинтерактивный

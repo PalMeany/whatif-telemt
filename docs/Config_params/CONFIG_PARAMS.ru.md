@@ -36,6 +36,7 @@
  - [access](#access)
  - [upstreams](#upstreams)
  - [web](#web)
+ - [fork](#fork)
 
 # Ключи верхнего уровня
 
@@ -3647,3 +3648,22 @@ WEB-транспорт прокси: MTProto, переносимый через 
 инструкции по развёртыванию и компромиссы режимов носителя описаны в документе
 [WEB proxy transport](../Advanced_settings/WEB_PROXY.en.md) (только на
 английском языке).
+
+# fork
+
+Всё, что этот форк добавляет поверх telemt, находится в `[fork]` и больше нигде,
+поэтому любой ключ выше сохраняет то же значение, что и в оригинальном telemt.
+Раздел необязателен, а `[fork] enabled = false` выключает все функции форка
+одним ключом.
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.enabled` | `bool` | `true` | `✘` |
+| `fork.web_implementation` | `"auto" \| "telemt" \| "fork" \| "both" \| "off"` | `"auto"` | `✘` |
+| `fork.runtime.*` | `bool` (16 переключателей) | `true` | `✘` |
+| `fork.web.*` | Table | WEB-транспорт форка, выключен | частично |
+| `fork.prometheus.*` | Table | встроенная панель, выключена | `✘` |
+| `fork.telegram.*` | Table | бот администратора, выключен | `✘` |
+| `fork.api.*` | Table | bulk-запросы, выключены | `✘` |
+
+Полный справочник по каждому ключу: [docs/Fork/FORK_CONFIG.ru.md](../Fork/FORK_CONFIG.ru.md).

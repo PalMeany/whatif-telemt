@@ -277,7 +277,7 @@ mask = true
 [access.users]
 $USER_NAME = "$USER_SECRET"
 
-[web]
+[fork.web]
 enabled = true
 hostname = "$HOSTNAME_ARG"
 # Both relay listeners are plaintext and must stay on loopback: the front proxy
@@ -423,7 +423,7 @@ $HOSTNAME_ARG {
 	# Every path goes to the relay: the bridge, the transport endpoints, and
 	# the operator's own site are all served by telemt through one origin.
 	reverse_proxy 127.0.0.1:$CARRIER_PORT {
-		# Long polls park for web.timeouts.long_poll_ms (25s by default) and
+		# Long polls park for fork.web.timeouts.long_poll_ms (25s by default) and
 		# WebSocket carriers stay open for the whole session, so no read
 		# timeout may be shorter than that. telemt bounds this hop itself.
 		transport http {

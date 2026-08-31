@@ -1,6 +1,6 @@
 # Fork feature configuration and telemt 3.5.5 upgrade
 
-Working plan. Checked items are landed in the working tree and compile.
+Working plan. Checked items are landed and compile.
 
 ## Goal
 
@@ -15,39 +15,57 @@ Working plan. Checked items are landed in the working tree and compile.
 
 ## Phase 1 — telemt 3.5.5 base, WEB-independent parts
 
-- [ ] `Cargo.toml`: version 3.5.2 -> 3.5.5.
-- [ ] `src/metrics.rs`: per-user counters gain the `_total` suffix (upstream rename).
-- [ ] `src/transport/middle_proxy/send/selection.rs`: tier-2 warm-writer fallback.
-- [ ] `src/maestro/generation.rs`: `try_spawn_session` split, `client_runtime_deps`
+- [x] `Cargo.toml`: version 3.5.2 -> 3.5.5, plus `tokio-tungstenite` and `futures-util`.
+- [x] `src/metrics.rs`: per-user counters gain the `_total` suffix (upstream rename).
+- [x] `src/transport/middle_proxy/send/selection.rs`: tier-2 warm-writer fallback.
+- [x] `src/maestro/generation.rs`: `try_spawn_session` split, `client_runtime_deps`
       restored (upstream's WEB backend needs it).
-- [ ] `src/config/hot_reload/watcher.rs`: `hot_changed` comparison fix.
+- [x] `src/config/hot_reload/watcher.rs`: `hot_changed` comparison fix.
+- [x] Upstream's activation-gated `spawn_config_watcher` deliberately **not** taken:
+      it is upstream's fix for the race this fork closes with the config snapshot
+      hash, and running both is untested.
 
 ## Phase 2 — `[fork]` section, fork WEB moves under it
 
-- [ ] `src/config/fork/`: `ForkConfig` and every fork feature switch.
-- [ ] `src/config/web/` -> `src/config/fork/web/`, `ProxyConfig.web` -> `ProxyConfig.fork.web`.
-- [ ] `src/web/` -> `src/fork/web/`, `crate::web` -> `crate::fork::web`.
-- [ ] Legacy `[web]` written against the fork schema is detected and migrated to
-      `[fork.web]` with a deprecation warning; a `[web]` mixing both schemas is refused.
-- [ ] Strict keys, hot reload, `ProxyConfig::validate`, API config sections.
+- [x] `src/config/fork/`: `ForkConfig` and every fork feature switch.
+- [x] `src/config/web/` -> `src/config/fork/web/`, `ProxyConfig.web` -> `ProxyConfig.fork.web`.
+- [x] `src/web/` -> `src/fork/web/`, `crate::web` -> `crate::fork::web`.
+- [x] Legacy `[web]` written against the fork schema is migrated to `[fork.web]` with a
+      deprecation warning; a `[web]` mixing both schemas is refused.
+- [x] Strict keys, hot reload, `ProxyConfig::validate`, config tests.
+- [x] Sixteen `[fork.runtime]` switches wired to their call sites.
 
 ## Phase 3 — telemt's own WEB transport restored
 
-- [ ] Upstream `src/web/`, `src/config/types/web*`, `src/config/load/{validate_web*,runtime_web}`,
+- [x] Upstream `src/web/`, `src/config/types/web*`, `src/config/load/{validate_web*,runtime_web}`,
       `src/api/web_{runtime,status}*` brought in at 3.5.5.
-- [ ] `transport = "web"` accepted again and dispatched from the fork's accept loop.
-- [ ] `WebTraceStore` / `WebRuntimeControl` owned by `run_telemt_core`, passed to `api::serve`.
-- [ ] Both implementations refuse to bind the same address; `[fork] web_implementation`
-      documents which one an operator asked for.
+- [x] `transport = "web"` accepted again and dispatched from this fork's accept loop.
+- [x] `WebIngress` owns the trace store, lifecycle publication and session manager.
+- [x] `fork.web_implementation` selects, and refuses a contradicting configuration.
 
 ## Phase 4 — new fork features
 
-- [ ] `[fork.prometheus]`: self-contained HTML panel over the existing metrics listener.
-- [ ] `[fork.telegram]`: admin bot over the Telegram Bot API.
-- [ ] `[fork.api]`: `POST /v1/bulk`, one config write and one reload per batch.
+- [x] `[fork.prometheus]`: self-contained HTML panel over the metrics listener, or its own.
+- [x] `[fork.telegram]`: admin bot over the Bot API, routed through `[[upstreams]]`.
+- [x] `[fork.api]`: `POST /v1/bulk`, one config write per batch.
 
 ## Phase 5 — surface
 
-- [ ] `config.toml` sample, `docs/Config_params/*`, `docs/Fork/*`.
-- [ ] Tests for every new config path and feature switch.
-- [ ] `cargo fmt`, `cargo clippy`, `cargo nextest run`.
+- [x] `config.toml` sample.
+- [x] `docs/Fork/FORK_CONFIG.{en,ru}.md`, `docs/Config_params/*`, `docs/Advanced_settings/WEB_PROXY.en.md`.
+- [x] `CHANGES-FROM-UPSTREAM.md` (required by TELEMT PUBLIC LICENSE 3.3 §2), READMEs.
+- [x] `install-web.sh` and `contrib/web/DEPLOY.md` retargeted at `[fork.web]`.
+- [x] Tests for every new config path and feature switch.
+- [x] `cargo fmt`, `cargo clippy`, `cargo nextest run`.
+
+## Known failing tests, all pre-existing
+
+- `proxy::direct_relay::security_tests::*` (4) and
+  `proxy::direct_relay::subtle_adversarial_tests::*` (2) fail on the base commit too;
+  they depend on `/tmp` symlink canonicalisation and file-lock behaviour that differ
+  on macOS.
+- `web::session::backend::tests::delayed_valid_handshake_reaches_the_authenticated_relay`
+  fails on stock upstream 3.5.5 as well; it drives a real TCP accept under
+  `start_paused`.
+- `proxy::client::security_tests::idle_pooled_connection_closes_cleanly_in_client_handler_path`
+  is flaky under parallel load and passes in isolation.

@@ -36,6 +36,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
  - [access](#access)
  - [upstreams](#upstreams)
  - [web](#web)
+ - [fork](#fork)
 
 # Schlüssel auf oberster Ebene
 
@@ -3642,3 +3643,22 @@ Jeder Schlüssel von `[web.limits]`, `[web.timeouts]` und `[[web.profiles]]`
 sowie die Deployment-Anleitung und die Abwägungen zwischen den Träger-Modi sind
 in [WEB proxy transport](../Advanced_settings/WEB_PROXY.en.md) dokumentiert (nur
 auf Englisch).
+
+# fork
+
+Alles, was dieser Fork zusätzlich zu telemt mitbringt, steht unter `[fork]` und
+sonst nirgends, sodass jeder oben dokumentierte Schlüssel seine Bedeutung aus
+dem unveränderten telemt behält. Der Abschnitt ist optional, und
+`[fork] enabled = false` schaltet jede Fork-Funktion mit einem Schlüssel ab.
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `fork.enabled` | `bool` | `true` | `✘` |
+| `fork.web_implementation` | `"auto" \| "telemt" \| "fork" \| "both" \| "off"` | `"auto"` | `✘` |
+| `fork.runtime.*` | `bool` (16 Schalter) | `true` | `✘` |
+| `fork.web.*` | Table | WEB-Transport des Forks, deaktiviert | teilweise |
+| `fork.prometheus.*` | Table | eingebautes Panel, deaktiviert | `✘` |
+| `fork.telegram.*` | Table | Admin-Bot, deaktiviert | `✘` |
+| `fork.api.*` | Table | Bulk-Anfragen, deaktiviert | `✘` |
+
+Vollständige Referenz: [docs/Fork/FORK_CONFIG.en.md](../Fork/FORK_CONFIG.en.md).

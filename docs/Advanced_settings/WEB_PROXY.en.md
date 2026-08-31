@@ -1,7 +1,13 @@
-# WEB proxy transport
+# WEB proxy transport (this fork's)
 
-The WEB proxy transport lets a WEB-capable Telegram app reach telemt through a
-carrier that looks like an ordinary HTTPS website. The app keeps its normal
+> This document describes **this fork's** WEB proxy transport, configured under
+> `[fork.web]`. Telemt 3.5.x ships a separately written WEB proxy of its own,
+> configured under `[web]` and bound as a `[[server.listeners]]` entry with
+> `transport = "web"`. Both are present in this binary and either or both can
+> run; see [docs/Fork/FORK_CONFIG.en.md](../Fork/FORK_CONFIG.en.md#which-web-proxy-runs).
+
+The WEB proxy transport lets a WEB-capable Telegram app reach the proxy through
+a carrier that looks like an ordinary HTTPS website. The app keeps its normal
 MTProxy framing and encryption, but sends every proxy connection through one
 app-owned WebView transport instead of raw TCP.
 
@@ -52,7 +58,7 @@ is answered by the operator's own site.
 
 ### Behind a CDN or a second proxy layer
 
-`web.hostname` must be **the hostname clients type into their app**, because the
+`fork.web.hostname` must be **the hostname clients type into their app**, because the
 bridge capability is `HMAC(secret, "…\n" + hostname)` — the relay and the client
 must derive it over the same name. It is not the origin's own hostname.
 
@@ -124,7 +130,7 @@ Treat the two WebSocket modes as unreleased, and retire this note once a
 released client has been observed driving one.
 
 ```toml
-[web]
+[fork.web]
 enabled = true
 hostname = "proxy.example.com"      # lowercase ASCII/IDNA, must match the certificate
 listen = "127.0.0.1:8080"           # carrier listener, behind the TLS front proxy
@@ -184,13 +190,13 @@ ceilings. An explicit profile takes precedence over a derived user profile of
 the same name.
 
 ```toml
-[[web.profiles]]
+[[fork.web.profiles]]
 name = "media"
 secret = "000102030405060708090a0b0c0d0e0f"   # hex or base64url
 backend = "internal"                           # or "127.0.0.1:2398"
 carrier_mode = "https"                         # see "Carrier modes"
 
-[web.profiles.limits]
+[fork.web.profiles.limits]
 max_sessions = 32
 max_streams = 512
 ```
@@ -241,10 +247,10 @@ so clients need no new setting when an operator changes it.
 
 ## Limits and timeouts
 
-Every ceiling from the reference relay is configurable under `[web.limits]`
-and `[web.timeouts]`. The `[web.limits]` keys carry the reference's names and
+Every ceiling from the reference relay is configurable under `[fork.web.limits]`
+and `[fork.web.timeouts]`. The `[fork.web.limits]` keys carry the reference's names and
 defaults unchanged, except `max_carrier_connections`, which the reference does
-not have; the `[web.timeouts]` keys do not, and are mapped below the tables.
+not have; the `[fork.web.timeouts]` keys do not, and are mapped below the tables.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -284,7 +290,7 @@ The reference spells its timeouts as Go durations (`"25s"`); telemt spells them
 as integer milliseconds, so every shared key gains an `_ms` suffix. The values
 are the same:
 
-| Reference `timeouts` key | telemt `[web.timeouts]` key | Default |
+| Reference `timeouts` key | telemt `[fork.web.timeouts]` key | Default |
 | --- | --- | --- |
 | `backend_dial` | `backend_dial_ms` | `5000` |
 | `long_poll` | `long_poll_ms` | `25000` |
@@ -305,7 +311,7 @@ before it drains proxy sessions — `web::shutdown()` runs ahead of
 deadline, exactly like a direct client's session. A `shutdown` key would give
 one drain two competing deadlines, which is why it was not ported.
 
-Per-profile overrides live under `[web.profiles.limits]` and may only lower the
+Per-profile overrides live under `[fork.web.profiles.limits]` and may only lower the
 process-wide ceiling they refine.
 
 Both per-address ceilings are **off by default**, and turning them on is a
@@ -337,7 +343,7 @@ wider than the long-poll period: a WebSocket carrier is kept alive by protocol
 ping/pong rather than by a poll, so a healthy but quiet session is never
 displaced.
 
-`[web.limits]` and `[web.timeouts]` are read once, at start-up. The process-wide
+`[fork.web.limits]` and `[fork.web.timeouts]` are read once, at start-up. The process-wide
 pending pools, the per-session budget partitions, and the accept loops are all
 built from them, so a reload cannot change them in place. Reloading a
 configuration whose ceilings differ logs a warning and keeps the running values.
@@ -406,17 +412,17 @@ upgrade, never enable header logging on the front proxy or on telemt.
 
 ## Operational notes
 
-- Under `[web]`, only the capability profiles reload: `[access.users]`,
-  `[[web.profiles]]`, and the keys that shape them — `derive_user_profiles`,
-  `carrier_mode`, and each profile's `backend` and `[web.profiles.limits]`. A
+- Under `[fork.web]`, only the capability profiles reload: `[access.users]`,
+  `[[fork.web.profiles]]`, and the keys that shape them — `derive_user_profiles`,
+  `carrier_mode`, and each profile's `backend` and `[fork.web.profiles.limits]`. A
   profile that loses the capability it was created from, because its secret was
   rotated or the profile was deleted, loses its live sessions with it.
 - The relay re-derives the profile set on a periodic refresh rather than as a
   step of the reload itself, so revocation is eventual, not immediate. Restart
   telemt when a leaked secret has to stop relaying at a known moment.
-- Every other `[web]` key is read once at start-up and needs a restart:
+- Every other `[fork.web]` key is read once at start-up and needs a restart:
   `enabled`, `hostname`, `listen`, `admin_listen`, `public_dir`,
-  `public_upstream`, `trusted_proxies`, `[web.limits]`, and `[web.timeouts]`. A
+  `public_upstream`, `trusted_proxies`, `[fork.web.limits]`, and `[fork.web.timeouts]`. A
   reload that changes a ceiling or a timeout logs a warning and keeps the
   running values; a reload that sets `enabled = false` or changes `hostname`
   keeps the whole capability set built at start-up, so it does not turn the
