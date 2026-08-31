@@ -247,13 +247,14 @@ async fn submit_reload_from_disk(
     reload_control: &ReloadControl,
     expected_revision: Option<&str>,
     request: ReloadRequest,
+    switches: &crate::config::ForkRuntimeConfig,
 ) -> Result<(ReloadAccepted, String), ApiFailure> {
     let _guard = mutation_lock.lock().await;
     ensure_expected_revision(config_path, expected_revision).await?;
     let revision = current_revision(config_path).await?;
     // Full validation, not just `ProxyConfig::load`: this is the only barrier
     // between the request body and `active_runtime.swap`.
-    let (config, snapshot_hash) = load_config_for_reload(config_path).await?;
+    let (config, snapshot_hash) = load_config_for_reload(config_path, switches).await?;
     let accepted = reload_control
         .submit(Arc::new(config), snapshot_hash, revision.clone(), request)
         .await
@@ -862,6 +863,7 @@ async fn handle(
                     &shared.reload_control,
                     expected_revision.as_deref(),
                     request,
+                    cfg.fork.runtime_switches(),
                 )
                 .await?;
                 Ok(success_response(StatusCode::ACCEPTED, accepted, revision))

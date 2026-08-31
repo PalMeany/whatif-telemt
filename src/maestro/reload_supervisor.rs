@@ -162,12 +162,23 @@ async fn stop_background_and_middle_end(generation: &RuntimeGeneration) -> Middl
     // a retired generation never calls `remove_writer_with_mode`, so without
     // this the tasks and their TCP connections to the middle proxies survive
     // every reload and accumulate at `pool_size` sockets per generation.
-    let cancelled = pool.shutdown().await;
-    if cancelled > 0 {
-        info!(
-            cancelled_writers = cancelled,
-            "Retired generation Middle-End writers cancelled"
-        );
+    //
+    // This is the path `fork.runtime.me_writer_teardown` names, so the switch is
+    // read from the generation being retired: turning it off has to leave the
+    // retired writers signalled but alive, exactly as telemt leaves them.
+    if generation
+        .config()
+        .fork
+        .runtime_switches()
+        .me_writer_teardown
+    {
+        let cancelled = pool.shutdown().await;
+        if cancelled > 0 {
+            info!(
+                cancelled_writers = cancelled,
+                "Retired generation Middle-End writers cancelled"
+            );
+        }
     }
     outcome
 }
@@ -460,6 +471,7 @@ impl ReloadSupervisor {
             &new_runtime.config(),
             new_runtime.stats.clone(),
             new_runtime.proxy_shared.clone(),
+            new_runtime.buffer_pool.clone(),
         );
         self.runtime_log_filter
             .apply_reload(&new_runtime.config().general.log_level);

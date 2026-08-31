@@ -30,7 +30,7 @@ const DOCUMENT: &str = include_str!("panel.html");
 const NONCE_BYTES: usize = 18;
 
 /// Path the page scrapes. Always the exposition this process renders.
-const METRICS_PATH: &str = "/metrics";
+pub(super) const METRICS_PATH: &str = "/metrics";
 
 /// Heading used when the operator did not choose one.
 const DEFAULT_TITLE: &str = "telemt";
@@ -161,6 +161,64 @@ mod tests {
         let mut config = enabled_config();
         config.fork.enabled = false;
         assert!(!is_panel_path(&config, "/panel"));
+    }
+
+    /// Every metric family the panel document reads.
+    ///
+    /// Pinned here because the page falls back silently on a missing name, and
+    /// a silent zero reads as "the proxy is idle" rather than as a rename.
+    const PANEL_SERIES: &[&str] = &[
+        "telemt_uptime_seconds",
+        "telemt_connections_total",
+        "telemt_connections_bad_total",
+        "telemt_connections_bad_by_class_total",
+        "telemt_direct_relay_buffer_sessions",
+        "telemt_ip_tracker_entries",
+        "telemt_ip_tracker_users",
+        "telemt_me_writers_active_current",
+        "telemt_me_writers_warm_current",
+        "telemt_me_reconnect_attempts_total",
+        "telemt_me_keepalive_sent_total",
+        "telemt_me_keepalive_timeout_total",
+        "telemt_me_handshake_reject_total",
+        "telemt_me_d2c_payload_bytes_total",
+        "telemt_buffer_pool_buffers_total",
+        "telemt_build_info",
+        "telemt_telemetry_core_enabled",
+        "telemt_user_connections_current",
+        "telemt_user_unique_ips_current",
+        "telemt_user_octets_from_client_total",
+        "telemt_user_octets_to_client_total",
+    ];
+
+    #[test]
+    fn every_series_the_panel_reads_is_one_this_binary_emits() {
+        let exporter = include_str!("../../metrics.rs");
+        for series in PANEL_SERIES {
+            assert!(
+                exporter.contains(series),
+                "the panel reads `{series}`, which src/metrics.rs does not emit"
+            );
+        }
+    }
+
+    #[test]
+    fn the_panel_reads_no_series_outside_that_list() {
+        // Catches a name added to the page without being checked against the
+        // exporter, which is how the page starts drawing silent zeroes.
+        let mut cursor = DOCUMENT;
+        while let Some(start) = cursor.find("telemt_") {
+            cursor = &cursor[start..];
+            let end = cursor
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(cursor.len());
+            let name = &cursor[..end];
+            assert!(
+                PANEL_SERIES.contains(&name),
+                "the panel reads `{name}`, which is not in PANEL_SERIES"
+            );
+            cursor = &cursor[end..];
+        }
     }
 
     #[test]

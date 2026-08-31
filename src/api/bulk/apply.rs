@@ -367,8 +367,11 @@ fn patch_user(
     match body.enabled {
         Patch::Unchanged => {}
         // A removed `enabled` means "back to the default", which is enabled.
+        // The key is dropped rather than written as `true`, matching
+        // `PATCH /v1/users/{user}`: writing it would change the config revision
+        // for a no-op and invalidate every other caller's `If-Match`.
         Patch::Remove | Patch::Set(true) => {
-            cfg.access.user_enabled.insert(user.clone(), true);
+            cfg.access.user_enabled.remove(&user);
             sections.push(AccessSection::UserEnabled);
             effects.push(RuntimeEffect::SetEnabled {
                 user: user.clone(),
@@ -481,7 +484,13 @@ fn set_enabled(cfg: &mut ProxyConfig, user: Option<String>, enabled: bool) -> Op
             user: Some(user),
         });
     }
-    cfg.access.user_enabled.insert(user.clone(), enabled);
+    // Enabling drops the key rather than writing `true`, matching
+    // `POST /v1/users/{user}/enable`; only a disable is recorded.
+    if enabled {
+        cfg.access.user_enabled.remove(&user);
+    } else {
+        cfg.access.user_enabled.insert(user.clone(), false);
+    }
     let mut effects = vec![RuntimeEffect::SetEnabled {
         user: user.clone(),
         enabled,
@@ -521,9 +530,12 @@ fn rotate_secret(
     }
     cfg.access.users.insert(user.clone(), secret.clone());
     Ok(AppliedOperation {
-        // Rotating a secret invalidates every live session for that user, so
-        // they are cancelled rather than left relaying under a stale key.
-        effects: vec![RuntimeEffect::CancelSessions { user: user.clone() }],
+        // Live sessions are left alone, matching
+        // `POST /v1/users/{user}/rotate-secret`: they keep relaying under the
+        // key they authenticated with until they close. Cancelling here would
+        // make the same named operation mean two different things depending on
+        // which route an operator reached it through.
+        effects: Vec::new(),
         user,
         secret: Some(secret),
         sections: vec![AccessSection::Users],

@@ -110,7 +110,16 @@ pub(super) async fn patch_config(
     resp.process_restart_required = !resp.deferred_process_fields.is_empty();
 
     if let Some(ticket) = ticket {
-        let loaded = load_config_for_reload(&shared.config_path).await;
+        // Switches from the running configuration, not from the candidate: a
+        // candidate must not be able to turn off the validation that would
+        // have refused it.
+        let switches = *shared
+            .active_runtime
+            .load()
+            .config()
+            .fork
+            .runtime_switches();
+        let loaded = load_config_for_reload(&shared.config_path, &switches).await;
         let (config, snapshot_hash) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => {

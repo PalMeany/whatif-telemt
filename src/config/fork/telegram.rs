@@ -30,9 +30,14 @@ pub struct ForkTelegramConfig {
     #[serde(default)]
     pub token: String,
 
-    /// Telegram user ids allowed to talk to the bot.
+    /// Telegram ids allowed to talk to the bot.
     ///
-    /// An update from any other chat is dropped without a reply, so the bot
+    /// Both the sender and the chat a command arrives in must appear here, so
+    /// in a private chat one user id is enough. Sharing the bot with a group
+    /// means adding that group's (negative) chat id deliberately: replies carry
+    /// generated secrets, and they go to the chat the command came from.
+    ///
+    /// An update failing either check is dropped without a reply, so the bot
     /// does not confirm its own existence to a stranger.
     #[serde(default)]
     pub admins: Vec<i64>,
@@ -56,11 +61,20 @@ pub struct ForkTelegramConfig {
     #[serde(default = "default_telegram_request_timeout_secs")]
     pub request_timeout_secs: u16,
 
-    /// Chats that receive unsolicited notices, such as a failed reload.
+    /// `[[upstreams]]` scope the bot's own traffic is routed through.
     ///
-    /// Empty sends nothing; the bot only answers what it is asked.
+    /// Empty, the default, dials the Bot API directly. That isolation is
+    /// deliberate: the unscoped upstreams are the ones client traffic uses, and
+    /// a Bot API endpoint that is merely unreachable would otherwise mark them
+    /// unhealthy after a handful of failed polls and degrade the proxy over a
+    /// chat integration being down.
+    ///
+    /// Set it on a host that needs an egress to reach Telegram at all, and give
+    /// the matching `[[upstreams]]` entry the same `scopes` value. Only
+    /// upstreams carrying that scope are ever selected, so their failures stay
+    /// charged to them.
     #[serde(default)]
-    pub notify_chats: Vec<i64>,
+    pub upstream_scope: String,
 }
 
 impl Default for ForkTelegramConfig {
@@ -73,7 +87,7 @@ impl Default for ForkTelegramConfig {
             api_base: default_telegram_api_base(),
             poll_timeout_secs: default_telegram_poll_timeout_secs(),
             request_timeout_secs: default_telegram_request_timeout_secs(),
-            notify_chats: Vec::new(),
+            upstream_scope: String::new(),
         }
     }
 }
@@ -129,6 +143,12 @@ impl ForkTelegramConfig {
         if self.request_timeout_secs <= self.poll_timeout_secs {
             return Err(ProxyError::Config(
                 "fork.telegram.request_timeout_secs must be greater than poll_timeout_secs"
+                    .to_string(),
+            ));
+        }
+        if !self.upstream_scope.is_empty() && self.upstream_scope.trim() != self.upstream_scope {
+            return Err(ProxyError::Config(
+                "fork.telegram.upstream_scope must not have leading or trailing whitespace;                  it is matched against [[upstreams]] scopes exactly"
                     .to_string(),
             ));
         }

@@ -97,31 +97,34 @@ pub(super) async fn handle(
     }
 
     let budget = Duration::from_secs(u64::from(config.fork.api.bulk_timeout_secs));
-    // The API listener drops a connection after its own deadline with no
-    // response at all, so a batch that would outrun it is cut short here and
-    // reports what it did instead of vanishing.
-    match tokio::time::timeout(budget, run_batch(body, expected_revision, shared)).await {
-        Ok(result) => result,
-        Err(_) => Err(ApiFailure::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "bulk_timeout",
-            format!(
-                "the batch exceeded fork.api.bulk_timeout_secs = {}",
-                config.fork.api.bulk_timeout_secs
-            ),
-        )),
-    }
+    run_batch(body, expected_revision, shared, budget).await
 }
 
 /// Applies one batch and writes it.
+///
+/// `budget` bounds only the part that runs *before* the write: taking the
+/// mutation lock, loading the config, and applying every operation in memory.
+/// The write and the runtime effects that follow it are deliberately outside
+/// it, because cancelling there would leave the file on disk describing a state
+/// the running process was never told about — and `write_atomic` runs in
+/// `spawn_blocking`, so dropping the future would not have undone it anyway.
 async fn run_batch(
     body: BulkRequest,
     expected_revision: Option<String>,
     shared: &ApiShared,
+    budget: Duration,
 ) -> Result<Response<Full<Bytes>>, ApiFailure> {
     let atomic = body.atomic;
-    let guard = shared.mutation_lock.lock().await;
-    let mut cfg = load_config_from_disk(&shared.config_path).await?;
+    let deadline = tokio::time::Instant::now() + budget;
+    let Ok(guard) = tokio::time::timeout_at(deadline, shared.mutation_lock.lock()).await else {
+        return Err(timed_out(budget));
+    };
+    let Ok(loaded) =
+        tokio::time::timeout_at(deadline, load_config_from_disk(&shared.config_path)).await
+    else {
+        return Err(timed_out(budget));
+    };
+    let mut cfg = loaded?;
     ensure_expected_revision(&shared.config_path, expected_revision.as_deref()).await?;
 
     let mut results = Vec::with_capacity(body.operations.len());
@@ -139,6 +142,13 @@ async fn run_batch(
         if aborted {
             results.push(BulkResult::skipped(id, action, operation.user));
             continue;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // Cut the batch short before the write rather than after it: a
+            // partially applied batch that was never reported is the outcome an
+            // operator cannot reconcile.
+            drop(guard);
+            return Err(timed_out(budget));
         }
         match apply_operation(&mut cfg, action, operation.user, operation.body) {
             Ok(applied) => {
@@ -173,7 +183,13 @@ async fn run_batch(
 
     if failed > 0 && atomic {
         // Nothing was written: the candidate config is dropped with the guard.
+        // The results that had already been applied in memory are relabelled,
+        // so a caller iterating them cannot read `ok` for a user that does not
+        // exist.
         drop(guard);
+        for result in &mut results {
+            result.rolled_back();
+        }
         return Ok(success_response(
             StatusCode::CONFLICT,
             BulkResponse {
@@ -203,8 +219,10 @@ async fn run_batch(
     cfg.validate()
         .map_err(|error| ApiFailure::bad_request(format!("config validation failed: {}", error)))?;
     let revision = save_access_sections_to_disk(&shared.config_path, &cfg, &sections).await?;
-    drop(guard);
 
+    // Effects run while the lock is still held, so the in-memory decision a
+    // batch publishes cannot be overtaken by a later writer's: without this the
+    // bot and the API can commit in one order and publish in the other.
     run_runtime_effects(
         effects,
         &shared.stats,
@@ -219,6 +237,7 @@ async fn run_batch(
             .user_delete_forgets_quota,
     )
     .await;
+    drop(guard);
 
     for (index, secret) in secrets {
         results[index].secret = Some(secret);
@@ -313,4 +332,16 @@ async fn attach_views(
             result.view = Some(view);
         }
     }
+}
+
+/// Builds the refusal used when a batch outruns its configured budget.
+fn timed_out(budget: Duration) -> ApiFailure {
+    ApiFailure::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "bulk_timeout",
+        format!(
+            "the batch exceeded fork.api.bulk_timeout_secs = {}",
+            budget.as_secs()
+        ),
+    )
 }

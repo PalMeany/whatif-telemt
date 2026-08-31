@@ -110,7 +110,7 @@ pub(super) struct BulkResult {
     /// Target username, once it is known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) user: Option<String>,
-    /// `ok`, `failed`, or `skipped` when an earlier failure aborted the batch.
+    /// `ok`, `failed`, `rolled_back`, or `skipped`.
     pub(super) status: &'static str,
     /// Stable failure code, matching the single-operation route's codes.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -162,6 +162,23 @@ impl BulkResult {
             secret: None,
             view: None,
         }
+    }
+
+    /// Relabels an applied result after the batch was rolled back.
+    ///
+    /// The operation validated and mutated the candidate, but the candidate was
+    /// discarded, so leaving it as `ok` would tell a caller iterating results
+    /// that a user exists when nothing was written.
+    pub(super) fn rolled_back(&mut self) {
+        if self.status != "ok" {
+            return;
+        }
+        self.status = "rolled_back";
+        self.code = Some("batch_aborted");
+        self.message =
+            Some("applied in memory, then discarded because the batch is atomic".to_string());
+        self.secret = None;
+        self.view = None;
     }
 
     /// Builds a result for an operation the batch never reached.

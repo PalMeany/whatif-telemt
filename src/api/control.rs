@@ -136,8 +136,10 @@ impl ControlPlane {
         save_access_sections_to_disk(&self.config_path, &cfg, &applied.sections)
             .await
             .map_err(|failure| failure.message)?;
-        drop(guard);
 
+        // Effects run while the lock is still held: releasing first lets this
+        // caller and the HTTP API commit in one order and publish the in-memory
+        // decision in the other.
         let runtime = self.runtime();
         run_runtime_effects(
             applied.effects,
@@ -151,6 +153,7 @@ impl ControlPlane {
                 .user_delete_forgets_quota,
         )
         .await;
+        drop(guard);
         Ok(applied.secret)
     }
 

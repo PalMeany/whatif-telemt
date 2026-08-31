@@ -117,12 +117,12 @@ set from the same control plane the HTTP API writes through.
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Runs the bot. |
 | `token` | string | `""` | Token from @BotFather. Treat the config file as secret material. |
-| `admins` | list of int | `[]` | Telegram user ids allowed to talk to it. Required when enabled. |
+| `admins` | list of int | `[]` | Telegram ids allowed to talk to it. Both the sender and the chat must appear here, so a private chat needs one user id and a group needs its (negative) chat id too. Required when enabled. |
 | `allow_mutations` | bool | `false` | Permits the commands that change configuration. |
 | `api_base` | string | `"https://api.telegram.org"` | Bot API origin, for a self-hosted Bot API server. |
 | `poll_timeout_secs` | int | `25` | `getUpdates` long-poll timeout. 1..=50. |
 | `request_timeout_secs` | int | `30` | Per-request timeout. Must exceed `poll_timeout_secs`. |
-| `notify_chats` | list of int | `[]` | Chats that receive unsolicited notices. |
+| `upstream_scope` | string | `""` | `[[upstreams]]` scope the bot's own traffic is routed through. Empty dials the Bot API directly. |
 
 Commands:
 
@@ -139,12 +139,19 @@ Commands:
 
 Two things worth knowing before enabling it:
 
-- **An update from a chat that is not on the admin list is dropped without a
-  reply.** The bot does not confirm its own existence to a stranger who found
-  the token or guessed the username.
-- **Bot API traffic follows `[[upstreams]]`.** On a host that needs a SOCKS or
-  Shadowsocks egress to reach Telegram, the bot uses it. Without that, a bot
-  dialling `api.telegram.org` directly would announce the proxy's real address.
+- **Both the sender and the chat must be on the admin list**, and an update
+  failing either check is dropped without a reply. Checking the sender alone
+  would let an admin type `/rotate alice` in a shared group and have the bot
+  post the new secret to everyone in it. Sharing the bot with a group is
+  therefore deliberate: add that group's negative chat id to `admins`.
+- **Bot API traffic is direct unless `upstream_scope` is set.** That isolation
+  is deliberate: the unscoped upstreams are the ones client traffic uses, and a
+  Bot API endpoint that is merely unreachable would otherwise mark them
+  unhealthy after a handful of failed polls and degrade the proxy over a chat
+  integration being down. On a host that needs an egress to reach Telegram at
+  all, set `upstream_scope` and give the matching `[[upstreams]]` entry the same
+  `scopes` value; only upstreams carrying that scope are ever selected, so their
+  failures stay charged to them.
 
 ## `[fork.api]` — bulk requests
 

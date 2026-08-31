@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use hyper::header::IF_MATCH;
 use sha2::{Digest, Sha256};
 
-use crate::config::{ConfigSourceGraph, LoadedConfig, ProxyConfig};
+use crate::config::{ConfigSourceGraph, ForkRuntimeConfig, LoadedConfig, ProxyConfig};
 
 use super::model::ApiFailure;
 
@@ -273,15 +273,22 @@ pub(super) async fn load_config_from_disk(config_path: &Path) -> Result<ProxyCon
 /// install a config that is fatal at startup and rejected by SIGHUP: every
 /// handshake would fail, the old generation's sessions would already be stopped,
 /// and only a process restart could recover.
+/// Loads a reload candidate, checked against the switches already in force.
+///
+/// `switches` comes from the **running** configuration, never from the
+/// candidate. Reading them off the candidate would let a file that turns
+/// `reload_validate_candidate` off in the same edit skip the validation that
+/// would have refused it, which is the one check standing between the request
+/// body and `active_runtime.swap`.
 pub(super) async fn load_config_for_reload(
     config_path: &Path,
+    switches: &ForkRuntimeConfig,
 ) -> Result<(ProxyConfig, Option<u64>), ApiFailure> {
     let config_path = config_path.to_path_buf();
     let loaded = tokio::task::spawn_blocking(move || ProxyConfig::load_with_metadata(config_path))
         .await
         .map_err(|error| ApiFailure::internal(format!("failed to join config loader: {}", error)))?
         .map_err(|error| ApiFailure::bad_request(format!("invalid runtime config: {}", error)))?;
-    let switches = *loaded.config.fork.runtime_switches();
     // `ProxyConfig::load` runs the loader's own checks only. Without this, a
     // bare reload can install a config that is fatal at start-up, after which
     // every handshake fails and only a restart recovers.

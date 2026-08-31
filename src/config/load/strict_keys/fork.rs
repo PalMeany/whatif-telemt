@@ -55,7 +55,7 @@ pub(super) const FORK_TELEGRAM_CONFIG_KEYS: &[&str] = &[
     "api_base",
     "poll_timeout_secs",
     "request_timeout_secs",
-    "notify_chats",
+    "upstream_scope",
 ];
 
 /// Keys of `[fork.api]`.
@@ -122,11 +122,15 @@ pub(super) const FORK_WEB_PROFILE_CONFIG_KEYS: &[&str] =
     &["name", "secret", "backend", "carrier_mode", "limits"];
 
 /// Keys of `[[fork.web.profiles]].limits`.
+///
+/// `max_carrier_connections` is deliberately absent: it exists on the
+/// process-wide `[fork.web.limits]` table only, and accepting it here would
+/// have serde drop it silently -- the one class of mistake `config_strict`
+/// exists to catch.
 pub(super) const FORK_WEB_PROFILE_LIMITS_CONFIG_KEYS: &[&str] = &[
     "max_sessions",
     "max_streams",
     "max_backend_dials_in_flight",
-    "max_carrier_connections",
     "new_sessions_per_minute",
     "new_sessions_burst",
     "new_streams_per_minute",

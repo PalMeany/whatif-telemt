@@ -165,22 +165,24 @@ impl ProcessScope {
             resolve_direct_buffer_hard_limit(config.general.direct_relay_buffer_budget_max_bytes)
                 .await;
         let direct_buffer_budget = DirectBufferBudget::new(hard_limit);
+        let buffer_pool = Arc::new(BufferPool::with_config(
+            BUFFER_POOL_BUFFER_BYTES,
+            BUFFER_POOL_MAX_BUFFERS,
+        ));
         // Seeded with a throwaway generation view; `publish_generation` replaces
         // it before the controller's first tick and on every cutover after that.
         let (budget_inputs_tx, _) = watch::channel(Arc::new(DirectBufferBudgetInputs {
             stats: Arc::new(Stats::new()),
             shared: ProxySharedState::new_with_direct_buffer_budget(direct_buffer_budget.clone()),
             max_connections: config.server.max_connections,
+            buffer_pool: buffer_pool.clone(),
         }));
         let fork = config.fork.runtime_switches();
         Arc::new(Self {
             started_at: Instant::now(),
             quota_store: Arc::new(QuotaStore::default()),
             connection_limiter: ConnectionLimiter::new(config.server.max_connections),
-            buffer_pool: Arc::new(BufferPool::with_config(
-                BUFFER_POOL_BUFFER_BYTES,
-                BUFFER_POOL_MAX_BUFFERS,
-            )),
+            buffer_pool,
             direct_buffer_budget,
             budget_inputs_tx,
             switches: ProcessSwitches {
@@ -244,13 +246,10 @@ impl ProcessScope {
     /// Spawns the single process-wide Direct buffer budget controller.
     pub(crate) fn spawn_budget_controller(&self) -> tokio::task::JoinHandle<()> {
         let budget = self.direct_buffer_budget.clone();
-        let buffer_pool = self.buffer_pool.clone();
         let inputs_rx = self.budget_inputs_tx.subscribe();
         tokio::spawn(async move {
             crate::proxy::direct_buffer_budget::run_direct_buffer_budget_controller(
-                budget,
-                buffer_pool,
-                inputs_rx,
+                budget, inputs_rx,
             )
             .await;
         })
@@ -262,6 +261,7 @@ impl ProcessScope {
         config: &ProxyConfig,
         stats: Arc<Stats>,
         shared: Arc<ProxySharedState>,
+        buffer_pool: Arc<BufferPool>,
     ) {
         if self.switches.admission_budget {
             self.connection_limiter
@@ -272,6 +272,7 @@ impl ProcessScope {
                 stats,
                 shared,
                 max_connections: config.server.max_connections,
+                buffer_pool,
             }));
     }
 

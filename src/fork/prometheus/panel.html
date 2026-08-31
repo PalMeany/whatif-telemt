@@ -289,15 +289,36 @@ function replace(id, nodes) {
 
 function renderOverview(byName, types) {
   const nodes = [];
-  nodes.push(card("uptime", humanDuration(scalar(byName, "telemt_uptime_seconds", 0))));
-  nodes.push(card("connections", scalar(byName, "telemt_connections_current", 0).toFixed(0)));
-  nodes.push(card("direct", scalar(byName, "telemt_connections_current_direct", 0).toFixed(0)));
-  nodes.push(card("middle-end", scalar(byName, "telemt_connections_current_me", 0).toFixed(0)));
-  nodes.push(card("accepted", scalar(byName, "telemt_connections_total", 0).toFixed(0)));
-  nodes.push(card("rejected", scalar(byName, "telemt_connections_bad_total", 0).toFixed(0)));
-  nodes.push(card("tracked IPs", scalar(byName, "telemt_ip_tracker_entries", 0).toFixed(0)));
-  nodes.push(card("buffer pool", humanBytes(
-    labelled(byName, "telemt_buffer_pool_buffers_total", "kind", "in_use") * 65536)));
+  const missing = [];
+  // Reads the exact families src/metrics.rs emits. A name that is not in the
+  // exposition is reported rather than drawn as a zero, because a silent zero
+  // reads as "the proxy is idle" and is indistinguishable from a rename.
+  const need = (name) => {
+    if (!byName.has(name)) {
+      missing.push(name);
+      return null;
+    }
+    return scalar(byName, name, 0);
+  };
+
+  nodes.push(card("uptime", humanDuration(need("telemt_uptime_seconds") || 0)));
+  nodes.push(card("accepted", (need("telemt_connections_total") || 0).toFixed(0)));
+  nodes.push(card("rejected", (need("telemt_connections_bad_total") || 0).toFixed(0)));
+
+  // There is no global live-connection gauge; Direct relay sessions are
+  // reported per buffer tier, so they are summed here.
+  const sessions = (byName.get("telemt_direct_relay_buffer_sessions") || [])
+    .reduce((total, sample) => total + sample.value, 0);
+  nodes.push(card("direct sessions", sessions.toFixed(0)));
+
+  nodes.push(card("tracked IPs", (need("telemt_ip_tracker_entries") || 0).toFixed(0)));
+  nodes.push(card(
+    "active users",
+    labelled(byName, "telemt_ip_tracker_users", "scope", "active").toFixed(0)
+  ));
+  nodes.push(card("ME writers", (need("telemt_me_writers_active_current") || 0).toFixed(0)));
+  nodes.push(card("buffers in use",
+    labelled(byName, "telemt_buffer_pool_buffers_total", "kind", "in_use").toFixed(0)));
 
   const telemetry = scalar(byName, "telemt_telemetry_core_enabled", 1);
   const flag = document.createElement("div");
@@ -322,23 +343,42 @@ function renderOverview(byName, types) {
   if (telemetry !== 1) {
     status.textContent = "core telemetry is disabled; counters read zero";
     status.className = "err";
+  } else if (missing.length > 0) {
+    status.textContent = "missing series: " + missing.join(", ");
+    status.className = "err";
   }
   return types;
 }
 
 function renderCharts(byName, at) {
-  const specs = [
-    { name: "telemt_connections_total", title: "accepts/s", format: (v) => v.toFixed(1) + "/s" },
-    { name: "telemt_connections_bad_total", title: "rejects/s", format: (v) => v.toFixed(2) + "/s" },
-    { name: "telemt_octets_from_client_total", title: "from client", format: (v) => humanBytes(v) + "/s" },
-    { name: "telemt_octets_to_client_total", title: "to client", format: (v) => humanBytes(v) + "/s" },
-  ];
   const nodes = [];
+  const specs = [
+    { name: "telemt_connections_total", title: "accepts/s", format: (v) => v.toFixed(2) + "/s" },
+    { name: "telemt_connections_bad_total", title: "rejects/s", format: (v) => v.toFixed(2) + "/s" },
+    {
+      name: "telemt_me_d2c_payload_bytes_total",
+      title: "middle-end downstream",
+      format: (v) => humanBytes(v) + "/s",
+    },
+  ];
   for (const spec of specs) {
-    const value = scalar(byName, spec.name, null);
-    if (value === null) continue;
-    const points = record(spec.name, value, at);
+    if (!byName.has(spec.name)) continue;
+    const points = record(spec.name, scalar(byName, spec.name, 0), at);
     nodes.push(sparkline(spec.title, ratePoints(points), spec.format));
+  }
+
+  // There are no global octet counters; the per-user families are the only
+  // traffic totals in the exposition, and they only exist while per-user
+  // telemetry is on.
+  const summed = (name) =>
+    (byName.get(name) || []).reduce((total, sample) => total + sample.value, 0);
+  for (const [name, title] of [
+    ["telemt_user_octets_from_client_total", "from client"],
+    ["telemt_user_octets_to_client_total", "to client"],
+  ]) {
+    if (!byName.has(name)) continue;
+    const points = record(name, summed(name), at);
+    nodes.push(sparkline(title, ratePoints(points), (v) => humanBytes(v) + "/s"));
   }
   replace("charts", nodes);
 }
@@ -346,7 +386,7 @@ function renderCharts(byName, at) {
 function renderMiddleEnd(byName) {
   const nodes = [];
   const pairs = [
-    ["writers", "telemt_me_writers_current"],
+    ["writers active", "telemt_me_writers_active_current"],
     ["writers warm", "telemt_me_writers_warm_current"],
     ["reconnects", "telemt_me_reconnect_attempts_total"],
     ["keepalive sent", "telemt_me_keepalive_sent_total"],
@@ -354,9 +394,8 @@ function renderMiddleEnd(byName) {
     ["handshake rejects", "telemt_me_handshake_reject_total"],
   ];
   for (const [label, name] of pairs) {
-    const value = scalar(byName, name, null);
-    if (value === null) continue;
-    nodes.push(card(label, value.toFixed(0)));
+    if (!byName.has(name)) continue;
+    nodes.push(card(label, scalar(byName, name, 0).toFixed(0)));
   }
   if (nodes.length === 0) {
     nodes.push(card("middle-end", "not in use"));

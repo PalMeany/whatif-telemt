@@ -50,12 +50,12 @@ pub(super) async fn post_json(
     token: &str,
     method: &str,
     payload: &str,
-    upstream: Option<Arc<UpstreamManager>>,
+    egress: Option<(Arc<UpstreamManager>, String)>,
     request_timeout: Duration,
 ) -> Result<ApiResponse> {
     let (scheme, host, port) = split_origin(origin)?;
     let path = format!("/bot{token}/{method}");
-    let stream = connect(&host, port, upstream).await?;
+    let stream = connect(&host, port, egress).await?;
 
     let response = match scheme {
         Scheme::Https => {
@@ -149,20 +149,27 @@ fn tls_client_config() -> Arc<rustls::ClientConfig> {
     Arc::new(config)
 }
 
-/// Opens the transport, through the configured upstreams when there are any.
+/// Opens the transport, through a scoped upstream when one is configured.
+///
+/// The scope is not optional when an upstream is used: selecting an unscoped
+/// upstream would charge a Bot API outage to the ones client traffic depends
+/// on, and five failed polls are enough to mark them unhealthy.
 async fn connect(
     host: &str,
     port: u16,
-    upstream: Option<Arc<UpstreamManager>>,
+    egress: Option<(Arc<UpstreamManager>, String)>,
 ) -> Result<UpstreamStream> {
-    if let Some(manager) = upstream {
+    if let Some((manager, scope)) = egress {
         let target = manager.resolve_hostname(host, port).await?;
-        return timeout(CONNECT_TIMEOUT, manager.connect(target, None, None))
-            .await
-            .map_err(|_| ProxyError::Proxy(format!("bot API connect timeout for {host}:{port}")))?
-            .map_err(|error| {
-                ProxyError::Proxy(format!("bot API connect failed for {host}:{port}: {error}"))
-            });
+        return timeout(
+            CONNECT_TIMEOUT,
+            manager.connect(target, None, Some(scope.as_str())),
+        )
+        .await
+        .map_err(|_| ProxyError::Proxy(format!("bot API connect timeout for {host}:{port}")))?
+        .map_err(|error| {
+            ProxyError::Proxy(format!("bot API connect failed for {host}:{port}: {error}"))
+        });
     }
     let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
         .await

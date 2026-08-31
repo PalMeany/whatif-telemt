@@ -72,11 +72,18 @@ pub(crate) fn start(config: &ProxyConfig, control: ControlPlane) {
         loop {
             // The upstream manager belongs to the live generation, so it is
             // resolved per poll: a reload must move the bot's egress with it.
-            let upstream = Some(control.runtime().upstream_manager.clone());
+            // With no scope configured the bot dials directly, so a Bot API
+            // outage can never mark a client-traffic upstream unhealthy.
+            let egress = (!settings.upstream_scope.is_empty()).then(|| {
+                (
+                    control.runtime().upstream_manager.clone(),
+                    settings.upstream_scope.clone(),
+                )
+            });
             let polled = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => break,
-                polled = client.poll(offset, upstream.clone()) => polled,
+                polled = client.poll(offset, egress.clone()) => polled,
             };
             let (commands, next_offset) = match polled {
                 Ok(polled) => polled,
@@ -93,12 +100,18 @@ pub(crate) fn start(config: &ProxyConfig, control: ControlPlane) {
             offset = next_offset;
 
             for command in commands {
-                if !admins.contains(&command.from_id) {
+                // Both the sender and the chat have to be allowed. Checking the
+                // sender alone would let an admin type `/rotate alice` in a
+                // shared group and have the bot post the new secret to everyone
+                // in it, because the reply goes to the chat the command arrived
+                // in. A group is usable deliberately, by putting its (negative)
+                // chat id in `admins`.
+                if !admins.contains(&command.from_id) || !admins.contains(&command.chat_id) {
                     // Answering would confirm the bot exists to whoever found
                     // the token or guessed the username.
                     debug!(
                         update_id = command.update_id,
-                        "Dropping a Telegram update from a non-admin"
+                        "Dropping a Telegram update from a chat or sender that is not an admin"
                     );
                     continue;
                 }
@@ -112,7 +125,7 @@ pub(crate) fn start(config: &ProxyConfig, control: ControlPlane) {
                         format!("unknown command /{name}; try /help")
                     }
                 };
-                if let Err(error) = client.send(command.chat_id, &reply, upstream.clone()).await {
+                if let Err(error) = client.send(command.chat_id, &reply, egress.clone()).await {
                     warn!(error = %error, "Telegram reply failed");
                 }
             }

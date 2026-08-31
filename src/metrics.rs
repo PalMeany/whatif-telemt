@@ -258,6 +258,23 @@ async fn handle<B>(
     Ok(resp)
 }
 
+/// Renders the exposition for one runtime generation.
+///
+/// Shared with the fork's dedicated panel listener: the panel document scrapes
+/// `/metrics` from its own origin, so a listener that serves the page has to
+/// answer the same body this one does.
+pub(crate) async fn render_for_runtime(runtime: &RuntimeGeneration) -> String {
+    let config = runtime.config();
+    render_metrics(
+        runtime.stats.as_ref(),
+        runtime.proxy_shared.as_ref(),
+        config.as_ref(),
+        runtime.ip_tracker.as_ref(),
+        runtime.tls_cache.as_deref(),
+    )
+    .await
+}
+
 fn render_beobachten(stats: &Stats, beobachten: &BeobachtenStore, config: &ProxyConfig) -> String {
     if !config.general.beobachten {
         return "beobachten disabled\n".to_string();

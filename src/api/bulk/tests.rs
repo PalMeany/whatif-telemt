@@ -171,7 +171,43 @@ fn a_later_operation_sees_what_an_earlier_one_did() {
 }
 
 #[test]
-fn rotating_a_secret_replaces_it_and_cancels_live_sessions() {
+fn enabling_removes_the_key_instead_of_writing_true() {
+    // `POST /v1/users/{user}/enable` drops the key, and writing `true` here
+    // would change the config revision for a no-op and invalidate every other
+    // caller's If-Match.
+    let mut cfg = config_with_users(&["alice"]);
+    cfg.access.user_enabled.insert("alice".to_string(), false);
+
+    let applied = apply_operation(
+        &mut cfg,
+        BulkAction::UserEnable,
+        Some("alice".to_string()),
+        None,
+    )
+    .expect("enabling an existing user must be accepted");
+
+    assert_eq!(applied.sections, vec![AccessSection::UserEnabled]);
+    assert!(!cfg.access.user_enabled.contains_key("alice"));
+}
+
+#[test]
+fn patching_enabled_true_also_removes_the_key() {
+    let mut cfg = config_with_users(&["alice"]);
+    cfg.access.user_enabled.insert("alice".to_string(), false);
+
+    apply_operation(
+        &mut cfg,
+        BulkAction::UserPatch,
+        Some("alice".to_string()),
+        Some(serde_json::json!({ "enabled": true })),
+    )
+    .expect("a patch enabling the user must be accepted");
+
+    assert!(!cfg.access.user_enabled.contains_key("alice"));
+}
+
+#[test]
+fn rotating_a_secret_replaces_it_and_leaves_live_sessions_alone() {
     let mut cfg = config_with_users(&["alice"]);
     let before = cfg.access.users.get("alice").cloned().unwrap();
 
@@ -186,10 +222,9 @@ fn rotating_a_secret_replaces_it_and_cancels_live_sessions() {
     let after = cfg.access.users.get("alice").cloned().unwrap();
     assert_ne!(before, after);
     assert_eq!(applied.secret.as_deref(), Some(after.as_str()));
-    assert!(matches!(
-        applied.effects.as_slice(),
-        [RuntimeEffect::CancelSessions { .. }]
-    ));
+    // The single-operation route leaves live sessions alone, and the same named
+    // operation must not mean two different things by route.
+    assert!(applied.effects.is_empty());
 }
 
 #[test]

@@ -65,7 +65,7 @@ impl BotClient {
     pub(super) async fn poll(
         &self,
         offset: i64,
-        upstream: Option<Arc<UpstreamManager>>,
+        egress: Option<(Arc<UpstreamManager>, String)>,
     ) -> Result<(Vec<Command>, i64)> {
         let payload = serde_json::json!({
             "offset": offset,
@@ -81,7 +81,7 @@ impl BotClient {
             &self.token,
             "getUpdates",
             &payload,
-            upstream,
+            egress,
             self.request_timeout,
         )
         .await?;
@@ -128,7 +128,7 @@ impl BotClient {
         &self,
         chat_id: i64,
         text: &str,
-        upstream: Option<Arc<UpstreamManager>>,
+        egress: Option<(Arc<UpstreamManager>, String)>,
     ) -> Result<()> {
         for chunk in split_message(text) {
             let payload = serde_json::json!({
@@ -145,7 +145,7 @@ impl BotClient {
                 &self.token,
                 "sendMessage",
                 &payload,
-                upstream.clone(),
+                egress.clone(),
                 self.request_timeout,
             )
             .await?;

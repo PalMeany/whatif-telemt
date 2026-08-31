@@ -25,6 +25,7 @@ async fn reload_submission_uses_matching_disk_revision_and_snapshot() {
         &control,
         Some(&revision),
         request.clone(),
+        &crate::config::ForkRuntimeConfig::default(),
     )
     .await
     .unwrap();
@@ -49,6 +50,7 @@ async fn revision_conflict_rejects_without_enqueuing_reload() {
         &control,
         Some("stale-revision"),
         ReloadRequest::default(),
+        &crate::config::ForkRuntimeConfig::default(),
     )
     .await
     .unwrap_err();
@@ -69,6 +71,7 @@ async fn reload_conflict_and_closed_coordinator_map_to_http_contract() {
         &control,
         None,
         ReloadRequest::default(),
+        &crate::config::ForkRuntimeConfig::default(),
     )
     .await
     .unwrap();
@@ -80,6 +83,7 @@ async fn reload_conflict_and_closed_coordinator_map_to_http_contract() {
         &control,
         None,
         ReloadRequest::default(),
+        &crate::config::ForkRuntimeConfig::default(),
     )
     .await
     .unwrap_err();
@@ -99,6 +103,7 @@ async fn reload_conflict_and_closed_coordinator_map_to_http_contract() {
         &control,
         None,
         ReloadRequest::default(),
+        &crate::config::ForkRuntimeConfig::default(),
     )
     .await
     .unwrap_err();

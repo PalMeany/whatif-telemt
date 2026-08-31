@@ -958,7 +958,12 @@ async fn run_telemt_core(
     ));
     // One controller for the whole process; it re-reads the active generation
     // each tick instead of being re-spawned per generation.
-    process_scope.publish_generation(&config, stats.clone(), shared_state.clone());
+    process_scope.publish_generation(
+        &config,
+        stats.clone(),
+        shared_state.clone(),
+        buffer_pool.clone(),
+    );
     let _budget_controller = process_scope.spawn_budget_controller();
 
     let runtime_generation = generation::RuntimeGeneration::new(

@@ -372,6 +372,13 @@ pub(crate) struct DirectBufferBudgetInputs {
     pub(crate) stats: Arc<Stats>,
     pub(crate) shared: Arc<ProxySharedState>,
     pub(crate) max_connections: u32,
+    /// Relay pool the active generation actually draws from.
+    ///
+    /// Published per generation rather than captured once, because
+    /// `fork.runtime.process_buffer_pool = false` hands each generation a pool
+    /// of its own; a controller holding the process pool would then trim and
+    /// gauge a pool no session uses.
+    pub(crate) buffer_pool: Arc<BufferPool>,
 }
 
 /// Runs the control-plane loop for Direct budget and shared pool pressure.
@@ -381,7 +388,6 @@ pub(crate) struct DirectBufferBudgetInputs {
 /// controllers fighting over one envelope.
 pub(crate) async fn run_direct_buffer_budget_controller(
     budget: Arc<DirectBufferBudget>,
-    buffer_pool: Arc<BufferPool>,
     inputs_rx: watch::Receiver<Arc<DirectBufferBudgetInputs>>,
 ) {
     let mut interval = tokio::time::interval(CONTROL_INTERVAL);
@@ -390,12 +396,6 @@ pub(crate) async fn run_direct_buffer_budget_controller(
     let mut previous_denied = 0u64;
     let mut previous_fallback = 0u64;
     let mut previous_rejected = 0u64;
-    let pool_trim_low = buffer_pool
-        .max_buffers()
-        .min(BUFFER_POOL_TRIM_LOW_WATERMARK);
-    let pool_trim_high = buffer_pool
-        .max_buffers()
-        .min(BUFFER_POOL_TRIM_HIGH_WATERMARK);
     let mut pool_trim_armed = true;
 
     loop {
@@ -404,6 +404,13 @@ pub(crate) async fn run_direct_buffer_budget_controller(
         let stats = &inputs.stats;
         let shared = &inputs.shared;
         let max_connections = inputs.max_connections;
+        let buffer_pool = &inputs.buffer_pool;
+        let pool_trim_low = buffer_pool
+            .max_buffers()
+            .min(BUFFER_POOL_TRIM_LOW_WATERMARK);
+        let pool_trim_high = buffer_pool
+            .max_buffers()
+            .min(BUFFER_POOL_TRIM_HIGH_WATERMARK);
         let sample = read_system_memory_sample().await;
         budget.update_system_sample(sample);
 

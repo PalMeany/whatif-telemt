@@ -131,15 +131,17 @@ hello = "00000000000000000000000000000000"
 
 # --- Telegram admin bot ---
 # Long-polls the Bot API and answers status commands. Read-only until
-# allow_mutations is set. Bot API traffic follows [[upstreams]].
+# allow_mutations is set.
 # [fork.telegram]
 # enabled = true
 # token = "123456:replace-with-the-token-from-BotFather"
-# admins = [111111111]              # Telegram user ids allowed to talk to it
+# admins = [111111111]              # sender AND chat ids allowed to talk to it
 # allow_mutations = false           # /adduser, /deluser, /enable, /disable, /rotate
 # api_base = "https://api.telegram.org"
 # poll_timeout_secs = 25
 # request_timeout_secs = 30
+# upstream_scope = ""              # empty dials directly; set it to route the bot
+#                                  through a scoped [[upstreams]] entry
 
 # --- Fork API surface ---
 # POST /v1/bulk: many user operations under one config write.
