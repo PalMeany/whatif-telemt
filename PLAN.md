@@ -58,6 +58,25 @@ Working plan. Checked items are landed and compile.
 - [x] Tests for every new config path and feature switch.
 - [x] `cargo fmt`, `cargo clippy`, `cargo nextest run`.
 
+## Phase 6 — adversarial review of this branch
+
+Sixteen findings, verified in code and fixed in `0095f53`. The ones worth
+naming, because each was a real defect rather than a style point:
+
+- [x] The WEB trace-policy watcher spun at full CPU from the first hot reload,
+      because re-cloning the published `RuntimeWatchState` rewinds the config
+      receiver it parks on.
+- [x] The Prometheus panel read six metric families this binary never emits, and
+      its dedicated listener 404'd the `/metrics` the page scrapes.
+- [x] The bot replied into whatever chat a command arrived in, so an admin could
+      post a rotated secret to a shared group; and its Bot API failures were
+      charged to the upstreams client traffic uses.
+- [x] `me_writer_teardown`, `process_buffer_pool` and `reload_validate_candidate`
+      did not do what their own documentation said.
+- [x] Bulk: atomic aborts labelled rolled-back operations `ok`, the timeout could
+      cancel after the write, effects ran outside the lock, and three operations
+      diverged from the single-operation routes they mirror.
+
 ## Known failing tests, all pre-existing
 
 - `proxy::direct_relay::security_tests::*` (4) and
