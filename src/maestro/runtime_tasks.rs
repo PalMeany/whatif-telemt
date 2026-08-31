@@ -491,6 +491,16 @@ pub(crate) async fn spawn_metrics_if_configured(
             )
             .await;
     }
+
+    // The panel shares the metrics listener unless it was given one of its
+    // own, so this only spawns something when `[fork.prometheus] listen` is set.
+    if config.fork.prometheus_enabled() && !config.fork.prometheus.listen.is_empty() {
+        let active_runtime = active_runtime.clone();
+        let listen_backlog = config.server.listen_backlog;
+        tokio::spawn(async move {
+            crate::fork::prometheus::listener::serve(active_runtime, listen_backlog).await;
+        });
+    }
 }
 
 pub(crate) async fn mark_runtime_ready(startup_tracker: &Arc<StartupTracker>) {

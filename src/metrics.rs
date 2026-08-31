@@ -175,6 +175,7 @@ async fn serve_listener(listener: TcpListener, active_runtime: Arc<ArcSwap<Runti
                 let ip_tracker = runtime.ip_tracker.clone();
                 let tls_cache = runtime.tls_cache.clone();
                 let config = runtime.config();
+                let rng = runtime.rng.clone();
                 async move {
                     handle(
                         req,
@@ -184,6 +185,7 @@ async fn serve_listener(listener: TcpListener, active_runtime: Arc<ArcSwap<Runti
                         &ip_tracker,
                         tls_cache.as_deref(),
                         &config,
+                        &rng,
                     )
                     .await
                 }
@@ -210,6 +212,7 @@ async fn serve_listener(listener: TcpListener, active_runtime: Arc<ArcSwap<Runti
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle<B>(
     req: Request<B>,
     stats: &Stats,
@@ -218,7 +221,16 @@ async fn handle<B>(
     ip_tracker: &UserIpTracker,
     tls_cache: Option<&TlsFrontCache>,
     config: &ProxyConfig,
+    rng: &crate::crypto::SecureRandom,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
+    // The panel shares this listener unless it was given one of its own, so it
+    // inherits `server.metrics_whitelist` and the connection budget for free.
+    if config.fork.prometheus.listen.is_empty()
+        && crate::fork::prometheus::is_panel_path(config, req.uri().path())
+    {
+        return Ok(crate::fork::prometheus::render(config, rng));
+    }
+
     if req.uri().path() == "/metrics" {
         let body = render_metrics(stats, shared_state, config, ip_tracker, tls_cache).await;
         let resp = Response::builder()
@@ -4242,6 +4254,7 @@ mod tests {
         let shared_state = ProxySharedState::new();
         let tracker = UserIpTracker::new();
         let mut config = ProxyConfig::default();
+        let rng = crate::crypto::SecureRandom::new();
         stats.increment_connects_all();
         stats.increment_connects_all();
         stats.increment_connects_all();
@@ -4255,6 +4268,7 @@ mod tests {
             &tracker,
             None,
             &config,
+            &rng,
         )
         .await
         .unwrap();
@@ -4290,6 +4304,7 @@ mod tests {
             &tracker,
             None,
             &config,
+            &rng,
         )
         .await
         .unwrap();
@@ -4298,6 +4313,47 @@ mod tests {
         let beob_text = std::str::from_utf8(body_beob.as_ref()).unwrap();
         assert!(beob_text.contains("[TLS-scanner]"));
         assert!(beob_text.contains("203.0.113.10-1"));
+
+        // The panel shares this listener, so its path must not be a 404 when
+        // it is on and must not exist at all when it is off.
+        let req_panel = Request::builder().uri("/panel").body(()).unwrap();
+        let resp_panel = handle(
+            req_panel,
+            &stats,
+            &beobachten,
+            shared_state.as_ref(),
+            &tracker,
+            None,
+            &config,
+            &rng,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp_panel.status(), StatusCode::NOT_FOUND);
+
+        config.fork.prometheus.enabled = true;
+        let req_panel = Request::builder().uri("/panel").body(()).unwrap();
+        let resp_panel = handle(
+            req_panel,
+            &stats,
+            &beobachten,
+            shared_state.as_ref(),
+            &tracker,
+            None,
+            &config,
+            &rng,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp_panel.status(), StatusCode::OK);
+        assert_eq!(
+            resp_panel
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        config.fork.prometheus.enabled = false;
 
         let req404 = Request::builder().uri("/other").body(()).unwrap();
         let resp404 = handle(
@@ -4308,6 +4364,7 @@ mod tests {
             &tracker,
             None,
             &config,
+            &rng,
         )
         .await
         .unwrap();
