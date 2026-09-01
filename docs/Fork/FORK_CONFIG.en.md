@@ -18,11 +18,12 @@ always had, because every switch defaults to on.
 - [Top level](#top-level)
 - [`[fork.runtime]` — runtime behaviour switches](#forkruntime--runtime-behaviour-switches)
 - [`[fork.web]` — this fork's WEB proxy transport](#forkweb--this-forks-web-proxy-transport)
-- [`[fork.prometheus]` — the built-in panel](#forkprometheus--the-built-in-panel)
+- [`[fork.prometheus]` — the built-in metrics page](#forkprometheus--the-built-in-metrics-page)
 - [`[fork.telegram]` — the admin bot](#forktelegram--the-admin-bot)
 - [`[fork.api]` — bulk requests](#forkapi--bulk-requests)
 - [Which WEB proxy runs](#which-web-proxy-runs)
 - [Upgrading from a pre-`[fork]` configuration](#upgrading-from-a-pre-fork-configuration)
+- [What lives outside `[fork]`](#what-lives-outside-fork)
 - [What is not switchable](#what-is-not-switchable)
 
 ## Top level
@@ -84,7 +85,13 @@ section name moved.
 | `limits`, `timeouts` | table | see reference | Process ceilings and carrier deadlines. |
 | `profiles` | array | `[]` | Explicit capability profiles. |
 
-## `[fork.prometheus]` — the built-in panel
+## `[fork.prometheus]` — the built-in metrics page
+
+> Historically called "the panel", and its default path is still `/panel`. It is
+> **not** the operator interface: that is the top-level `[panel]` section,
+> documented in
+> [Advanced_settings/PANEL.en.md](../Advanced_settings/PANEL.en.md). This one is
+> a read-only metrics page. The two are independent and can run together.
 
 One self-contained HTML document served next to the exposition this process
 already renders. It carries no external reference: the page scrapes `/metrics`
@@ -241,6 +248,27 @@ The two schemas share only `enabled`, `limits` and `timeouts`; every other key
 belongs to exactly one of them, so the decision is made on keys that cannot
 appear in both. A `[web]` mixing keys from both schemas is refused with both
 lists named, because guessing would bind the wrong transport.
+
+## What lives outside `[fork]`
+
+One thing: the built-in web panel, configured in the top-level `[panel]`
+section. It is the single exception to the rule this document opens with, and it
+is deliberate.
+
+The `[fork]` kill switch exists so one key turns off every behaviour that makes
+this build differ from stock telemt. The panel changes no such behaviour — it is
+a *client* of the Control API, and every view it renders and every change it
+makes is a call to `[server.api]`, which is itself top-level for the same
+reason. Having `[fork] enabled = false` silently take away an operator's
+administrative interface is a worse failure than the inconsistency, so `[panel]`
+sits next to the API it drives rather than under the fork switch.
+
+A configuration written for stock telemt still keeps its exact meaning: stock
+telemt has no `[panel]` section, so nothing an operator already wrote changes
+behaviour, and leaving the section out leaves the panel off.
+
+Reference: [Advanced_settings/PANEL.en.md](../Advanced_settings/PANEL.en.md).
+Templates: [`contrib/panel/`](../../contrib/panel/).
 
 ## What is not switchable
 

@@ -219,3 +219,66 @@ panel_theme = "neon"
     remove_temp_config(&path);
     assert!(error.to_string().contains("panel.panel_theme"), "{error}");
 }
+
+#[test]
+fn every_shipped_panel_example_loads() {
+    // The templates in contrib/panel are what an operator copies. A key
+    // renamed here without updating them turns "copy this file" into a process
+    // that refuses to start, and nothing else in the tree would catch it.
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contrib/panel");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&directory).expect("contrib/panel must exist") {
+        let path = entry.expect("directory entry").path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+            continue;
+        }
+        let config = ProxyConfig::load(path.to_str().expect("path"))
+            .unwrap_or_else(|error| panic!("{} does not load: {error}", path.display()));
+        assert!(
+            config.panel.enabled,
+            "{} is a panel template and should enable the panel",
+            path.display()
+        );
+        assert!(
+            config.server.api.enabled,
+            "{} must keep the Control API the panel drives",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 3,
+        "expected standalone, master and agent templates"
+    );
+}
+
+#[test]
+fn the_shipped_examples_agree_with_their_documented_roles() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("contrib/panel");
+    let load = |name: &str| {
+        ProxyConfig::load(directory.join(name).to_str().expect("path"))
+            .unwrap_or_else(|error| panic!("{name} does not load: {error}"))
+    };
+
+    let standalone = load("standalone.toml");
+    assert!(!standalone.panel.cluster.enabled);
+
+    let master = load("master.toml");
+    assert!(master.panel.cluster.role.is_master());
+    assert!(!master.panel.cluster.role.is_agent());
+    assert!(
+        master.panel.require_totp,
+        "a control node reaches every node"
+    );
+
+    let agent = load("agent.toml");
+    assert!(agent.panel.cluster.role.is_agent());
+    // An agent has to advertise a URL or it cannot produce a link token, and
+    // it has to terminate TLS or the master would pin nothing.
+    assert!(!agent.panel.cluster.advertise_url.is_empty());
+    assert!(agent.panel.tls.enabled);
+    assert!(
+        !agent.panel.cluster.allow_from.is_empty(),
+        "the template should show the endpoint being restricted"
+    );
+}

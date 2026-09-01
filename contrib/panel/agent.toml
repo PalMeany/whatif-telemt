@@ -1,0 +1,77 @@
+# telemt with the built-in web panel — edge node driven by a control node.
+#
+# This node carries proxy traffic and answers signed requests from exactly one
+# master. It still runs a full panel: an operator can sign in here directly,
+# which is how the link token is read and how the node stays administrable if
+# the master is down.
+#
+# Pair with master.toml on the control node.
+# Walkthrough: docs/Setup_examples/PANEL_FLEET.en.md
+
+[general]
+use_middle_proxy = true
+log_level = "normal"
+
+[general.modes]
+tls = true
+
+[general.links]
+show = "*"
+public_host = "edge-fra-1.example.com"   # CHANGE ME
+
+[server]
+port = 443
+
+[server.api]
+enabled = true
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1/32", "::1/128"]
+auth_header = "Bearer CHANGE_ME_LONG_RANDOM_STRING"
+runtime_edge_enabled = true
+
+[[server.listeners]]
+ip = "0.0.0.0"
+
+[censorship]
+tls_domain = "petrovich.ru"          # CHANGE ME
+mask = true
+tls_emulation = true
+
+[access.users]
+# Users are created from the control node; this entry is the start-up minimum.
+hello = "00000000000000000000000000000000"   # CHANGE ME
+
+[panel]
+enabled = true
+# The master reaches this node over TLS, so the panel terminates it here rather
+# than sitting behind a front proxy. Use the front-proxy form instead if this
+# host already runs one — then set listen to loopback and point advertise_url
+# at the proxy.
+listen = "0.0.0.0:8443"
+data_dir = "/etc/telemt/panel"
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+# Optional second gate in front of everything, including the signed cluster
+# endpoint. Naming the master's address here keeps unauthenticated traffic off
+# the listener entirely.
+# whitelist = ["203.0.113.10/32"]    # CHANGE ME, or leave empty for any source
+
+[panel.tls]
+enabled = true
+# A publicly trusted certificate, or a self-signed one made with
+# make-panel-cert.sh next to this file. Self-signed is fine: the master pins
+# this certificate by SHA-256 when the link token carries its fingerprint.
+cert_path = "/etc/telemt/panel/fullchain.pem"
+key_path = "/etc/telemt/panel/privkey.pem"
+
+[panel.cluster]
+enabled = true
+role = "agent"
+node_name = "edge-fra-1"                              # CHANGE ME
+# How the master reaches this node. Required to produce a link token, and the
+# token carries it, so a wrong value fails when the master pastes it rather
+# than at first use.
+advertise_url = "https://edge-fra-1.example.com:8443" # CHANGE ME
+# Source networks allowed to reach /cluster/v1. Empty means any source; every
+# request still has to carry a valid signature, but naming the master keeps
+# unauthenticated traffic off the endpoint.
+allow_from = ["203.0.113.10/32"]                      # CHANGE ME

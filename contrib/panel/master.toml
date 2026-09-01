@@ -1,0 +1,63 @@
+# telemt with the built-in web panel — control node of a fleet.
+#
+# This node is where operators sign in. It drives itself and every node linked
+# into it. It does not have to carry proxy traffic at all: a control node with
+# no public listener is a perfectly good deployment, and the [access.users]
+# entry below exists only because telemt refuses to start without one.
+#
+# Pair with agent.toml on each edge node.
+# Walkthrough: docs/Setup_examples/PANEL_FLEET.en.md
+
+[general]
+use_middle_proxy = true
+log_level = "normal"
+
+[general.modes]
+tls = true
+
+[server]
+# Bind the proxy to loopback if this node serves no clients. Removing the
+# listener entirely is not an option: telemt exits without one.
+port = 443
+
+[server.api]
+enabled = true
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1/32", "::1/128"]
+auth_header = "Bearer CHANGE_ME_LONG_RANDOM_STRING"
+runtime_edge_enabled = true
+
+[[server.listeners]]
+ip = "127.0.0.1"
+
+[censorship]
+tls_domain = "petrovich.ru"          # CHANGE ME
+mask = true
+
+[access.users]
+hello = "00000000000000000000000000000000"   # CHANGE ME
+
+[panel]
+enabled = true
+listen = "127.0.0.1:8443"
+data_dir = "/etc/telemt/panel"
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+# A control node is worth protecting with a second factor: one password here
+# reaches every node in the fleet.
+require_totp = true
+
+[panel.cluster]
+enabled = true
+# A master drives linked nodes and exposes no inbound cluster endpoint of its
+# own. Use "master-agent" only if this node should itself be linkable into
+# another panel, and then give it an advertise_url as agent.toml does.
+role = "master"
+node_name = "control"                # CHANGE ME
+# Not set for a plain master: nothing links *to* it.
+# advertise_url = ""
+# How often linked nodes are probed in the background. The Fleet page shows the
+# result of the last probe, so this is how stale that reading can be.
+poll_interval_secs = 30
+# Accepted clock difference when talking to an agent. Widening it widens how
+# long a captured request stays replayable; fix the clocks instead.
+clock_skew_secs = 60

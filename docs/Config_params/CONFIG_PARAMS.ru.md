@@ -37,6 +37,7 @@
  - [upstreams](#upstreams)
  - [web](#web)
  - [fork](#fork)
+ - [panel](#panel)
 
 # Ключи верхнего уровня
 
@@ -3737,3 +3738,75 @@ hot-reload: читаются при старте или при перезагр�
 | `fork.api.bulk_enabled` | `bool` | `false` | `✘` |
 | `fork.api.bulk_max_operations` | `usize` | `100` (max `1000`) | `✘` |
 | `fork.api.bulk_timeout_secs` | `u16` | `10` (1..=14) | `✘` |
+
+# panel
+
+Встроенная веб-панель: интерфейс оператора, вкомпилированный в бинарник. Он
+управляет этим узлом — а с `[panel.cluster]` и парком связанных узлов — через
+Control API. По умолчанию выключен. Требует `server.api.enabled = true`.
+
+Не путать с `[fork.prometheus]`, который тоже называется панелью: тот отдаёт
+одну read-only страницу с метриками на метрик-слушателе. Эти два раздела
+независимы.
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `enabled` | `bool` | `false` | `✘` |
+| `listen` | `String` (`ip:port`) | `"127.0.0.1:8443"` | `✘` |
+| `data_dir` | `String` (путь) | `<каталог конфига>/panel` | `✘` |
+| `whitelist` | `CIDR[]` | `[]` (любой источник) | `✘` |
+| `trusted_proxies` | `CIDR[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `control_api_url` | `String` (URL) | выводится из `server.api.listen` | `✘` |
+| `control_api_token` | `String` | `server.api.auth_header` | `✘` |
+| `session_ttl_secs` | `u64` | `43200` | `✘` |
+| `session_idle_timeout_secs` | `u64` | `1800` | `✘` |
+| `max_sessions_per_operator` | `usize` | `8` | `✘` |
+| `max_sessions_total` | `usize` | `512` | `✘` |
+| `login_max_attempts` | `u32` | `5` | `✘` |
+| `login_lockout_secs` | `u64` | `900` | `✘` |
+| `password_min_length` | `usize` | `12` | `✘` |
+| `password_hash_iterations` | `u32` | `600000` | `✘` |
+| `require_totp` | `bool` | `false` | `✘` |
+| `request_body_limit_bytes` | `usize` | `262144` | `✘` |
+| `max_connections` | `usize` | `256` | `✘` |
+| `header_read_timeout_ms` | `u64` | `10000` | `✘` |
+| `request_timeout_ms` | `u64` | `30000` | `✘` |
+| `audit_enabled` | `bool` | `true` | `✘` |
+| `audit_retention_days` | `u64` | `90` | `✘` |
+| `audit_max_bytes` | `u64` | `67108864` | `✘` |
+| `tls` | Таблица | выключено | `✘` |
+| `cluster` | Таблица | выключено | `✘` |
+
+## panel.tls
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `panel.tls.enabled` | `bool` | `false` | `✘` |
+| `panel.tls.cert_path` | `String` (путь) | `""` | `✘` |
+| `panel.tls.key_path` | `String` (путь) | `""` | `✘` |
+
+## panel.cluster
+
+| Ключ | Тип | По умолчанию | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `panel.cluster.enabled` | `bool` | `false` | `✘` |
+| `panel.cluster.role` | `"standalone" \| "master" \| "agent" \| "master-agent"` | `"standalone"` | `✘` |
+| `panel.cluster.node_name` | `String` | имя хоста | `✘` |
+| `panel.cluster.advertise_url` | `String` (URL) | `""` | `✘` |
+| `panel.cluster.allow_from` | `CIDR[]` | `[]` | `✘` |
+| `panel.cluster.request_timeout_ms` | `u64` | `10000` (1000..=120000) | `✘` |
+| `panel.cluster.clock_skew_secs` | `u64` | `60` (5..=600) | `✘` |
+| `panel.cluster.nonce_capacity` | `usize` | `8192` (256..=1048576) | `✘` |
+| `panel.cluster.poll_interval_secs` | `u64` | `30` (5..=3600) | `✘` |
+
+Весь раздел принадлежит процессу: слушатель биндится, сертификат читается и
+store панели открывается один раз при старте. Перезагрузка конфигурации
+сообщает `panel` в `deferred_process_fields`, и чтобы применить изменение,
+нужен рестарт.
+
+Немаршрутизируемый `listen` без `panel.tls.enabled` отвергается, если только
+`trusted_proxies` не называет фронт-прокси вне этого хоста: иначе cookie сессии
+и любой показанный секрет шли бы открытым текстом.
+
+Все ключи, модель ролей, протокол федерации и свойства безопасности описаны в
+[Встроенная веб-панель](../Advanced_settings/PANEL.ru.md).

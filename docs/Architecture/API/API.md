@@ -4,6 +4,13 @@
 Control-plane HTTP API for runtime visibility and user/config management.
 Data-plane MTProto traffic is out of scope.
 
+The [built-in web panel](../../Advanced_settings/PANEL.en.md) is a client of this
+API and nothing else: every view it renders and every change it makes is one of
+the calls below, issued against the node an operator selected. It relays the
+envelope unchanged, `revision` included, so anything documented here is what the
+browser receives. That also means a feature switched off here — `read_only`,
+`runtime_edge_enabled` — is switched off in the panel.
+
 ## Runtime Configuration
 API runtime is configured in `[server.api]`.
 

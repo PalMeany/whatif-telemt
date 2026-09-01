@@ -1,0 +1,125 @@
+# Front proxy for the telemt web panel, for a host that already runs nginx.
+# Certificates come from certbot or your own automation.
+#
+# Install as /etc/nginx/sites-available/panel.example.com and substitute the
+# hostname and certificate paths.
+#
+# Give the panel a hostname of its own. Sharing one with the WEB proxy
+# transport would put HSTS and an administrative login on the origin that is
+# supposed to look like an ordinary website.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name panel.example.com;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    # nginx >= 1.25.1. On older builds drop this line and use
+    # `listen 443 ssl http2;` instead.
+    http2 on;
+    server_name panel.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/panel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/panel.example.com/privkey.pem;
+
+    # Unlike the WEB carrier's server block, HSTS belongs here: this hostname is
+    # an administrative surface, not a circumvention origin, and a session
+    # cookie must never be sent over plaintext even once.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    server_tokens off;
+
+    # Compression off by default for the whole server, then enabled for the
+    # static bundle only. `/panel/api` responses carry the session's CSRF
+    # token, and compressing a response that also reflects attacker-chosen
+    # input is the BREACH precondition.
+    gzip off;
+
+    # The panel's own request bodies are bounded by
+    # panel.request_body_limit_bytes (256 KiB by default). This leaves room for
+    # a config patch without letting an unauthenticated caller push more.
+    client_max_body_size 1m;
+
+    # nginx's built-in error pages carry an <hr><center>nginx</center> banner,
+    # so a stopped panel would announce the front proxy on every path.
+    error_page 400 408 414 431 500 502 503 504 @unavailable;
+    location @unavailable {
+        default_type text/plain;
+        add_header Cache-Control          "no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options        "DENY" always;
+        add_header Referrer-Policy        "no-referrer" always;
+        return 502 "Service temporarily unavailable\n";
+    }
+
+    # $request includes the query string, and a node selector is the only thing
+    # that travels there — no secret does. The default `combined` format is
+    # therefore safe here, unlike on the WEB carrier. Header logging is not:
+    # the CSRF token and the session cookie both travel in request headers.
+    access_log /var/log/nginx/panel.example.com.log combined;
+
+    # The content-hashed bundle. Immutable, carries no secret, and is the only
+    # thing worth compressing.
+    location /assets/ {
+        gzip on;
+        gzip_types text/css text/javascript application/javascript;
+        gzip_min_length 1024;
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8443;
+        proxy_http_version 1.1;
+
+        # The panel compares Origin against Host and refuses a mismatch, so the
+        # public hostname has to survive the hop. Do not use $proxy_host here.
+        proxy_set_header Host              $host;
+        # $remote_addr, not $proxy_add_x_forwarded_for: nginx would otherwise
+        # forward a client-supplied value and append its own.
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+
+        # nginx passes unknown request headers through by default, so
+        # X-Telemt-Panel, X-Telemt-Csrf and X-Telemt-Panel-Node need no
+        # configuration. If a WAF or another hop strips unknown headers, allow
+        # those three or every panel request answers 400.
+
+        # Long enough for a PBKDF2 login at the configured work factor, which
+        # is deliberately expensive, plus a slow Control API call behind it.
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_buffering    on;
+    }
+}
+
+# Notes
+#
+# If this node is a cluster agent, /cluster/v1 is served by the same location
+# and needs no special handling — it is signed, not cookie-authenticated. Set
+# panel.cluster.advertise_url to https://panel.example.com (no port) so the
+# master reaches nginx rather than the loopback listener, and leave
+# panel.tls.enabled = false because nginx already terminates TLS. The master
+# then validates the public certificate through web PKI and needs no pin.
+#
+# A `deny`/`allow` block restricting the panel to an office range belongs here
+# rather than in panel.whitelist when nginx is the only public listener, so a
+# refused request never reaches the process at all:
+#
+#   location / {
+#       allow 203.0.113.0/24;
+#       deny  all;
+#       ...
+#   }

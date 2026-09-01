@@ -1,0 +1,85 @@
+# Front proxy for the telemt web panel.
+#
+# Caddy terminates TLS for the panel hostname, obtains and renews the
+# certificate, and forwards to the loopback panel listener. Only Caddy listens
+# on a public interface.
+#
+# Install as /etc/caddy/Caddyfile — or merge the site block into an existing
+# one — and substitute the hostname:
+#   sed -i 's/panel\.example\.com/YOUR.HOSTNAME/g' /etc/caddy/Caddyfile
+#   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#
+# Give the panel a hostname of its own. Sharing one with the WEB proxy
+# transport would put HSTS and an administrative login on the origin that is
+# supposed to look like an ordinary website.
+
+{
+	# Caddy's admin API otherwise listens on 127.0.0.1:2019 on every installed
+	# host, and it can rewrite this configuration.
+	admin off
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+		}
+	}
+}
+
+panel.example.com {
+	# Unlike the WEB carrier's site block, HSTS belongs here: this hostname is
+	# an administrative surface, not a circumvention origin, and a session
+	# cookie must never be sent over plaintext even once.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# Compress the bundle, never the API. The application shell is ~540 KB and
+	# gzip takes it to ~165 KB, which is worth it for a page that loads on
+	# every sign-in. `/panel/api` is excluded because its responses carry the
+	# session's CSRF token, and compressing a response that also reflects
+	# attacker-chosen input is the BREACH precondition.
+	@assets not path /panel/api* /cluster/v1*
+	encode @assets gzip
+
+	reverse_proxy 127.0.0.1:8443 {
+		# The panel compares Origin against Host and refuses a mismatch, so the
+		# public hostname has to survive the hop. Caddy preserves Host by
+		# default; this line is here so a later edit does not lose it.
+		header_up Host {host}
+
+		# Long enough for a PBKDF2 login at the configured work factor, which
+		# is deliberately expensive, plus a slow Control API call behind it.
+		transport http {
+			read_timeout 60s
+			write_timeout 60s
+		}
+	}
+
+	# Caddy's own error page names the server. Answer every failure with the
+	# same short generic body instead.
+	handle_errors {
+		header {
+			Cache-Control          "no-store"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options        "DENY"
+			Referrer-Policy        "no-referrer"
+		}
+		respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
+	}
+}
+
+# Notes
+#
+# X-Forwarded-For needs no configuration. Caddy discards inbound X-Forwarded-*
+# values and sets the header to the address it observed, which is what
+# panel.trusted_proxies expects. Keep that list at the loopback default when
+# Caddy runs on the same host.
+#
+# If this node is a cluster agent, /cluster/v1 goes through the same site block
+# and needs no special handling — it is signed, not cookie-authenticated. Set
+# panel.cluster.advertise_url to https://panel.example.com (no port) so the
+# master reaches Caddy rather than the loopback listener, and leave
+# panel.tls.enabled = false because Caddy already terminates TLS. The master
+# then validates the public certificate through web PKI and needs no pin; the
+# link token simply carries no fingerprint.
+#
+# Do not enable request-header logging on this site: the CSRF token travels in
+# a request header and the session cookie in another.

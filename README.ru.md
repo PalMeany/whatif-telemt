@@ -229,13 +229,21 @@ telemt [run|start|stop|reload|status] [OPTIONS] [config.toml]
 
 ## Документация
 
-Добавлено этим форком (на английском):
+Добавлено этим форком:
 
+- [Встроенная веб-панель](docs/Advanced_settings/PANEL.ru.md) — конфигурация,
+  роли, протокол федерации и свойства безопасности, на которые она опирается
+  ([английский](docs/Advanced_settings/PANEL.en.md))
+- [Парк узлов под одной панелью](docs/Setup_examples/PANEL_FLEET.ru.md) — три
+  узла с нуля, шаг за шагом
+  ([английский](docs/Setup_examples/PANEL_FLEET.en.md))
+- [`contrib/panel/`](contrib/panel/) — конфигурации панели для одиночного узла,
+  управляющего и краевого, плюс шаблоны Caddy и nginx
 - [Транспорт WEB-прокси](docs/Advanced_settings/WEB_PROXY.en.md) — конфигурация,
   режимы носителя, лимиты, наблюдаемость, эксплуатационные замечания и
-  осознанные отличия от эталонного релея
+  осознанные отличия от эталонного релея (на английском)
 - [Рунбук по развёртыванию](contrib/web/DEPLOY.md) — от чистого сервера до
-  работающего прокси, шаг за шагом
+  работающего прокси, шаг за шагом (на английском)
 - [`contrib/web/check-bridge-parity.sh`](contrib/web/check-bridge-parity.sh) —
   повторная сверка документа моста с чекаутом эталонного носителя
 - [CHANGES-FROM-UPSTREAM.md](CHANGES-FROM-UPSTREAM.md) — всё, что изменено с
@@ -257,7 +265,8 @@ telemt [run|start|stop|reload|status] [OPTIONS] [config.toml]
   [KDF Middle-End](docs/Architecture/Middle-end/KDF-internals/MIDDLE-END-KDF.ru.md)
 - Тюнинг: [высокие нагрузки](docs/Advanced_settings/HIGH_LOAD.ru.md) ·
   [настройка](docs/Advanced_settings/TUNING.ru.md)
-- Примеры настройки: [двойной хоп через VPS](docs/Setup_examples/VPS_DOUBLE_HOP.ru.md) ·
+- Примеры настройки: [парк узлов под панелью](docs/Setup_examples/PANEL_FLEET.ru.md) ·
+  [двойной хоп через VPS](docs/Setup_examples/VPS_DOUBLE_HOP.ru.md) ·
   [двойной хоп через Xray](docs/Setup_examples/XRAY_DOUBLE_HOP.ru.md) ·
   [маршрутизация Xray/sing-box](docs/Setup_examples/XRAY-SINGBOX-ROUTING.ru.md)
 - ЧаВо: [русский](docs/FAQ.ru.md) · [английский](docs/FAQ.en.md)

@@ -3711,11 +3711,15 @@ Fork-only control-plane surface.
 | `fork.api.bulk_enabled` | `bool` | `false` | `✘` |
 | `fork.api.bulk_max_operations` | `usize` | `100` (max `1000`) | `✘` |
 | `fork.api.bulk_timeout_secs` | `u16` | `10` (1..=14) | `✘` |
-# [panel]
+# panel
 
 Built-in web panel: an operator interface compiled into the binary that drives
 this node — and, with `[panel.cluster]`, a fleet of linked nodes — through the
 Control API. Disabled by default. Requires `server.api.enabled = true`.
+
+Not to be confused with `[fork.prometheus]`, which is also called a panel: that
+one serves a read-only metrics page on the metrics listener. The two sections
+are independent.
 
 | Key | Type | Default | Hot-Reload |
 | --- | ---- | ------- | ---------- |
@@ -3745,10 +3749,27 @@ Control API. Disabled by default. Requires `server.api.enabled = true`.
 | `tls` | Table | disabled | `✘` |
 | `cluster` | Table | disabled | `✘` |
 
-`[panel.tls]` accepts `enabled`, `cert_path`, and `key_path`. `[panel.cluster]`
-accepts `enabled`, `role`, `node_name`, `advertise_url`, `allow_from`,
-`request_timeout_ms`, `clock_skew_secs`, `nonce_capacity`, and
-`poll_interval_secs`.
+## panel.tls
+
+| Key | Type | Default | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `panel.tls.enabled` | `bool` | `false` | `✘` |
+| `panel.tls.cert_path` | `String` (path) | `""` | `✘` |
+| `panel.tls.key_path` | `String` (path) | `""` | `✘` |
+
+## panel.cluster
+
+| Key | Type | Default | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `panel.cluster.enabled` | `bool` | `false` | `✘` |
+| `panel.cluster.role` | `"standalone" \| "master" \| "agent" \| "master-agent"` | `"standalone"` | `✘` |
+| `panel.cluster.node_name` | `String` | hostname | `✘` |
+| `panel.cluster.advertise_url` | `String` (URL) | `""` | `✘` |
+| `panel.cluster.allow_from` | `CIDR[]` | `[]` | `✘` |
+| `panel.cluster.request_timeout_ms` | `u64` | `10000` (1000..=120000) | `✘` |
+| `panel.cluster.clock_skew_secs` | `u64` | `60` (5..=600) | `✘` |
+| `panel.cluster.nonce_capacity` | `usize` | `8192` (256..=1048576) | `✘` |
+| `panel.cluster.poll_interval_secs` | `u64` | `30` (5..=3600) | `✘` |
 
 The whole section is process-owned: the listener binds, the certificate loads,
 and the panel store opens once at start-up. A configuration reload reports

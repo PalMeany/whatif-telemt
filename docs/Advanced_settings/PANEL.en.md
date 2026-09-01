@@ -14,6 +14,35 @@ browser ──TLS──► panel (:8443) ──loopback──► Control API (:9
                     └──signed HTTPS──► agent panel ──loopback──► its own Control API
 ```
 
+> **Not the same thing as `[fork.prometheus]`.** That section serves one
+> read-only HTML page of metrics on the metrics listener, by default at the path
+> `/panel`. This section is the operator interface: a separate listener, its own
+> authentication, and write access to users and configuration. The two are
+> independent and can run together.
+
+`[panel]` is deliberately **not** under `[fork]`, unlike every other addition
+this fork makes. The reasoning is in
+[CHANGES-FROM-UPSTREAM.md](../../CHANGES-FROM-UPSTREAM.md#operator-features):
+the panel changes no proxy behaviour, so the `[fork]` kill switch has no reason
+to take an operator's administrative interface away with it.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [What the interface shows](#what-the-interface-shows)
+- [Federation](#federation)
+- [Roles](#roles)
+- [Security model](#security-model)
+- [Panel API](#panel-api)
+- [Building the interface](#building-the-interface)
+- [Operational notes](#operational-notes)
+- [Troubleshooting](#troubleshooting)
+
+Worked examples, including a three-node fleet built from scratch:
+[Setup_examples/PANEL_FLEET.en.md](../Setup_examples/PANEL_FLEET.en.md).
+Ready-to-edit configurations and front-proxy templates: [`contrib/panel/`](../../contrib/panel/).
+
 ## Quick start
 
 ```toml
@@ -114,6 +143,41 @@ fails at start-up rather than at the first request.
 `[panel]` is process-owned: the listener binds, the certificate loads, and the
 store opens once at start-up. A configuration reload reports `panel` under
 `deferred_process_fields`; applying a change needs a restart.
+
+## What the interface shows
+
+Every page reads the Control API of whatever node the switcher at the top of the
+sidebar names. Switching nodes replaces the data rather than merging it.
+
+| Page | Reads | Needs |
+| --- | --- | --- |
+| Overview | `/v1/stats/summary`, `/v1/health/ready`, plus a cross-node roll-up | — |
+| Users | `/v1/users` and the per-user verbs | — |
+| Traffic | `/v1/runtime/connections/summary`, `/v1/stats/zero/all`, `/v1/stats/users/active-ips` | `runtime_edge_enabled` for the leaderboards |
+| Middle-End | `/v1/runtime/me-pool-state`, `me-quality`, `me-selftest`, `/v1/stats/me-writers`, `/v1/stats/dcs`, `/v1/stats/minimal/all` | `general.use_middle_proxy` |
+| Upstreams | `/v1/stats/upstreams`, `/v1/runtime/upstream-quality` | — |
+| Security | `/v1/security/posture`, `/v1/security/whitelist`, `/v1/runtime/tls-fingerprints`, `/v1/runtime/nat-stun` | `runtime_edge_enabled` for fingerprints |
+| Runtime | `/v1/system/info`, `/v1/runtime/gates`, `/v1/runtime/initialization`, `/v1/limits/effective`, and the reload verbs | — |
+| Events | `/v1/runtime/events/recent` | `runtime_edge_enabled` |
+| Config | `/v1/config` | admin role |
+| Fleet, Operators, Audit, Settings | the panel's own store | — |
+
+Several of those endpoints answer
+`{ "enabled": false, "reason": "..." }` rather than a payload when the feature
+behind them is off. The panel renders the node's own reason instead of an empty
+table, so "nothing here" and "you did not switch it on" never look the same:
+
+```toml
+[server.api]
+enabled = true
+# Connection leaderboards, TLS fingerprints and the events feed.
+runtime_edge_enabled = true
+```
+
+Turning it on costs a bounded ring buffer and a cached aggregation on the
+Control API request path; it changes nothing on the data plane. `runtime_edge_top_n`
+sets how many rows the leaderboards carry and `runtime_edge_events_capacity` how
+many events the ring holds.
 
 ## Federation
 
@@ -238,7 +302,30 @@ no-store`. Over TLS it also carries `Strict-Transport-Security`.
 **Audit.** Every mutating action appends one JSON line whose SHA-256 covers both
 the record and its predecessor's hash. Deleting or editing a line breaks
 verification from that point on. **Audit → Verify chain** recomputes it across
-every retained segment. Reads are deliberately not recorded.
+every retained segment, including rotated ones. Reads are deliberately not
+recorded — they would drown the log the mutations live in, and every session that
+could issue one is already recorded.
+
+Each field in the pre-image is length-prefixed rather than newline-separated.
+Some of them carry text the caller chose — a submitted account name, a relayed
+path — and a separator that can appear inside a value would let two different
+records hash identically, which is the one property the chain exists to rule out.
+
+A submitted account name that matches **no** operator is never written to the
+log. Operators routinely paste a password into the account field, and a log that
+records whatever was submitted turns every such slip into a stored credential
+that anyone who can read the log can use. The record keeps `actor: "<unknown>"`
+and a twelve-character digest of the submitted name, which is still enough to
+correlate repeated attempts:
+
+```json
+{"seq":1,"actor":"<unknown>","action":"auth.login","result":"unknown_account",
+ "address":"203.0.113.9","detail":"submitted_name_digest=ffb3039dada4"}
+```
+
+Names that *do* match an account are recorded verbatim; an account name is not a
+secret. Every field is capped at 512 characters, so an attacker who can reach the
+login route cannot use the audit log as a write amplifier.
 
 **Files.** The store and the audit log are written through a same-directory
 temporary file and a rename, with `0600` permissions in a `0700` directory. The
@@ -321,3 +408,55 @@ npm --prefix panel-ui run dev   # proxies /panel/api to 127.0.0.1:8443
   a fresh bootstrap account. Every existing link has to be re-established.
 - Losing every administrator password means deleting `panel.json` and re-linking;
   there is no recovery path that does not go through the filesystem.
+
+## Troubleshooting
+
+**The process refuses to start.** Every panel misconfiguration is fatal at
+start-up rather than at first request, and the message names the key:
+
+| Message contains | Cause |
+| --- | --- |
+| `panel.enabled requires server.api.enabled` | The panel has no Control API to drive. |
+| `panel.trusted_proxies must name the TLS front proxy` | `listen` is not loopback and neither `panel.tls.enabled` nor an off-host trusted proxy is set. |
+| `panel.tls.cert_path is not a readable file` | Checked before the privilege drop; the path is wrong or the service account cannot read it. |
+| `failed to create panel data directory` | `data_dir` is not writable by the account the process dropped to. |
+| `panel listener could not bind` | Address already in use, or a privileged port without `CAP_NET_BIND_SERVICE`. |
+
+**The page loads but every request fails with `missing_client_header`.** Something
+between the browser and the panel is stripping `X-Telemt-Panel`. A front proxy
+that filters unknown request headers has to pass `X-Telemt-Panel`,
+`X-Telemt-Csrf` and `X-Telemt-Panel-Node` through.
+
+**Sign-in succeeds and the next request is `401`.** The session cookie is
+`Secure`, so it is dropped unless the browser considers the origin trustworthy.
+Reach the panel over HTTPS, or over `http://localhost` / `http://127.0.0.1`,
+which browsers treat as secure contexts. An off-host plaintext address will not
+work, and the configuration that produces one is refused anyway.
+
+**`cross_origin` on every request.** The `Origin` the browser sends does not
+match the `Host` the panel sees. A front proxy that rewrites `Host` has to send
+the public one — `proxy_set_header Host $host;` in nginx, which the template in
+[`contrib/panel/nginx.conf.example`](../../contrib/panel/nginx.conf.example) does.
+
+**A linked node shows `node_unreachable`.** Probe it from **Fleet → ⋯ → Probe
+now**; the error is the transport's own. Common causes, in order: the agent's
+`advertise_url` names an address the master cannot route to; the agent's
+certificate was replaced and no longer matches the pinned fingerprint (re-link,
+or clear the pin from **Fleet → ⋯**); `panel.cluster.allow_from` on the agent
+does not include the master's address.
+
+**`stale_timestamp` from an agent.** The two clocks differ by more than
+`panel.cluster.clock_skew_secs`. Fix the clocks; widening the window widens how
+long a captured request stays replayable.
+
+**`unknown_node` from an agent that is definitely linked.** The agent's link key
+was rotated, or its `panel.json` was recreated and it has a new identity. Both
+require re-linking from the master with a fresh token.
+
+**The interface is blank and the API works.** The binary was built without
+`panel-ui/dist`. `GET /panel/api/bootstrap` reports `"bundled_ui": false`, and
+the shell says so instead of serving a blank page.
+
+**Everything is read-only although the account is an admin.** The node's Control
+API is in read-only mode. Check `server.api.read_only`, which the Security page
+also reports under Posture.
