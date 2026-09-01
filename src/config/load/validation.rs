@@ -182,3 +182,48 @@ pub(super) fn normalize_upstream_family_policy(config: &mut ProxyConfig) {
         }
     }
 }
+
+/// Refuses a panel that has no Control API to drive.
+///
+/// The panel is a client of `[server.api]`: every node view, every user
+/// mutation, and every reload it offers is a Control API call. Enabling the
+/// panel while that listener is off produces a login screen behind which
+/// nothing works, which is the failure operators cannot see from the outside.
+pub(super) fn validate_panel_requires_control_api(config: &ProxyConfig) -> Result<()> {
+    if !config.panel.enabled {
+        return Ok(());
+    }
+    if !config.server.api.enabled {
+        return Err(ProxyError::Config(
+            "panel.enabled requires server.api.enabled = true: the panel drives this node through \
+             its own Control API"
+                .to_string(),
+        ));
+    }
+    if config.panel.control_api_url.is_empty() {
+        let listen = config
+            .server
+            .api
+            .listen
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| {
+                ProxyError::Config(
+                    "panel.enabled requires a valid server.api.listen, or an explicit \
+                     panel.control_api_url"
+                        .to_string(),
+                )
+            })?;
+        if listen.port() == 0 {
+            return Err(ProxyError::Config(
+                "panel.enabled requires server.api.listen to name a non-zero port".to_string(),
+            ));
+        }
+    }
+    if config.server.api.read_only {
+        warn!(
+            "server.api.read_only is set: the panel will render every view but refuse every \
+             mutation"
+        );
+    }
+    Ok(())
+}

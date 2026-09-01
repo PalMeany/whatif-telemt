@@ -26,6 +26,9 @@ Added here, and described in full in
 - the **WEB proxy transport** — MTProto carried inside an app-owned WebView over
   a carrier that looks like an ordinary HTTPS website, with streams terminated
   in-process rather than handed to a separate MTProxy over loopback TCP;
+- the **built-in web panel** — an operator interface compiled into the binary,
+  with roles, second factors, a hash-chained audit log, and signed node-to-node
+  federation so one server drives a fleet of others;
 - **conformance and hardening work** on that transport: every refusal is
   indistinguishable from an ordinary 404 in body, headers, timing and connection
   state; the bridge document is pinned by SHA-256 against the reference carrier;
@@ -224,6 +227,8 @@ Added by this fork:
 - [WEB proxy transport](docs/Advanced_settings/WEB_PROXY.en.md) — configuration,
   carrier modes, limits, observability, operational notes, and the deliberate
   differences from the reference relay
+- [Built-in web panel](docs/Advanced_settings/PANEL.en.md) — configuration,
+  roles, the federation protocol, and the security properties it relies on
 - [Deployment runbook](contrib/web/DEPLOY.md) — a clean server to a working
   proxy, step by step
 - [`contrib/web/check-bridge-parity.sh`](contrib/web/check-bridge-parity.sh) —

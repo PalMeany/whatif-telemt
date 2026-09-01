@@ -4,3 +4,4 @@
 
 mod fork_tests;
 mod fork_web_tests;
+mod panel_tests;

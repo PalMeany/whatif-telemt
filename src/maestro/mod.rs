@@ -1032,6 +1032,12 @@ async fn run_telemt_core(
         error!(%error, "WEB proxy configuration is invalid. Exiting.");
         std::process::exit(1);
     }
+    // Same reason as the WEB relay's preflight: the panel's certificate and
+    // data directory have to be reachable while the process can still say so.
+    if let Err(error) = crate::panel::preflight(&config) {
+        error!(%error, "Panel configuration is invalid. Exiting.");
+        std::process::exit(1);
+    }
 
     // On Unix, caller supplies privilege drop after bind (may require root for port < 1024).
     drop_after_bind();
@@ -1088,6 +1094,16 @@ async fn run_telemt_core(
         // without it leaves the unit green while every client gets the front
         // proxy's 502, which is the failure operators cannot see.
         error!(%error, "WEB proxy failed to start. Exiting.");
+        std::process::exit(1);
+    }
+
+    // The panel reads every node view back through the Control API per request,
+    // so it follows configuration reloads exactly as the API listener does.
+    if let Err(error) = crate::panel::start(&config, web_config_dir.as_deref()).await {
+        // `panel.enabled = true` is a request for an operator interface, and a
+        // panel that silently did not bind is indistinguishable from one an
+        // operator simply cannot reach.
+        error!(%error, "Panel failed to start. Exiting.");
         std::process::exit(1);
     }
 

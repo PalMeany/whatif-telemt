@@ -132,6 +132,7 @@ async fn perform_shutdown(
     web_ingress.shutdown().await;
     crate::fork::web::shutdown();
     crate::fork::telegram::shutdown();
+    crate::panel::shutdown();
 
     // Graceful ME pool shutdown
     runtime.stop_sessions().await;

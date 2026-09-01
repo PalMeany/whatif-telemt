@@ -13,6 +13,7 @@ use crate::error::{ProxyError, Result};
 
 use super::defaults::*;
 use super::fork::ForkConfig;
+use super::panel::PanelConfig;
 use super::types::*;
 
 // Domain names, mask targets, and legacy scalar normalization helpers.
@@ -46,7 +47,7 @@ pub(crate) use self::runtime_auth::UserAuthSnapshot;
 use self::strict_keys::handle_unknown_config_keys;
 use self::validation::{
     normalize_upstream_family_policy, validate_listener_runtime_profiles, validate_logging_config,
-    validate_network_cfg, validate_upstreams,
+    validate_network_cfg, validate_panel_requires_control_api, validate_upstreams,
 };
 
 const MAX_ME_WRITER_CMD_CHANNEL_CAPACITY: usize = 16_384;
@@ -113,6 +114,13 @@ pub struct ProxyConfig {
     /// its exact meaning here.
     #[serde(default)]
     pub fork: ForkConfig,
+
+    /// Built-in web panel.
+    ///
+    /// A control-plane surface only: it drives this node, and any node linked
+    /// into it, through the Control API in `[server.api]`.
+    #[serde(default)]
+    pub panel: PanelConfig,
 
     /// Timeout values used by client, fallback, and upstream operations.
     #[serde(default)]
@@ -253,6 +261,8 @@ impl ProxyConfig {
 
         validate_logging_config(&self.logging)?;
         self.fork.validate(self.telemt_web_requested())?;
+        self.panel.validate()?;
+        validate_panel_requires_control_api(self)?;
 
         if !self.general.modes.classic && !self.general.modes.secure && !self.general.modes.tls {
             return Err(ProxyError::Config("No modes enabled".to_string()));

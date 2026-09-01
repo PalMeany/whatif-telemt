@@ -16,6 +16,10 @@ pub(super) fn load_source_graph(graph: ConfigSourceGraph) -> Result<LoadedConfig
     // Fork-only features validate themselves; the rest of the document is
     // stock telemt and was already checked above.
     config.fork.validate(config.telemt_web_requested())?;
+    // The panel is a client of `[server.api]`, so it is checked after the
+    // server section has settled and before the effective values are applied.
+    config.panel.validate()?;
+    validate_panel_requires_control_api(&config)?;
     effective::apply(&mut config)?;
     Ok(LoadedConfig {
         config,

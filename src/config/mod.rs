@@ -4,6 +4,7 @@ pub(crate) mod defaults;
 pub mod fork;
 pub mod hot_reload;
 mod load;
+mod panel;
 mod types;
 
 #[cfg(test)]
@@ -15,4 +16,5 @@ pub use fork::{
 };
 pub use load::ProxyConfig;
 pub(crate) use load::{ConfigSourceGraph, LoadedConfig};
+pub use panel::*;
 pub use types::*;
