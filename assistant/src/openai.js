@@ -147,9 +147,15 @@ export function normaliseRequest(body) {
   };
 }
 
+let completionCounter = 0;
+
 function completionId() {
-  // Not a security value — it only has to be unique enough to correlate logs.
-  return `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+  // Not a security value — it only has to be unique enough to correlate logs,
+  // which is why it does not reach for `crypto`: that global is unflagged only
+  // from Node 19, and the Yandex runtime this also targets is Node 18.
+  completionCounter = (completionCounter + 1) % 0xffff;
+  const random = Math.floor(Math.random() * 0xffffffff).toString(16);
+  return `chatcmpl-${Date.now().toString(36)}${random}${completionCounter.toString(36)}`;
 }
 
 function finishReason(stopReason) {

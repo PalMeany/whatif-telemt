@@ -27,11 +27,19 @@ concurrency:
 
 jobs:
   check:
-    name: Check
+    name: Check (node ${{ matrix.node }})
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 is what Yandex Cloud Functions runs, so it is the floor this app
+        # has to hold. 22 is what wrangler requires, and what the Workers and
+        # Vercel builds use.
+        node: ['18', '22']
 
     defaults:
       run:
@@ -42,7 +50,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: assistant/package-lock.json
 
@@ -52,5 +60,7 @@ jobs:
       # upstream. No credential is involved and nothing leaves the runner.
       - run: npm run check
 
+      # Wrangler needs Node 22, and the bundle only has to be proven once.
       - name: Bundle for Cloudflare Workers
+        if: matrix.node == '22'
         run: npx wrangler deploy --dry-run --outdir /tmp/worker-bundle
