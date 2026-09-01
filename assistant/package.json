@@ -1,0 +1,24 @@
+{
+  "name": "telemt-assistant",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenAI-compatible endpoint and mini-site for a Claude-backed telemt assistant",
+  "main": "adapters/yandex.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy:cloudflare": "wrangler deploy",
+    "deploy:vercel": "vercel deploy --prod",
+    "package:yandex": "rm -f yandex-function.zip && npm ci --omit=dev && zip -qr yandex-function.zip adapters src package.json node_modules && echo 'yandex-function.zip ready'",
+    "check": "node tools/generate-schema.mjs --check && node --check src/app.js && node --check src/upstream.js && node --check src/openai.js && node --check src/knowledge.js && node --check src/auth.js && node --check src/site.js && node --check src/schema.js && node --check adapters/cloudflare.js && node --check adapters/vercel.js && node --check adapters/yandex.js && node --check api/index.js && node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
