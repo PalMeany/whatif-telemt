@@ -1,0 +1,56 @@
+name: Assistant
+
+# The assistant is a separate JavaScript app in this repository; the Rust jobs
+# do not see it. This runs only when it changes, and its schema check is the
+# reason it exists: `assistant/src/schema.js` is generated from the proxy's own
+# strict-key tables, and a key renamed in Rust has to fail here rather than
+# silently teach the assistant a key that no longer exists.
+on:
+  push:
+    branches: [ "*" ]
+    paths:
+      - 'assistant/**'
+      - 'src/config/load/strict_keys.rs'
+      - 'src/config/load/strict_keys/**'
+      - '.github/workflows/assistant.yml'
+  pull_request:
+    branches: [ "*" ]
+    paths:
+      - 'assistant/**'
+      - 'src/config/load/strict_keys.rs'
+      - 'src/config/load/strict_keys/**'
+      - '.github/workflows/assistant.yml'
+
+concurrency:
+  group: assistant-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: assistant
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: assistant/package-lock.json
+
+      - run: npm ci
+
+      # Schema drift, syntax, and the end-to-end suite against a stand-in
+      # upstream. No credential is involved and nothing leaves the runner.
+      - run: npm run check
+
+      - name: Bundle for Cloudflare Workers
+        run: npx wrangler deploy --dry-run --outdir /tmp/worker-bundle

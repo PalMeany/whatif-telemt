@@ -1,0 +1,28 @@
+# Cloudflare Workers deployment.
+#
+#   npx wrangler secret put UPSTREAM_API_KEY
+#   npx wrangler secret put ASSISTANT_API_KEYS
+#   npx wrangler deploy
+#
+# Secrets never belong in this file — `[vars]` is committed, `wrangler secret`
+# is not.
+
+name = "telemt-assistant"
+main = "adapters/cloudflare.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+# Point this at your router. Leave it unset to use api.anthropic.com.
+# UPSTREAM_BASE_URL = "https://router.example.com"
+# UPSTREAM_KIND = "anthropic"        # anthropic | openai
+# UPSTREAM_MODEL = "claude-opus-5"
+UPSTREAM_EFFORT = "high"
+UPSTREAM_MAX_TOKENS = "16000"
+UPSTREAM_SHOW_THINKING = "false"
+
+# Best-effort, per-isolate. Use Cloudflare Rate Limiting rules for a real one.
+ASSISTANT_RATE_LIMIT = "30"
+ASSISTANT_RATE_WINDOW_SECS = "60"
+
+[observability]
+enabled = true
