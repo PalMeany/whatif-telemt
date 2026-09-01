@@ -1,0 +1,80 @@
+# telemt with the built-in web panel — single node.
+#
+# One machine, one operator interface, no federation. The panel listens on
+# loopback and a TLS front proxy publishes it; see Caddyfile.example or
+# nginx.conf.example next to this file.
+#
+# Install as /etc/telemt/config.toml and replace every value marked CHANGE ME.
+# Full reference: docs/Advanced_settings/PANEL.en.md
+
+[general]
+use_middle_proxy = true
+log_level = "normal"
+
+[general.modes]
+classic = false
+secure = false
+tls = true
+
+[general.links]
+show = "*"
+# The host clients put in their app. Also what the panel renders in the
+# per-user link dialog, so it is worth setting even on a single node.
+# public_host = "proxy.example.com"   # CHANGE ME
+
+[server]
+port = 443
+
+# The panel drives this node through the Control API and nothing else, so the
+# API stays on loopback. Do not publish it: it has no TLS of its own and one
+# static bearer, where the panel has sessions, roles and an audit log.
+[server.api]
+enabled = true
+listen = "127.0.0.1:9091"
+whitelist = ["127.0.0.1/32", "::1/128"]
+# Generate with: head -c 32 /dev/urandom | base64
+auth_header = "Bearer CHANGE_ME_LONG_RANDOM_STRING"
+# Connection leaderboards, TLS fingerprints and the events feed. Costs a
+# bounded ring buffer and a cached aggregation on the API request path; it
+# changes nothing on the data plane.
+runtime_edge_enabled = true
+
+[[server.listeners]]
+ip = "0.0.0.0"
+
+[censorship]
+tls_domain = "petrovich.ru"          # CHANGE ME
+mask = true
+tls_emulation = true
+tls_front_dir = "tlsfront"
+
+[access.users]
+# format: "username" = "32 hex characters"
+# Leave this with one bootstrap user and create the rest from the panel, which
+# generates the secret and shows it once.
+hello = "00000000000000000000000000000000"   # CHANGE ME
+
+# === Built-in web panel ===
+[panel]
+enabled = true
+# Loopback: the front proxy in this directory publishes it. Binding a routable
+# address without panel.tls.enabled is refused at start-up.
+listen = "127.0.0.1:8443"
+# Store, audit log and the first-start credential. Must be writable by the
+# service account, and is created after the privilege drop.
+data_dir = "/etc/telemt/panel"
+# The address the front proxy reaches the panel from. Only a proxy named here
+# may assert a client address with X-Forwarded-For.
+trusted_proxies = ["127.0.0.0/8", "::1/128"]
+
+# Require a second factor for every operator. Leave it off until the first
+# administrator has enrolled one, or the panel will demand enrolment on the
+# same screen that demands the first password change.
+require_totp = false
+
+# Bounds worth reviewing before a panel is reachable from outside the host.
+session_ttl_secs = 43200
+session_idle_timeout_secs = 1800
+login_max_attempts = 5
+login_lockout_secs = 900
+password_min_length = 12

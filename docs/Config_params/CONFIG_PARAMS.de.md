@@ -37,6 +37,7 @@ Dieses Dokument listet alle Konfigurationsschlüssel auf, die `config.toml` akze
  - [upstreams](#upstreams)
  - [web](#web)
  - [fork](#fork)
+ - [panel](#panel)
 
 # Schlüssel auf oberster Ebene
 
@@ -3731,3 +3732,76 @@ Fork-only control-plane surface.
 | `fork.api.bulk_enabled` | `bool` | `false` | `✘` |
 | `fork.api.bulk_max_operations` | `usize` | `100` (max `1000`) | `✘` |
 | `fork.api.bulk_timeout_secs` | `u16` | `10` (1..=14) | `✘` |
+
+# panel
+
+Das eingebaute Web-Panel: eine Betreiberoberfläche, die in die Binärdatei
+kompiliert ist. Sie steuert diesen Knoten — und mit `[panel.cluster]` einen
+Verbund verknüpfter Knoten — über die Control API. Standardmäßig deaktiviert.
+Erfordert `server.api.enabled = true`.
+
+Nicht zu verwechseln mit `[fork.prometheus]`, das ebenfalls Panel heißt: jenes
+liefert eine schreibgeschützte Metrikseite am Metrics-Listener. Beide Abschnitte
+sind unabhängig voneinander.
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `enabled` | `bool` | `false` | `✘` |
+| `listen` | `String` (`ip:port`) | `"127.0.0.1:8443"` | `✘` |
+| `data_dir` | `String` (Pfad) | `<Konfigurationsverzeichnis>/panel` | `✘` |
+| `whitelist` | `CIDR[]` | `[]` (jede Quelle) | `✘` |
+| `trusted_proxies` | `CIDR[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `control_api_url` | `String` (URL) | aus `server.api.listen` abgeleitet | `✘` |
+| `control_api_token` | `String` | `server.api.auth_header` | `✘` |
+| `session_ttl_secs` | `u64` | `43200` | `✘` |
+| `session_idle_timeout_secs` | `u64` | `1800` | `✘` |
+| `max_sessions_per_operator` | `usize` | `8` | `✘` |
+| `max_sessions_total` | `usize` | `512` | `✘` |
+| `login_max_attempts` | `u32` | `5` | `✘` |
+| `login_lockout_secs` | `u64` | `900` | `✘` |
+| `password_min_length` | `usize` | `12` | `✘` |
+| `password_hash_iterations` | `u32` | `600000` | `✘` |
+| `require_totp` | `bool` | `false` | `✘` |
+| `request_body_limit_bytes` | `usize` | `262144` | `✘` |
+| `max_connections` | `usize` | `256` | `✘` |
+| `header_read_timeout_ms` | `u64` | `10000` | `✘` |
+| `request_timeout_ms` | `u64` | `30000` | `✘` |
+| `audit_enabled` | `bool` | `true` | `✘` |
+| `audit_retention_days` | `u64` | `90` | `✘` |
+| `audit_max_bytes` | `u64` | `67108864` | `✘` |
+| `tls` | Tabelle | deaktiviert | `✘` |
+| `cluster` | Tabelle | deaktiviert | `✘` |
+
+## panel.tls
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `panel.tls.enabled` | `bool` | `false` | `✘` |
+| `panel.tls.cert_path` | `String` (Pfad) | `""` | `✘` |
+| `panel.tls.key_path` | `String` (Pfad) | `""` | `✘` |
+
+## panel.cluster
+
+| Schlüssel | Typ | Standard | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `panel.cluster.enabled` | `bool` | `false` | `✘` |
+| `panel.cluster.role` | `"standalone" \| "master" \| "agent" \| "master-agent"` | `"standalone"` | `✘` |
+| `panel.cluster.node_name` | `String` | Hostname | `✘` |
+| `panel.cluster.advertise_url` | `String` (URL) | `""` | `✘` |
+| `panel.cluster.allow_from` | `CIDR[]` | `[]` | `✘` |
+| `panel.cluster.request_timeout_ms` | `u64` | `10000` (1000..=120000) | `✘` |
+| `panel.cluster.clock_skew_secs` | `u64` | `60` (5..=600) | `✘` |
+| `panel.cluster.nonce_capacity` | `usize` | `8192` (256..=1048576) | `✘` |
+| `panel.cluster.poll_interval_secs` | `u64` | `30` (5..=3600) | `✘` |
+
+Der gesamte Abschnitt gehört dem Prozess: Listener, Zertifikat und Panel-Store
+werden einmalig beim Start eingerichtet. Ein Konfigurations-Reload meldet
+`panel` unter `deferred_process_fields`; das Anwenden erfordert einen Neustart.
+
+Ein nicht auf Loopback gebundenes `listen` ohne `panel.tls.enabled` wird
+abgelehnt, sofern `trusted_proxies` nicht den vorgelagerten TLS-Proxy nennt —
+andernfalls liefen Sitzungscookie und jedes angezeigte Geheimnis im Klartext.
+
+Alle Schlüssel, das Rollenmodell, das Föderationsprotokoll und die
+Sicherheitseigenschaften sind in
+[Built-in Web Panel](../Advanced_settings/PANEL.en.md) dokumentiert.

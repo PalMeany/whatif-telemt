@@ -229,6 +229,12 @@ Added by this fork:
   differences from the reference relay
 - [Built-in web panel](docs/Advanced_settings/PANEL.en.md) — configuration,
   roles, the federation protocol, and the security properties it relies on
+  ([in Russian](docs/Advanced_settings/PANEL.ru.md))
+- [A fleet behind one panel](docs/Setup_examples/PANEL_FLEET.en.md) — three
+  nodes from scratch, step by step
+  ([in Russian](docs/Setup_examples/PANEL_FLEET.ru.md))
+- [`contrib/panel/`](contrib/panel/) — panel configurations for a single node, a
+  control node and an edge node, plus Caddy and nginx templates
 - [Deployment runbook](contrib/web/DEPLOY.md) — a clean server to a working
   proxy, step by step
 - [`contrib/web/check-bridge-parity.sh`](contrib/web/check-bridge-parity.sh) —
