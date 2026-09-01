@@ -169,3 +169,32 @@ hello = "00000000000000000000000000000000"
 # port = 8080
 # transport = "web"
 # web_trusted_proxy_cidrs = ["127.0.0.0/8"]
+
+# === Built-in Web Panel ===
+# Operator interface compiled into the binary. It drives this node through the
+# Control API in [server.api], and — with [panel.cluster] — a fleet of others.
+# Unrelated to [fork.prometheus], which is a read-only metrics page.
+# Full reference: docs/Advanced_settings/PANEL.en.md
+# [panel]
+# enabled = true
+# listen = "127.0.0.1:8443"          # keep on loopback behind a TLS front proxy
+# data_dir = ""                      # defaults to <config dir>/panel
+# whitelist = []                     # optional source allowlist
+# trusted_proxies = ["127.0.0.0/8", "::1/128"]
+# require_totp = false               # force a second factor for every operator
+# session_idle_timeout_secs = 1800
+# login_max_attempts = 5
+
+# Terminate TLS in-process instead of behind a front proxy.
+# [panel.tls]
+# enabled = true
+# cert_path = "/etc/telemt/panel/fullchain.pem"
+# key_path = "/etc/telemt/panel/privkey.pem"
+
+# Link nodes together: one master drives every linked agent.
+# [panel.cluster]
+# enabled = true
+# role = "master"                    # standalone | master | agent | master-agent
+# node_name = "control"
+# advertise_url = "https://node.example.com:8443"  # agents only
+# allow_from = []                    # CIDRs allowed to reach /cluster/v1

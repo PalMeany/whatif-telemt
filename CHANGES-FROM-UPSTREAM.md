@@ -164,8 +164,9 @@ is refused rather than guessed at.
 
 ## Operator features
 
-Three additions that upstream does not have, all off by default and all under
-`[fork]`:
+Four additions that upstream does not have, all off by default. Three live
+under `[fork]`; the panel is deliberately top-level, for the reason given in
+its entry below:
 
 - **A built-in Prometheus panel** (`src/fork/prometheus/**`): one self-contained
   HTML document served next to the exposition this process already renders. It
@@ -192,6 +193,25 @@ Three additions that upstream does not have, all off by default and all under
   and each write invalidates the caller's revision for the next request.
   Batches are atomic by default and refusals carry the same stable codes the
   single-operation routes use.
+- **A built-in web panel** (`src/panel/**`, `src/config/panel/**`,
+  `panel-ui/**`): an operator interface compiled into the binary — an embedded
+  single-page application, a JSON API of its own, and a signed node-to-node
+  endpoint that lets one node drive a fleet of others. It is a *client* of the
+  Control API: every number it renders and every change it makes is a call to
+  `[server.api]` on the node in question, nothing is cached between requests,
+  and no proxy or protocol behaviour changes when it is on. Roles, RFC 6238
+  second factors, a length-prefixed hash-chained audit log, a custom-header plus
+  double-submit CSRF gate and two-dimension login throttling are all part of the
+  surface, and it adds no Rust dependency: PBKDF2, TOTP, PEM decoding and the
+  HTTP client are assembled from crates the proxy already uses.
+
+  Its configuration is `[panel]` rather than `[fork.panel]`, unlike everything
+  else here. The `[fork]` kill switch exists so one key turns off every
+  behaviour that makes this build differ from stock telemt; the panel changes no
+  such behaviour, and having `[fork] enabled = false` silently take away an
+  operator's administrative interface is a worse failure than the inconsistency.
+  It sits next to `[server.api]`, which it drives and which is top-level for the
+  same reason.
 
 ---
 
@@ -232,6 +252,13 @@ Three additions that upstream does not have, all off by default and all under
   [docs/Fork/FORK_CONFIG.ru.md](docs/Fork/FORK_CONFIG.ru.md).
 - **Встроенная панель Prometheus, Telegram-бот администратора и bulk-запросы к
   API** — все выключены по умолчанию и настраиваются в `[fork]`.
+- **Встроенная веб-панель** (`[panel]`, выключена по умолчанию): интерфейс
+  оператора, вкомпилированный в бинарник — роли, второй фактор, журнал аудита с
+  цепочкой хэшей и подписанная федерация узлов, при которой один сервер
+  управляет остальными. Панель — клиент Control API: она ничего не кэширует и
+  не меняет поведение прокси, поэтому её раздел вынесен на верхний уровень
+  рядом с `[server.api]`, а не под `[fork]`. Справочник —
+  [docs/Advanced_settings/PANEL.en.md](docs/Advanced_settings/PANEL.en.md).
 - **Инструменты развёртывания**: пошаговый рунбук
   ([contrib/web/DEPLOY.md](contrib/web/DEPLOY.md)), шаблоны фронт-прокси для
   Caddy и nginx, Dockerfile для сборки из исходников и неинтерактивный

@@ -53,6 +53,9 @@ fn known_config_keys_for_suggestion() -> Vec<&'static str> {
         TELEMETRY_CONFIG_KEYS,
         LINKS_CONFIG_KEYS,
         LOGGING_CONFIG_KEYS,
+        PANEL_CONFIG_KEYS,
+        PANEL_TLS_CONFIG_KEYS,
+        PANEL_CLUSTER_CONFIG_KEYS,
     ] {
         keys.extend_from_slice(group);
     }
@@ -259,6 +262,27 @@ pub(super) fn collect_unknown_config_keys(parsed_toml: &toml::Value) -> Vec<Unkn
         &known_for_suggestion,
         &["web", "debug"],
         WEB_DEBUG_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["panel"],
+        PANEL_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["panel", "tls"],
+        PANEL_TLS_CONFIG_KEYS,
+    );
+    check_known_table(
+        parsed_toml,
+        &mut unknown,
+        &known_for_suggestion,
+        &["panel", "cluster"],
+        PANEL_CLUSTER_CONFIG_KEYS,
     );
     check_fork_tables(parsed_toml, &mut unknown, &known_for_suggestion);
     check_known_table(

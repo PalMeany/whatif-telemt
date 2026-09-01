@@ -21,6 +21,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "beobachten_flush_secs",
     "beobachten_file",
     "include",
+    "panel",
 ];
 
 const GENERAL_CONFIG_KEYS: &[&str] = &[
@@ -480,6 +481,48 @@ const LOGGING_CONFIG_KEYS: &[&str] = &[
     "max_size_bytes",
     "max_files",
     "max_age_secs",
+];
+
+const PANEL_CONFIG_KEYS: &[&str] = &[
+    "enabled",
+    "listen",
+    "data_dir",
+    "whitelist",
+    "trusted_proxies",
+    "control_api_url",
+    "control_api_token",
+    "session_ttl_secs",
+    "session_idle_timeout_secs",
+    "max_sessions_per_operator",
+    "max_sessions_total",
+    "login_max_attempts",
+    "login_lockout_secs",
+    "password_min_length",
+    "password_hash_iterations",
+    "require_totp",
+    "request_body_limit_bytes",
+    "max_connections",
+    "header_read_timeout_ms",
+    "request_timeout_ms",
+    "audit_enabled",
+    "audit_retention_days",
+    "audit_max_bytes",
+    "tls",
+    "cluster",
+];
+
+const PANEL_TLS_CONFIG_KEYS: &[&str] = &["enabled", "cert_path", "key_path"];
+
+const PANEL_CLUSTER_CONFIG_KEYS: &[&str] = &[
+    "enabled",
+    "role",
+    "node_name",
+    "advertise_url",
+    "allow_from",
+    "request_timeout_ms",
+    "clock_skew_secs",
+    "nonce_capacity",
+    "poll_interval_secs",
 ];
 
 // Recursive table traversal and key suggestion logic.

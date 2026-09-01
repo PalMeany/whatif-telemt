@@ -42,6 +42,7 @@ mod logging;
 mod maestro;
 mod metrics;
 mod network;
+mod panel;
 mod protocol;
 mod proxy;
 mod quota_state;

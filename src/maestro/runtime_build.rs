@@ -410,6 +410,11 @@ pub(crate) fn deferred_process_fields(
     if serde_json::to_value(&old.logging).ok() != serde_json::to_value(&new.logging).ok() {
         fields.push("logging".to_string());
     }
+    // The panel binds its listener, loads its certificate, and opens its store
+    // once at start-up, exactly like the API listener above.
+    if old.panel != new.panel {
+        fields.push("panel".to_string());
+    }
     fields
 }
 

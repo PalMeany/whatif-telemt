@@ -37,6 +37,7 @@ This document lists all configuration keys accepted by `config.toml`.
  - [upstreams](#upstreams)
  - [web](#web)
  - [fork](#fork)
+ - [panel](#panel)
 
 # Top-level keys
 
@@ -3710,3 +3711,52 @@ Fork-only control-plane surface.
 | `fork.api.bulk_enabled` | `bool` | `false` | `✘` |
 | `fork.api.bulk_max_operations` | `usize` | `100` (max `1000`) | `✘` |
 | `fork.api.bulk_timeout_secs` | `u16` | `10` (1..=14) | `✘` |
+# [panel]
+
+Built-in web panel: an operator interface compiled into the binary that drives
+this node — and, with `[panel.cluster]`, a fleet of linked nodes — through the
+Control API. Disabled by default. Requires `server.api.enabled = true`.
+
+| Key | Type | Default | Hot-Reload |
+| --- | ---- | ------- | ---------- |
+| `enabled` | `bool` | `false` | `✘` |
+| `listen` | `String` (`ip:port`) | `"127.0.0.1:8443"` | `✘` |
+| `data_dir` | `String` (path) | `<config dir>/panel` | `✘` |
+| `whitelist` | `CIDR[]` | `[]` (any source) | `✘` |
+| `trusted_proxies` | `CIDR[]` | `["127.0.0.0/8", "::1/128"]` | `✘` |
+| `control_api_url` | `String` (URL) | derived from `server.api.listen` | `✘` |
+| `control_api_token` | `String` | `server.api.auth_header` | `✘` |
+| `session_ttl_secs` | `u64` | `43200` | `✘` |
+| `session_idle_timeout_secs` | `u64` | `1800` | `✘` |
+| `max_sessions_per_operator` | `usize` | `8` | `✘` |
+| `max_sessions_total` | `usize` | `512` | `✘` |
+| `login_max_attempts` | `u32` | `5` | `✘` |
+| `login_lockout_secs` | `u64` | `900` | `✘` |
+| `password_min_length` | `usize` | `12` | `✘` |
+| `password_hash_iterations` | `u32` | `600000` | `✘` |
+| `require_totp` | `bool` | `false` | `✘` |
+| `request_body_limit_bytes` | `usize` | `262144` | `✘` |
+| `max_connections` | `usize` | `256` | `✘` |
+| `header_read_timeout_ms` | `u64` | `10000` | `✘` |
+| `request_timeout_ms` | `u64` | `30000` | `✘` |
+| `audit_enabled` | `bool` | `true` | `✘` |
+| `audit_retention_days` | `u64` | `90` | `✘` |
+| `audit_max_bytes` | `u64` | `67108864` | `✘` |
+| `tls` | Table | disabled | `✘` |
+| `cluster` | Table | disabled | `✘` |
+
+`[panel.tls]` accepts `enabled`, `cert_path`, and `key_path`. `[panel.cluster]`
+accepts `enabled`, `role`, `node_name`, `advertise_url`, `allow_from`,
+`request_timeout_ms`, `clock_skew_secs`, `nonce_capacity`, and
+`poll_interval_secs`.
+
+The whole section is process-owned: the listener binds, the certificate loads,
+and the panel store opens once at start-up. A configuration reload reports
+`panel` under `deferred_process_fields`, and applying a change needs a restart.
+
+A non-loopback `listen` without `panel.tls.enabled` is refused unless
+`trusted_proxies` names an off-host front proxy, because the session cookie and
+every rendered secret would otherwise travel in plaintext.
+
+Every key, the role model, the federation protocol, and the security properties
+are documented in [Built-in Web Panel](../Advanced_settings/PANEL.en.md).

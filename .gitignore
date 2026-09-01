@@ -24,3 +24,8 @@ proxy-secret
 coverage-html/
 # macOS Finder metadata
 .DS_Store
+# Panel UI build inputs. The built bundle in panel-ui/dist is committed so a
+# plain `cargo build` produces a binary with the interface embedded.
+panel-ui/node_modules/
+panel-ui/.vite/
+panel-ui/*.tsbuildinfo
