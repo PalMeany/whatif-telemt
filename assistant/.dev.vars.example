@@ -1,0 +1,22 @@
+# Local development values for `npx wrangler dev`.
+#
+#   cp .dev.vars.example .dev.vars
+#
+# .dev.vars is gitignored. For a deployed Worker these live in
+# `wrangler secret put` (credentials) and `[vars]` in wrangler.toml (the rest).
+
+# --- Your router -------------------------------------------------------------
+# An OpenAI-compatible router (OpenRouter, LiteLLM, anything speaking
+# /v1/chat/completions):
+UPSTREAM_KIND = "openai"
+UPSTREAM_BASE_URL = "https://router.example.com"
+UPSTREAM_MODEL = "anthropic/claude-opus-5"
+UPSTREAM_API_KEY = "your-router-key"
+
+# A router speaking the Anthropic Messages API instead — drop UPSTREAM_KIND and
+# set the base URL to it. Leave both unset to use api.anthropic.com directly.
+
+# --- Who may call this deployment --------------------------------------------
+# Comma-separated. Without this (and without ASSISTANT_PUBLIC) it answers
+# nothing, on purpose.
+ASSISTANT_API_KEYS = "pick-a-long-random-string"

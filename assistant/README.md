@@ -22,20 +22,46 @@ against Web APIs only, and each platform gets a three-line adapter.
 ```bash
 npm install
 npm run check          # syntax + 26 end-to-end tests, no credential needed
+npm run doctor         # checks your router: reachable, key, model id
 ```
+
+`doctor` reads `.dev.vars` and then the environment, makes one small request,
+and reports what is wrong in words — a wrong model id and an unreachable base
+URL look identical as a 502 from a deployed Worker.
 
 Then pick a target.
 
 ### Cloudflare Workers
 
 ```bash
-npx wrangler secret put UPSTREAM_API_KEY
-npx wrangler secret put ASSISTANT_API_KEYS
+cd assistant
+npm install
+npx wrangler login                # once, opens a browser
+
+cp .dev.vars.example .dev.vars    # fill in your router and a key
+npm run doctor                    # proves the router answers before you deploy
+npx wrangler dev                  # http://127.0.0.1:8787
+```
+
+Wrangler needs Node 22 or newer. The app itself holds a Node 18 floor, which is
+what Yandex runs.
+
+When it works locally, put the same values where a deployed Worker reads them —
+credentials as secrets, the rest as `[vars]` in `wrangler.toml`:
+
+```bash
+npx wrangler secret put UPSTREAM_API_KEY     # the router's key
+npx wrangler secret put ASSISTANT_API_KEYS   # who may call this deployment
 npx wrangler deploy
 ```
 
-For local development put the same values in `.dev.vars` (gitignored) and run
-`npx wrangler dev`.
+`wrangler deploy` prints the `*.workers.dev` URL it published to. If the account
+has never used one, it offers to register a subdomain first.
+
+`UPSTREAM_KIND`, `UPSTREAM_BASE_URL` and `UPSTREAM_MODEL` are not secrets, so
+uncomment them in `wrangler.toml` rather than adding three more secrets — unless
+the router's hostname is itself sensitive, in which case
+`npx wrangler secret put UPSTREAM_BASE_URL` works too and takes precedence.
 
 ### Vercel
 

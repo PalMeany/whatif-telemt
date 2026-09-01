@@ -1,26 +1,40 @@
 # Cloudflare Workers deployment.
 #
-#   npx wrangler secret put UPSTREAM_API_KEY
-#   npx wrangler secret put ASSISTANT_API_KEYS
+#   cp .dev.vars.example .dev.vars   # edit it, then:
+#   npm run doctor                   # checks your router before you deploy
+#   npx wrangler dev                 # http://127.0.0.1:8787
+#
+#   npx wrangler secret put UPSTREAM_API_KEY     # the router's key
+#   npx wrangler secret put ASSISTANT_API_KEYS   # who may call this deployment
 #   npx wrangler deploy
 #
-# Secrets never belong in this file — `[vars]` is committed, `wrangler secret`
-# is not.
+# Credentials never belong in this file — `[vars]` is committed, secrets are
+# not. Everything below is safe to read.
 
 name = "telemt-assistant"
 main = "adapters/cloudflare.js"
 compatibility_date = "2026-01-01"
 
 [vars]
-# Point this at your router. Leave it unset to use api.anthropic.com.
+# --- Your router ------------------------------------------------------------
+# An OpenAI-compatible router (OpenRouter, LiteLLM, anything serving
+# /v1/chat/completions). Uncomment and point at yours:
+# UPSTREAM_KIND = "openai"
 # UPSTREAM_BASE_URL = "https://router.example.com"
-# UPSTREAM_KIND = "anthropic"        # anthropic | openai
-# UPSTREAM_MODEL = "claude-opus-5"
+# UPSTREAM_MODEL = "anthropic/claude-opus-5"
+#
+# A router speaking the Anthropic Messages API instead: set only the base URL
+# and leave UPSTREAM_KIND out. Leaving both unset uses api.anthropic.com.
+# UPSTREAM_BASE_URL = "https://router.example.com"
+
 UPSTREAM_EFFORT = "high"
 UPSTREAM_MAX_TOKENS = "16000"
 UPSTREAM_SHOW_THINKING = "false"
 
-# Best-effort, per-isolate. Use Cloudflare Rate Limiting rules for a real one.
+# --- Bounds -----------------------------------------------------------------
+# Best-effort and per-isolate: this stops one client hammering one warm
+# instance and nothing more. For a real quota use a Cloudflare Rate Limiting
+# rule on the route.
 ASSISTANT_RATE_LIMIT = "30"
 ASSISTANT_RATE_WINDOW_SECS = "60"
 
