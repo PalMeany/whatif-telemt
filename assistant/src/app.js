@@ -1,6 +1,7 @@
 import { authorize, isPublic, isSealed, throttle, throttleIdentity } from "./auth.js";
 import {
   blockingResponse,
+  diagnosticsResponse,
   errorResponse,
   modelsResponse,
   normaliseRequest,
@@ -113,7 +114,11 @@ export async function handle(request, env) {
     }
   }
 
-  if (path === "/v1/models" || path === "/v1/chat/completions") {
+  if (
+    path === "/v1/models" ||
+    path === "/v1/chat/completions" ||
+    path === "/v1/diagnostics"
+  ) {
     return api(request, env, path, cors);
   }
 
@@ -154,6 +159,29 @@ async function api(request, env, path, cors) {
       );
     }
     const response = modelsResponse();
+    for (const [name, value] of Object.entries(headers)) {
+      response.headers.set(name, value);
+    }
+    return response;
+  }
+
+  if (path === "/v1/diagnostics") {
+    if (request.method !== "GET") {
+      return errorResponse(
+        new RequestError("Use GET for /v1/diagnostics.", 405, "method_not_allowed"),
+        headers,
+      );
+    }
+    const response = diagnosticsResponse({
+      config: upstreamConfig(env),
+      access: {
+        mode: isPublic(env) ? "public" : "api_key",
+        configured_keys: String(env.ASSISTANT_API_KEYS || "")
+          .split(",")
+          .filter((key) => key.trim()).length,
+        rate_limit: env.ASSISTANT_RATE_LIMIT || null,
+      },
+    });
     for (const [name, value] of Object.entries(headers)) {
       response.headers.set(name, value);
     }

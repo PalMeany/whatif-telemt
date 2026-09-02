@@ -81,6 +81,19 @@ export class UpstreamError extends Error {
 }
 
 /**
+ * A one-line description of where a request was sent, safe to show a caller.
+ *
+ * Every upstream failure carries it. Without it, a deployment whose variables
+ * never arrived reports "the upstream rejected the credential" while quietly
+ * talking to a completely different upstream than the operator configured —
+ * which is indistinguishable from a wrong key until you go looking.
+ */
+export function describeUpstream(config) {
+  const target = config.baseURL || "api.anthropic.com (default)";
+  return `${config.kind} at ${target}, model ${config.model}`;
+}
+
+/**
  * Streams one completion.
  *
  * `messages` is already normalised to `{role, content}` with a string content
@@ -89,7 +102,8 @@ export class UpstreamError extends Error {
 export async function* streamCompletion({ config, system, messages, maxTokens }) {
   if (!config.apiKey) {
     throw new UpstreamError(
-      "No upstream credential is configured. Set UPSTREAM_API_KEY.",
+      `No upstream credential is configured (${describeUpstream(config)}). ` +
+        "Set UPSTREAM_API_KEY.",
       500,
       "missing_upstream_key",
     );
@@ -134,7 +148,7 @@ async function* streamAnthropicUpstream({ config, system, messages, budget }) {
         })
       : client.messages.stream(request);
   } catch (error) {
-    throw translateAnthropicError(error);
+    throw translateAnthropicError(error, config);
   }
 
   try {
@@ -171,23 +185,24 @@ async function* streamAnthropicUpstream({ config, system, messages, budget }) {
       },
     };
   } catch (error) {
-    throw translateAnthropicError(error);
+    throw translateAnthropicError(error, config);
   }
 }
 
 /** Maps the SDK's typed errors onto what the caller should be told. */
-function translateAnthropicError(error) {
+function translateAnthropicError(error, config) {
   if (error instanceof UpstreamError) return error;
+  const where = describeUpstream(config);
   if (error instanceof Anthropic.AuthenticationError) {
     return new UpstreamError(
-      "The upstream rejected the credential.",
+      `The upstream rejected the credential (${where}).`,
       502,
       "upstream_auth_failed",
     );
   }
   if (error instanceof Anthropic.RateLimitError) {
     return new UpstreamError(
-      "The upstream is rate limiting. Retry shortly.",
+      `The upstream is rate limiting (${where}). Retry shortly.`,
       429,
       "upstream_rate_limited",
     );
@@ -195,20 +210,20 @@ function translateAnthropicError(error) {
   if (error instanceof Anthropic.BadRequestError) {
     // Usually a router that does not understand a parameter this code sent.
     return new UpstreamError(
-      `The upstream refused the request: ${error.message}`,
+      `The upstream refused the request (${where}): ${error.message}`,
       502,
       "upstream_bad_request",
     );
   }
   if (error instanceof Anthropic.APIError) {
     return new UpstreamError(
-      `Upstream error ${error.status}: ${error.message}`,
+      `Upstream error ${error.status} (${where}): ${error.message}`,
       502,
       "upstream_error",
     );
   }
   return new UpstreamError(
-    error?.message || "The upstream could not be reached.",
+    `${error?.message || "The upstream could not be reached"} (${where}).`,
     502,
     "upstream_unreachable",
   );
@@ -246,7 +261,8 @@ async function* streamOpenAiUpstream({ config, system, messages, budget }) {
     });
   } catch (error) {
     throw new UpstreamError(
-      `The upstream could not be reached: ${error?.message ?? "network error"}`,
+      `The upstream could not be reached (${describeUpstream(config)}): ` +
+        `${error?.message ?? "network error"}`,
       502,
       "upstream_unreachable",
     );
@@ -255,7 +271,8 @@ async function* streamOpenAiUpstream({ config, system, messages, budget }) {
   if (!response.ok || !response.body) {
     const detail = (await response.text().catch(() => "")).slice(0, 400);
     throw new UpstreamError(
-      `Upstream error ${response.status}${detail ? `: ${detail}` : ""}`,
+      `Upstream error ${response.status} (${describeUpstream(config)})` +
+        `${detail ? `: ${detail}` : ""}`,
       response.status === 429 ? 429 : 502,
       response.status === 429 ? "upstream_rate_limited" : "upstream_error",
     );

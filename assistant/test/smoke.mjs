@@ -527,6 +527,124 @@ await check("the model default follows the upstream shape", async () => {
   assert.equal(upstreamConfig({ UPSTREAM_MODEL: "custom" }).model, "custom");
 });
 
+/** A router that rejects the credential, the way a wrong key looks. */
+function startRejectingUpstream(shape) {
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify(
+          shape === "anthropic"
+            ? { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }
+            : { error: { message: "Incorrect API key provided", type: "invalid_request_error" } },
+        ),
+      );
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ server, port: server.address().port }),
+    );
+  });
+}
+
+await check("an upstream refusal names the upstream it actually used", async () => {
+  // The failure an operator hits when the deployment's variables never arrived:
+  // the message has to distinguish "wrong key" from "wrong upstream entirely".
+  const rejecting = await startRejectingUpstream("anthropic");
+  try {
+    const response = await handle(
+      new Request("https://assistant.example/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authed },
+        body: JSON.stringify(ask),
+      }),
+      {
+        ASSISTANT_API_KEYS: "test-key-one",
+        UPSTREAM_API_KEY: "a-router-key-sent-to-the-wrong-place",
+        UPSTREAM_BASE_URL: `http://127.0.0.1:${rejecting.port}`,
+      },
+    );
+    assert.equal(response.status, 502);
+    const message = (await response.json()).error.message;
+    assert.match(message, /rejected the credential/);
+    // The three facts that turn the symptom into a cause.
+    assert.match(message, /anthropic at/);
+    assert.match(message, new RegExp(`127\\.0\\.0\\.1:${rejecting.port}`));
+    assert.match(message, /model claude-opus-5/);
+  } finally {
+    rejecting.server.close();
+  }
+});
+
+await check("the OpenAI path also names its upstream on failure", async () => {
+  const rejecting = await startRejectingUpstream("openai");
+  try {
+    const response = await handle(
+      new Request("https://assistant.example/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authed },
+        body: JSON.stringify(ask),
+      }),
+      {
+        ASSISTANT_API_KEYS: "test-key-one",
+        UPSTREAM_KIND: "openai",
+        UPSTREAM_API_KEY: "wrong",
+        UPSTREAM_BASE_URL: `http://127.0.0.1:${rejecting.port}`,
+        UPSTREAM_MODEL: "anthropic/claude-opus-5",
+      },
+    );
+    assert.equal(response.status, 502);
+    const message = (await response.json()).error.message;
+    assert.match(message, /Upstream error 401/);
+    assert.match(message, /openai at/);
+    assert.match(message, /model anthropic\/claude-opus-5/);
+  } finally {
+    rejecting.server.close();
+  }
+});
+
+await check("diagnostics report what the deployment resolved", async () => {
+  const response = await handle(
+    new Request("https://assistant.example/v1/diagnostics", { headers: authed }),
+    env,
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.upstream.kind, "openai");
+  assert.equal(payload.upstream.model, "router/claude-opus-5");
+  assert.equal(payload.upstream.api_key_set, true);
+  // The key itself must never appear, only its shape.
+  assert.equal(JSON.stringify(payload).includes("router-secret"), false);
+  assert.equal(payload.upstream.api_key_length, "router-secret".length);
+  assert.equal(payload.access.mode, "api_key");
+  assert.equal(payload.access.configured_keys, 2);
+  assert.equal(payload.hint, null);
+});
+
+await check("diagnostics call out variables that never arrived", async () => {
+  // Exactly the misconfiguration that produces a confusing 502: a router key
+  // set, but UPSTREAM_KIND and UPSTREAM_BASE_URL missing from the deployment.
+  const response = await handle(
+    new Request("https://assistant.example/v1/diagnostics", { headers: authed }),
+    { ASSISTANT_API_KEYS: "test-key-one", UPSTREAM_API_KEY: "router-key" },
+  );
+  const payload = await response.json();
+  assert.equal(payload.upstream.resolved_target, "https://api.anthropic.com");
+  assert.match(payload.hint, /did not reach this deployment/);
+  assert.match(payload.hint, /\.dev\.vars` is local only/);
+});
+
+await check("diagnostics need the same credential as everything else", async () => {
+  const response = await handle(
+    new Request("https://assistant.example/v1/diagnostics"),
+    env,
+  );
+  assert.equal(response.status, 401);
+});
+
 anthropic.server.close();
 server.close();
 
