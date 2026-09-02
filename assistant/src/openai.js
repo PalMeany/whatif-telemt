@@ -1,5 +1,10 @@
 import { systemPrompt } from "./knowledge.js";
-import { describeUpstream, streamCompletion, UpstreamError } from "./upstream.js";
+import {
+  describeKeyShape,
+  describeUpstream,
+  streamCompletion,
+  UpstreamError,
+} from "./upstream.js";
 
 /**
  * The OpenAI-compatible surface.
@@ -51,7 +56,19 @@ export function errorResponse(error, extraHeaders = {}) {
  *
  * No credential is echoed — only whether one is set and how long it is.
  */
-export function diagnosticsResponse({ config, access }) {
+export function diagnosticsResponse({ config, access, assistantKeys = [] }) {
+  const upstreamShape = describeKeyShape(config.apiKey);
+  // The mix-up that produces the most confusing failure: an upstream refusing
+  // "the key format" is describing the *other* key, and nothing in the error
+  // says which of the two a deployment actually sent.
+  const swapped = assistantKeys.some((key) => key === config.apiKey);
+  const looksLikeAnAssistantKey =
+    !swapped &&
+    // `other` is the catch-all, so two keys landing in it says nothing about
+    // either. Only a recognised shape is evidence of anything.
+    !["other", "unset"].includes(upstreamShape) &&
+    assistantKeys.some((key) => describeKeyShape(key) === upstreamShape);
+
   return Response.json({
     object: "diagnostics",
     served_model: SERVED_MODEL,
@@ -63,6 +80,8 @@ export function diagnosticsResponse({ config, access }) {
       model: config.model,
       api_key_set: Boolean(config.apiKey),
       api_key_length: config.apiKey ? config.apiKey.length : 0,
+      api_key_shape: upstreamShape,
+      api_key_had_whitespace: Boolean(config.apiKeyHadWhitespace),
       max_tokens: config.maxTokens,
       effort: config.effort,
       show_thinking: config.showThinking,
@@ -70,14 +89,48 @@ export function diagnosticsResponse({ config, access }) {
       first_party: config.firstParty,
     },
     access,
-    hint:
-      config.kind === "anthropic" && !config.baseURL
-        ? "UPSTREAM_KIND and UPSTREAM_BASE_URL are unset, so requests go to " +
-          "api.anthropic.com. If you meant to use a router, those variables " +
-          "did not reach this deployment — `.dev.vars` is local only; set them " +
-          "in wrangler.toml [vars] or with `wrangler secret put`, then redeploy."
-        : null,
+    hint: diagnoseHint({
+      config,
+      swapped,
+      looksLikeAnAssistantKey,
+      upstreamShape,
+    }),
   });
+}
+
+/** The single most likely misconfiguration, in words, or null. */
+function diagnoseHint({ config, swapped, looksLikeAnAssistantKey, upstreamShape }) {
+  if (swapped) {
+    return (
+      "UPSTREAM_API_KEY is byte-for-byte one of ASSISTANT_API_KEYS. The two " +
+      "secrets are swapped: UPSTREAM_API_KEY must be your model router's key, " +
+      "and ASSISTANT_API_KEYS is what callers of this deployment present. Run " +
+      "`wrangler secret put UPSTREAM_API_KEY` with the router's key."
+    );
+  }
+  if (config.apiKeyHadWhitespace) {
+    return (
+      "UPSTREAM_API_KEY had leading or trailing whitespace, which this " +
+      "deployment trims. `echo \"sk-…\" | wrangler secret put` stores the " +
+      "newline too — pipe with `printf %s` or paste at the prompt instead."
+    );
+  }
+  if (config.kind === "anthropic" && !config.baseURL) {
+    return (
+      "UPSTREAM_KIND and UPSTREAM_BASE_URL are unset, so requests go to " +
+      "api.anthropic.com. If you meant to use a router, those variables did " +
+      "not reach this deployment — `.dev.vars` is local only; set them in " +
+      "wrangler.toml [vars] or with `wrangler secret put`, then redeploy."
+    );
+  }
+  if (looksLikeAnAssistantKey) {
+    return (
+      `UPSTREAM_API_KEY has the same shape (${upstreamShape}) as this ` +
+      "deployment's own keys. If the router rejects it as the wrong format, " +
+      "the two secrets are probably swapped."
+    );
+  }
+  return null;
 }
 
 /** `GET /v1/models`. */
