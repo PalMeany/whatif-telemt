@@ -77,6 +77,9 @@ touches a live proxy against <code>docs/Config_params</code> before applying it.
     <p>Point any OpenAI client at this origin. The model id is
        <code>${escapeHtml(SERVED_MODEL)}</code>.</p>
     <pre id="curl-sample"></pre>
+    <p><code>GET /v1/diagnostics</code>, with the same key, reports which
+       upstream this deployment actually resolved — the first thing to check
+       when answers fail but the key is right.</p>
     <div class="row">
       <button value="close" class="ghost">Close</button>
     </div>
@@ -86,8 +89,10 @@ touches a live proxy against <code>docs/Config_params</code> before applying it.
 <dialog id="key-dialog">
   <form method="dialog" id="key-form">
     <h2>API key</h2>
-    <p>This deployment requires a key. It is kept in this browser only and sent
-       as a bearer token.</p>
+    <p>One of the keys in this deployment's <code>ASSISTANT_API_KEYS</code> —
+       <strong>not</strong> your model router's key. That one lives in
+       <code>UPSTREAM_API_KEY</code> on the server and never reaches the browser.
+       This is kept in this browser only and sent as a bearer token.</p>
     <input id="key-input" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
     <div class="row">
       <button value="cancel" class="ghost" type="button" id="key-cancel">Cancel</button>

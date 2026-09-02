@@ -1,5 +1,5 @@
 import { systemPrompt } from "./knowledge.js";
-import { streamCompletion, UpstreamError } from "./upstream.js";
+import { describeUpstream, streamCompletion, UpstreamError } from "./upstream.js";
 
 /**
  * The OpenAI-compatible surface.
@@ -38,6 +38,45 @@ export function errorResponse(error, extraHeaders = {}) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json; charset=utf-8", ...extraHeaders },
+  });
+}
+
+/**
+ * `GET /v1/diagnostics` — what this deployment resolved, behind the same auth.
+ *
+ * Exists because a Worker whose variables never arrived fails in a way that
+ * looks exactly like a wrong key: `.dev.vars` is local-only, so a setup that
+ * passed on a laptop can talk to a different upstream once deployed. Reporting
+ * the resolved upstream is the shortest path from the symptom to the cause.
+ *
+ * No credential is echoed — only whether one is set and how long it is.
+ */
+export function diagnosticsResponse({ config, access }) {
+  return Response.json({
+    object: "diagnostics",
+    served_model: SERVED_MODEL,
+    upstream: {
+      summary: describeUpstream(config),
+      kind: config.kind,
+      base_url: config.baseURL || null,
+      resolved_target: config.baseURL || "https://api.anthropic.com",
+      model: config.model,
+      api_key_set: Boolean(config.apiKey),
+      api_key_length: config.apiKey ? config.apiKey.length : 0,
+      max_tokens: config.maxTokens,
+      effort: config.effort,
+      show_thinking: config.showThinking,
+      refusal_fallbacks: config.fallbacks,
+      first_party: config.firstParty,
+    },
+    access,
+    hint:
+      config.kind === "anthropic" && !config.baseURL
+        ? "UPSTREAM_KIND and UPSTREAM_BASE_URL are unset, so requests go to " +
+          "api.anthropic.com. If you meant to use a router, those variables " +
+          "did not reach this deployment — `.dev.vars` is local only; set them " +
+          "in wrangler.toml [vars] or with `wrangler secret put`, then redeploy."
+        : null,
   });
 }
 

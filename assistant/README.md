@@ -63,6 +63,32 @@ uncomment them in `wrangler.toml` rather than adding three more secrets — unle
 the router's hostname is itself sensitive, in which case
 `npx wrangler secret put UPSTREAM_BASE_URL` works too and takes precedence.
 
+> **`.dev.vars` is local only.** It is what `wrangler dev` reads and it is never
+> uploaded. A setup that works locally and fails once deployed is almost always
+> this: the router variables live in `.dev.vars` and never reached the Worker,
+> so it falls back to `api.anthropic.com` and rejects the router's key. Ask the
+> deployment what it resolved rather than guessing:
+>
+> ```bash
+> curl -s https://your-worker.workers.dev/v1/diagnostics \
+>   -H 'authorization: Bearer YOUR_ASSISTANT_KEY' | jq .upstream
+> ```
+>
+> `kind: "anthropic"` with `resolved_target: "https://api.anthropic.com"` when
+> you configured a router means exactly that, and the `hint` field says so.
+
+### Two different keys
+
+They are easy to mix up, and mixing them up produces two confusing errors:
+
+| Key | Where it lives | Who sends it |
+| --- | --- | --- |
+| `ASSISTANT_API_KEYS` | This deployment | You, or your OpenAI client, as `Authorization: Bearer` |
+| `UPSTREAM_API_KEY` | This deployment, as a secret | The Worker, to your router. It never reaches a browser. |
+
+Putting the router's key in the site's key box gives `The API key is not valid.`
+— it is being checked against `ASSISTANT_API_KEYS`, which it is not in.
+
 ### Vercel
 
 ```bash
@@ -203,6 +229,7 @@ curl https://your-deployment/v1/chat/completions \
 | `GET /` | The chat page. |
 | `POST /v1/chat/completions` | Streaming or blocking completion. |
 | `GET /v1/models` | Advertises one model, `telemt-assistant`. |
+| `GET /v1/diagnostics` | What this deployment resolved: upstream kind, target, model, whether a key is set. Never echoes the key. |
 | `GET /healthz` | Liveness, no credential. |
 
 The served model id is always `telemt-assistant` regardless of what the upstream
