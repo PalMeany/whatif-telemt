@@ -7,7 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { upstreamConfig } from "../src/upstream.js";
+import { describeKeyShape, upstreamConfig } from "../src/upstream.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -46,7 +46,11 @@ say(true, `max tokens ${config.maxTokens}, effort ${config.effort}`);
 if (!config.apiKey) {
   fail("no UPSTREAM_API_KEY", "Set it in .dev.vars or the environment.");
 } else {
-  say(true, `api key   set (${config.apiKey.length} chars)`);
+  say(true, `api key   ${describeKeyShape(config.apiKey)}, ${config.apiKey.length} chars`);
+  if (config.apiKeyHadWhitespace) {
+    warn("UPSTREAM_API_KEY had surrounding whitespace and was trimmed");
+    console.log('      `echo "sk-…" | wrangler secret put` stores the newline too.');
+  }
 }
 
 if (config.baseURL) {
@@ -76,6 +80,24 @@ if (isPublic) {
   );
 } else {
   say(true, `${keys.length} api key${keys.length === 1 ? "" : "s"} configured`);
+  // The mix-up that reads as "the router rejected your key" when the router is
+  // in fact describing a completely different key.
+  if (keys.includes(config.apiKey)) {
+    fail(
+      "UPSTREAM_API_KEY is one of ASSISTANT_API_KEYS",
+      "The two secrets are swapped. UPSTREAM_API_KEY is your router's key; " +
+        "ASSISTANT_API_KEYS is what callers of this deployment present.",
+    );
+  } else if (
+    config.apiKey &&
+    !["other", "unset"].includes(describeKeyShape(config.apiKey)) &&
+    keys.some((k) => describeKeyShape(k) === describeKeyShape(config.apiKey))
+  ) {
+    warn(
+      `UPSTREAM_API_KEY has the same shape (${describeKeyShape(config.apiKey)}) as an assistant key`,
+    );
+    console.log("      If the router rejects its format, they are swapped.");
+  }
   const weak = keys.filter((k) => k.length < 24);
   if (weak.length) {
     // A warning, not a failure: a short key still works, it is just guessable.

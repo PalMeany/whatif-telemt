@@ -172,13 +172,16 @@ async function api(request, env, path, cors) {
         headers,
       );
     }
+    const assistantKeys = String(env.ASSISTANT_API_KEYS || "")
+      .split(",")
+      .map((key) => key.trim())
+      .filter(Boolean);
     const response = diagnosticsResponse({
       config: upstreamConfig(env),
+      assistantKeys,
       access: {
         mode: isPublic(env) ? "public" : "api_key",
-        configured_keys: String(env.ASSISTANT_API_KEYS || "")
-          .split(",")
-          .filter((key) => key.trim()).length,
+        configured_keys: assistantKeys.length,
         rate_limit: env.ASSISTANT_RATE_LIMIT || null,
       },
     });

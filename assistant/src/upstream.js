@@ -26,7 +26,11 @@ const FIRST_PARTY_HOSTS = new Set(["api.anthropic.com"]);
 export function upstreamConfig(env) {
   const kind = (env.UPSTREAM_KIND || "anthropic").toLowerCase();
   const baseURL = env.UPSTREAM_BASE_URL || env.ANTHROPIC_BASE_URL || "";
-  const apiKey = env.UPSTREAM_API_KEY || env.ANTHROPIC_API_KEY || "";
+  // Trimmed on purpose. `echo "sk-…" | wrangler secret put` stores the newline
+  // too, and an upstream then rejects a key that looks correct everywhere the
+  // operator can see it.
+  const rawApiKey = env.UPSTREAM_API_KEY || env.ANTHROPIC_API_KEY || "";
+  const apiKey = rawApiKey.trim();
   const model =
     env.UPSTREAM_MODEL ||
     (kind === "openai" ? "anthropic/claude-opus-5" : "claude-opus-5");
@@ -44,6 +48,9 @@ export function upstreamConfig(env) {
     kind,
     baseURL,
     apiKey,
+    // Reported by diagnostics so a key mangled in transit is visible without
+    // anyone having to print the key itself.
+    apiKeyHadWhitespace: rawApiKey !== apiKey,
     model,
     firstParty,
     effort: env.UPSTREAM_EFFORT || "high",
@@ -78,6 +85,22 @@ export class UpstreamError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+/**
+ * Classifies a credential without revealing it.
+ *
+ * Enough to spot the mistake that produces the most confusing failure of all —
+ * the two keys a deployment holds swapped round — while leaking nothing: an
+ * upstream that rejects a key "because the format is wrong" is describing this
+ * shape, and the shape is all anyone needs to see the mix-up.
+ */
+export function describeKeyShape(key) {
+  if (!key) return "unset";
+  if (/^sk-/.test(key)) return "sk-prefixed";
+  if (/^[A-Za-z0-9+/]{16,}={0,2}$/.test(key)) return "base64-like";
+  if (/^[0-9a-f]{16,}$/i.test(key)) return "hex-like";
+  return "other";
 }
 
 /**

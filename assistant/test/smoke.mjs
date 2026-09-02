@@ -645,6 +645,91 @@ await check("diagnostics need the same credential as everything else", async () 
   assert.equal(response.status, 401);
 });
 
+await check("swapped secrets are named outright", async () => {
+  // The failure an operator cannot read from the upstream's own words: the
+  // router says "that key format is wrong" and means the *other* key.
+  const assistantKey = "5sgZrjS6Q/cFd94v+mzofna3G+x3kS1wD3JdrOf4ZBs=";
+  const response = await handle(
+    new Request("https://assistant.example/v1/diagnostics", {
+      headers: { authorization: `Bearer ${assistantKey}` },
+    }),
+    {
+      ASSISTANT_API_KEYS: assistantKey,
+      UPSTREAM_KIND: "openai",
+      UPSTREAM_BASE_URL: "https://api.example.com/v1",
+      UPSTREAM_API_KEY: assistantKey,
+    },
+  );
+  const payload = await response.json();
+  assert.equal(payload.upstream.api_key_shape, "base64-like");
+  assert.match(payload.hint, /byte-for-byte one of ASSISTANT_API_KEYS/);
+  assert.equal(JSON.stringify(payload).includes(assistantKey), false);
+});
+
+await check("a key of the same shape as the deployment's own is flagged", async () => {
+  const response = await handle(
+    new Request("https://assistant.example/v1/diagnostics", {
+      headers: { authorization: "Bearer AAAAAAAAAAAAAAAAAAAAAAAA" },
+    }),
+    {
+      ASSISTANT_API_KEYS: "AAAAAAAAAAAAAAAAAAAAAAAA",
+      UPSTREAM_KIND: "openai",
+      UPSTREAM_BASE_URL: "https://api.example.com/v1",
+      UPSTREAM_API_KEY: "BBBBBBBBBBBBBBBBBBBBBBBB",
+    },
+  );
+  const payload = await response.json();
+  assert.match(payload.hint, /same shape \(base64-like\)/);
+});
+
+await check("a correctly-shaped router key raises nothing", async () => {
+  const response = await handle(
+    new Request("https://assistant.example/v1/diagnostics", {
+      headers: { authorization: "Bearer 5sgZrjS6Q/cFd94v+mzofna3G+x3kS1wD3JdrOf4ZBs=" },
+    }),
+    {
+      ASSISTANT_API_KEYS: "5sgZrjS6Q/cFd94v+mzofna3G+x3kS1wD3JdrOf4ZBs=",
+      UPSTREAM_KIND: "openai",
+      UPSTREAM_BASE_URL: "https://api.claudy.shop/v1",
+      UPSTREAM_API_KEY: "sk-a-real-router-key-value",
+      UPSTREAM_MODEL: "claude-opus-5",
+    },
+  );
+  const payload = await response.json();
+  assert.equal(payload.upstream.api_key_shape, "sk-prefixed");
+  assert.equal(payload.upstream.resolved_target, "https://api.claudy.shop/v1");
+  assert.equal(payload.hint, null);
+});
+
+await check("a secret stored with a trailing newline is trimmed and reported", async () => {
+  const response = await handle(
+    new Request("https://assistant.example/v1/diagnostics", { headers: authed }),
+    {
+      ASSISTANT_API_KEYS: "test-key-one",
+      UPSTREAM_KIND: "openai",
+      UPSTREAM_BASE_URL: "https://api.example.com/v1",
+      UPSTREAM_API_KEY: "sk-router-key\n",
+    },
+  );
+  const payload = await response.json();
+  assert.equal(payload.upstream.api_key_had_whitespace, true);
+  assert.equal(payload.upstream.api_key_length, "sk-router-key".length);
+  assert.match(payload.hint, /leading or trailing whitespace/);
+});
+
+await check("a trimmed key is what actually reaches the upstream", async () => {
+  seen.length = 0;
+  await handle(
+    new Request("https://assistant.example/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...authed },
+      body: JSON.stringify(ask),
+    }),
+    { ...env, UPSTREAM_API_KEY: "  router-secret\n" },
+  );
+  assert.equal(seen.at(-1).auth, "Bearer router-secret");
+});
+
 anthropic.server.close();
 server.close();
 
